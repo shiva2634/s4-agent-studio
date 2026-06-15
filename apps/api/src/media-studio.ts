@@ -1,0 +1,664 @@
+import type Database from "better-sqlite3";
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+export type MediaProjectStatus = "ACTIVE" | "ARCHIVED";
+export type MediaSender = "user" | "director";
+export type MediaBriefStatus = "DRAFT" | "APPROVED";
+export type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
+
+export type MediaAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
+
+export type IdFactory = () => string;
+
+export const mediaAssetMaxBytes = 100 * 1024 * 1024;
+export const mediaAssetMimeTypes = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/wav",
+  "audio/x-wav"
+]);
+
+export class MediaStudioError extends Error {
+  constructor(message: string, readonly statusCode: number) {
+    super(message);
+  }
+}
+
+export type MediaProject = {
+  id: string;
+  name: string;
+  description: string | null;
+  aspectRatio: string;
+  status: MediaProjectStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaChatMessage = {
+  id: string;
+  mediaProjectId: string;
+  sender: MediaSender;
+  content: string;
+  createdAt: string;
+};
+
+export type MediaBrief = {
+  id: string;
+  mediaProjectId: string;
+  title: string;
+  logline: string;
+  audience: string;
+  style: string;
+  durationSeconds: number;
+  constraintsJson: string;
+  status: MediaBriefStatus;
+  approvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaScene = {
+  id: string;
+  mediaProjectId: string;
+  briefId: string;
+  position: number;
+  title: string;
+  description: string;
+  durationSeconds: number;
+  dialogue: string;
+  visualPrompt: string;
+  aspectRatio: string;
+  status: MediaSceneStatus;
+  approvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaAsset = {
+  id: string;
+  mediaProjectId: string;
+  sceneId: string | null;
+  kind: string;
+  label: string;
+  source: string;
+  status: string;
+  fileName: string | null;
+  originalName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  checksumSha256: string | null;
+  localPath: string | null;
+  inspectionJson: string | null;
+  qcStatus: string;
+  qcIssuesJson: string;
+  previewPath: string | null;
+  thumbnailPath: string | null;
+  metadataJson: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaGenerationJob = {
+  id: string;
+  mediaProjectId: string;
+  providerKey: string;
+  status: string;
+  requestJson: string;
+  resultJson: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const mediaProviderRegistry = [
+  { key: "google-flow", name: "Google Flow", capabilities: ["storyboard", "video-generation"], status: "stubbed" },
+  { key: "wan-2.2", name: "Wan 2.2", capabilities: ["text-to-video", "image-to-video"], status: "stubbed" },
+  { key: "longcat-avatar", name: "LongCat Avatar", capabilities: ["avatar-video"], status: "stubbed" },
+  { key: "ovi", name: "Ovi", capabilities: ["text-to-video"], status: "stubbed" },
+  { key: "ltx", name: "LTX", capabilities: ["video-generation", "editing"], status: "stubbed" }
+] as const;
+
+type BriefDraft = {
+  title: string;
+  logline: string;
+  audience: string;
+  style: string;
+  durationSeconds: number;
+  constraints: string[];
+  scenes: Array<{ title: string; description: string; durationSeconds: number; assetLabel: string }>;
+};
+
+export type MediaProductionPackage = {
+  exportedAt: string;
+  project: MediaProject;
+  brief: (Omit<MediaBrief, "constraintsJson"> & { constraints: string[] }) | null;
+  scenes: Array<MediaScene & { flowPrompt: string; assets: MediaAsset[] }>;
+  assets: MediaAsset[];
+};
+
+export function listMediaProjects(db: Database.Database, includeArchived = false): MediaProject[] {
+  const where = includeArchived ? "" : "WHERE status='ACTIVE'";
+  return db.prepare(`SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects ${where} ORDER BY created_at DESC`).all() as MediaProject[];
+}
+
+export function createMediaProject(db: Database.Database, input: { id: string; name: string; description?: string; now: string }, audit: MediaAuditWriter): MediaProject {
+  db.prepare("INSERT INTO media_projects (id,name,description,aspect_ratio,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+    .run(input.id, input.name, input.description ?? null, "16:9", "ACTIVE", input.now, input.now);
+  let jobIndex = 0;
+  seedProviderJobs(db, input.id, input.now, () => `${input.id}-job-${++jobIndex}`);
+  audit("MEDIA_PROJECT_CREATED", `Media project ${input.name} created`, { projectId: input.id, payload: { name: input.name } });
+  return getMediaProjectOrThrow(db, input.id);
+}
+
+export function updateMediaProject(db: Database.Database, projectId: string, input: { name?: string; description?: string; now: string }, audit: MediaAuditWriter): MediaProject {
+  const existing = getActiveMediaProjectOrThrow(db, projectId);
+  db.prepare("UPDATE media_projects SET name=?,description=?,updated_at=? WHERE id=?")
+    .run(input.name ?? existing.name, input.description ?? existing.description, input.now, projectId);
+  audit("MEDIA_PROJECT_UPDATED", `Media project ${input.name ?? existing.name} updated`, { projectId, payload: { name: input.name, description: input.description } });
+  return getMediaProjectOrThrow(db, projectId);
+}
+
+export function archiveMediaProject(db: Database.Database, projectId: string, timestamp: string, audit: MediaAuditWriter): MediaProject & { alreadyArchived: boolean } {
+  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
+  if (!project) throw new MediaStudioError("Media project not found", 404);
+  if (project.status === "ARCHIVED") return { ...project, alreadyArchived: true };
+  db.prepare("UPDATE media_projects SET status='ARCHIVED',archived_at=?,archived_by=?,updated_at=? WHERE id=?")
+    .run(timestamp, "local-user", timestamp, projectId);
+  audit("MEDIA_PROJECT_ARCHIVED", `Media project ${project.name} archived`, {
+    projectId,
+    payload: { projectId, projectName: project.name, previousStatus: project.status, newStatus: "ARCHIVED", timestamp }
+  });
+  return { ...getMediaProjectOrThrow(db, projectId), alreadyArchived: false };
+}
+
+export function getMediaProjectBundle(db: Database.Database, projectId: string) {
+  const project = getMediaProjectOrThrow(db, projectId);
+  return {
+    project,
+    messages: listMediaMessages(db, projectId),
+    brief: getMediaBrief(db, projectId),
+    scenes: listMediaScenes(db, projectId),
+    assets: listMediaAssets(db, projectId),
+    generationJobs: listGenerationJobs(db, projectId),
+    providers: mediaProviderRegistry
+  };
+}
+
+export function updateMediaBrief(db: Database.Database, projectId: string, input: {
+  title: string;
+  logline: string;
+  audience: string;
+  style: string;
+  durationSeconds: number;
+  constraints: string[];
+  now: string;
+}, audit: MediaAuditWriter): MediaBrief {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const existing = getMediaBrief(db, projectId);
+  if (!existing) throw new MediaStudioError("Media brief not found", 404);
+  db.prepare(`UPDATE media_video_briefs SET title=?,logline=?,audience=?,style=?,duration_seconds=?,constraints_json=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=?`)
+    .run(input.title, input.logline, input.audience, input.style, input.durationSeconds, JSON.stringify(input.constraints), input.now, existing.id);
+  audit("MEDIA_BRIEF_UPDATED", `Video brief ${input.title} updated`, { projectId, payload: { briefId: existing.id } });
+  return getMediaBrief(db, projectId) as MediaBrief;
+}
+
+export function approveMediaBrief(db: Database.Database, projectId: string, timestamp: string, audit: MediaAuditWriter): MediaBrief {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const brief = getMediaBrief(db, projectId);
+  if (!brief) throw new MediaStudioError("Media brief not found", 404);
+  db.prepare("UPDATE media_video_briefs SET status='APPROVED',approved_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, brief.id);
+  audit("MEDIA_BRIEF_APPROVED", `Video brief ${brief.title} approved`, { projectId, payload: { briefId: brief.id, timestamp } });
+  return getMediaBrief(db, projectId) as MediaBrief;
+}
+
+export function updateMediaScene(db: Database.Database, projectId: string, sceneId: string, input: {
+  title: string;
+  durationSeconds: number;
+  dialogue: string;
+  visualPrompt: string;
+  aspectRatio: string;
+  status: MediaSceneStatus;
+  now: string;
+}, audit: MediaAuditWriter): MediaScene {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const existing = getMediaSceneOrThrow(db, projectId, sceneId);
+  const promptChanged = existing.title !== input.title || existing.dialogue !== input.dialogue || existing.visualPrompt !== input.visualPrompt || existing.aspectRatio !== input.aspectRatio || existing.durationSeconds !== input.durationSeconds;
+  db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status=?,approved_at=?,updated_at=? WHERE id=? AND media_project_id=?`)
+    .run(input.title, input.visualPrompt, input.durationSeconds, input.dialogue, input.visualPrompt, input.aspectRatio, input.status, input.status === "APPROVED" ? (existing.approvedAt ?? input.now) : null, input.now, sceneId, projectId);
+  audit("MEDIA_SCENE_UPDATED", `Scene ${input.title} updated`, { projectId, payload: { sceneId, status: input.status } });
+  if (promptChanged) {
+    audit("MEDIA_FLOW_PROMPT_UPDATED", `Flow prompt updated for scene ${input.title}`, { projectId, payload: { sceneId, flowPrompt: buildGoogleFlowPrompt({ ...existing, ...input }) } });
+  }
+  return getMediaSceneOrThrow(db, projectId, sceneId);
+}
+
+export function approveMediaScene(db: Database.Database, projectId: string, sceneId: string, timestamp: string, audit: MediaAuditWriter): MediaScene {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  db.prepare("UPDATE media_scenes SET status='APPROVED',approved_at=?,updated_at=? WHERE id=? AND media_project_id=?").run(timestamp, timestamp, sceneId, projectId);
+  audit("MEDIA_SCENE_APPROVED", `Scene ${scene.title} approved`, { projectId, payload: { sceneId, timestamp } });
+  return getMediaSceneOrThrow(db, projectId, sceneId);
+}
+
+export function rejectMediaScene(db: Database.Database, projectId: string, sceneId: string, timestamp: string, audit: MediaAuditWriter): MediaScene {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  db.prepare("UPDATE media_scenes SET status='REJECTED',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?").run(timestamp, sceneId, projectId);
+  audit("MEDIA_SCENE_REJECTED", `Scene ${scene.title} rejected`, { projectId, payload: { sceneId, timestamp } });
+  return getMediaSceneOrThrow(db, projectId, sceneId);
+}
+
+export function getSceneFlowPrompt(db: Database.Database, projectId: string, sceneId: string): { sceneId: string; prompt: string } {
+  getMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  return { sceneId, prompt: buildGoogleFlowPrompt(scene) };
+}
+
+export function reorderMediaScenes(db: Database.Database, projectId: string, sceneIds: string[], timestamp: string, audit: MediaAuditWriter): MediaScene[] {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const scenes = listMediaScenes(db, projectId);
+  const existing = new Set(scenes.map((scene) => scene.id));
+  if (sceneIds.length !== scenes.length || sceneIds.some((sceneId) => !existing.has(sceneId)) || new Set(sceneIds).size !== sceneIds.length) {
+    throw new MediaStudioError("Scene reorder must include each scene exactly once", 400);
+  }
+  const update = db.prepare("UPDATE media_scenes SET position=?,updated_at=? WHERE id=? AND media_project_id=?");
+  for (const [index, sceneId] of sceneIds.entries()) {
+    update.run(index + 1, timestamp, sceneId, projectId);
+  }
+  audit("MEDIA_SCENES_REORDERED", "Media scenes reordered", { projectId, payload: { sceneIds, timestamp } });
+  return listMediaScenes(db, projectId);
+}
+
+export function importSceneAsset(db: Database.Database, projectId: string, sceneId: string, input: {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  label?: string;
+  now: string;
+}, audit: MediaAuditWriter): MediaAsset {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind) throw new MediaStudioError("Only allowed image, video, and audio assets can be imported", 400);
+  const metadata = { importedVia: "manual-upload", sceneId, originalStatus: scene.status };
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,mime_type,size_bytes,metadata_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, sceneId, kind, input.label ?? input.fileName, "user-import", "IMPORTED", input.fileName, input.mimeType, input.sizeBytes, JSON.stringify(metadata), input.now, input.now);
+  db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
+  audit("MEDIA_SCENE_ASSET_IMPORTED", `Asset ${input.fileName} imported for scene ${scene.title}`, {
+    projectId,
+    payload: { sceneId, assetId: input.id, fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.sizeBytes }
+  });
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_assets WHERE id=?`).get(input.id) as MediaAsset;
+}
+
+export async function uploadSceneAsset(db: Database.Database, projectId: string, sceneId: string, input: {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  bytes: Buffer;
+  now: string;
+  storageRoot?: string;
+}, audit: MediaAuditWriter): Promise<MediaAsset> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  validateAssetUpload(input.originalName, input.mimeType, input.bytes.length);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind) throw new MediaStudioError("Only allowed image, video, and audio assets can be uploaded", 400);
+  const storageRoot = resolveStorageRoot(input.storageRoot);
+  const safeName = safeAssetFileName(input.id, input.originalName, input.mimeType);
+  const localPath = resolveAssetPath(storageRoot, projectId, sceneId, safeName);
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, input.bytes, { flag: "wx" });
+  const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  const metadata = { uploadedVia: "multipart", sceneId, originalStatus: scene.status };
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, sceneId, kind, input.originalName, "local-upload", "UPLOADED", safeName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify(metadata), input.now, input.now);
+  db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
+  audit("MEDIA_SCENE_ASSET_UPLOADED", `Asset ${input.originalName} uploaded for scene ${scene.title}`, {
+    projectId,
+    payload: { sceneId, assetId: input.id, originalName: input.originalName, mimeType: input.mimeType, sizeBytes: input.bytes.length, checksumSha256: checksum, localPath }
+  });
+  return getMediaAssetOrThrow(db, projectId, input.id);
+}
+
+export async function replaceSceneAsset(db: Database.Database, projectId: string, sceneId: string, assetId: string, input: {
+  originalName: string;
+  mimeType: string;
+  bytes: Buffer;
+  now: string;
+  storageRoot?: string;
+}, audit: MediaAuditWriter): Promise<MediaAsset> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  const existing = getMediaAssetOrThrow(db, projectId, assetId);
+  if (existing.sceneId !== sceneId) throw new MediaStudioError("Media asset is not associated with this scene", 404);
+  validateAssetUpload(input.originalName, input.mimeType, input.bytes.length);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind) throw new MediaStudioError("Only allowed image, video, and audio assets can be uploaded", 400);
+  const storageRoot = resolveStorageRoot(input.storageRoot);
+  const safeName = safeAssetFileName(assetId, input.originalName, input.mimeType);
+  const nextLocalPath = resolveAssetPath(storageRoot, projectId, sceneId, safeName);
+  await fs.mkdir(path.dirname(nextLocalPath), { recursive: true });
+  await fs.writeFile(nextLocalPath, input.bytes);
+  if (existing.localPath && path.resolve(existing.localPath) !== path.resolve(nextLocalPath)) {
+    await removeStoredAssetFile(existing.localPath, storageRoot);
+  }
+  if (existing.previewPath) await removeStoredAssetFile(existing.previewPath, storageRoot);
+  if (existing.thumbnailPath) await removeStoredAssetFile(existing.thumbnailPath, storageRoot);
+  const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  const metadata = { uploadedVia: "multipart-replace", sceneId, replacedAssetId: assetId, previousChecksumSha256: existing.checksumSha256 };
+  db.prepare(`UPDATE media_assets SET kind=?,label=?,source='local-upload',status='UPLOADED',file_name=?,original_name=?,mime_type=?,size_bytes=?,checksum_sha256=?,local_path=?,inspection_json=NULL,qc_status='PENDING',qc_issues_json='[]',preview_path=NULL,thumbnail_path=NULL,metadata_json=?,updated_at=? WHERE id=? AND media_project_id=?`)
+    .run(kind, input.originalName, safeName, input.originalName, input.mimeType, input.bytes.length, checksum, nextLocalPath, JSON.stringify(metadata), input.now, assetId, projectId);
+  db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
+  audit("MEDIA_SCENE_ASSET_REPLACED", `Asset ${input.originalName} replaced`, {
+    projectId,
+    payload: { sceneId, assetId, originalName: input.originalName, mimeType: input.mimeType, sizeBytes: input.bytes.length, checksumSha256: checksum, localPath: nextLocalPath }
+  });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export async function deleteSceneAsset(db: Database.Database, projectId: string, sceneId: string, assetId: string, timestamp: string, audit: MediaAuditWriter, storageRoot?: string): Promise<{ deleted: true }> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  if (asset.sceneId !== sceneId) throw new MediaStudioError("Media asset is not associated with this scene", 404);
+  const root = resolveStorageRoot(storageRoot);
+  if (asset.localPath) await removeStoredAssetFile(asset.localPath, root);
+  if (asset.previewPath) await removeStoredAssetFile(asset.previewPath, root);
+  if (asset.thumbnailPath) await removeStoredAssetFile(asset.thumbnailPath, root);
+  db.prepare("DELETE FROM media_assets WHERE id=? AND media_project_id=?").run(assetId, projectId);
+  audit("MEDIA_SCENE_ASSET_DELETED", `Asset ${asset.originalName ?? asset.label} deleted`, {
+    projectId,
+    payload: { sceneId, assetId, originalName: asset.originalName, localPath: asset.localPath, timestamp }
+  });
+  return { deleted: true };
+}
+
+export function getMediaAssetForDownload(db: Database.Database, projectId: string, assetId: string, storageRoot?: string): MediaAsset {
+  getMediaProjectOrThrow(db, projectId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  if (!asset.localPath) throw new MediaStudioError("Media asset has no uploaded file", 404);
+  assertAssetPathInsideRoot(asset.localPath, resolveStorageRoot(storageRoot));
+  return asset;
+}
+
+export function exportMediaProductionPackage(db: Database.Database, projectId: string, exportedAt: string): MediaProductionPackage {
+  const project = getMediaProjectOrThrow(db, projectId);
+  const brief = getMediaBrief(db, projectId);
+  const assets = listMediaAssets(db, projectId);
+  const scenes = listMediaScenes(db, projectId).map((scene) => ({
+    ...scene,
+    flowPrompt: buildGoogleFlowPrompt(scene),
+    assets: assets.filter((asset) => asset.sceneId === scene.id)
+  }));
+  return {
+    exportedAt,
+    project,
+    brief: brief ? { ...brief, constraints: parseConstraints(brief.constraintsJson) } : null,
+    scenes,
+    assets
+  };
+}
+
+export function listMediaMessages(db: Database.Database, projectId: string): MediaChatMessage[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,sender,content,created_at AS createdAt
+    FROM media_chat_messages WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaChatMessage[];
+}
+
+export function addDirectorChatMessage(db: Database.Database, input: { projectId: string; message: string; now: string; createId: IdFactory }, audit: MediaAuditWriter) {
+  const project = getActiveMediaProjectOrThrow(db, input.projectId);
+  const userMessageId = input.createId();
+  db.prepare("INSERT INTO media_chat_messages (id,media_project_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+    .run(userMessageId, project.id, "user", input.message, input.now);
+
+  const messages = listMediaMessages(db, project.id);
+  const draft = generateDeterministicBrief(project.name, messages.map((message) => message.content));
+  const brief = replaceBrief(db, project.id, draft, input.now, input.createId);
+  const response = formatDirectorResponse(draft);
+  const directorMessageId = input.createId();
+  db.prepare("INSERT INTO media_chat_messages (id,media_project_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+    .run(directorMessageId, project.id, "director", response, input.now);
+  audit("MEDIA_DIRECTOR_BRIEF_UPDATED", `Video brief updated for ${project.name}`, {
+    projectId: project.id,
+    payload: { briefId: brief.id, userMessageId, directorMessageId, sceneCount: draft.scenes.length }
+  });
+  return getMediaProjectBundle(db, project.id);
+}
+
+export function deleteMediaChatMessage(db: Database.Database, projectId: string, messageId: string, timestamp: string, audit: MediaAuditWriter) {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const result = db.prepare("DELETE FROM media_chat_messages WHERE id=? AND media_project_id=?").run(messageId, projectId);
+  if (result.changes === 0) throw new MediaStudioError("Media chat message not found", 404);
+  audit("MEDIA_CHAT_MESSAGE_DELETED", "Media chat message deleted", { projectId, payload: { messageId, timestamp } });
+  return { deleted: true };
+}
+
+function getMediaProjectOrThrow(db: Database.Database, projectId: string): MediaProject {
+  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
+  if (!project) throw new MediaStudioError("Media project not found", 404);
+  return project;
+}
+
+function getActiveMediaProjectOrThrow(db: Database.Database, projectId: string): MediaProject {
+  const project = getMediaProjectOrThrow(db, projectId);
+  if (project.status !== "ACTIVE") throw new MediaStudioError("Media project is archived", 409);
+  return project;
+}
+
+function getMediaBrief(db: Database.Database, projectId: string): MediaBrief | null {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,title,logline,audience,style,duration_seconds AS durationSeconds,
+    constraints_json AS constraintsJson,status,approved_at AS approvedAt,created_at AS createdAt,updated_at AS updatedAt FROM media_video_briefs WHERE media_project_id=?`).get(projectId) as MediaBrief | undefined ?? null;
+}
+
+function listMediaScenes(db: Database.Database, projectId: string): MediaScene[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,brief_id AS briefId,position,title,description,duration_seconds AS durationSeconds,
+    dialogue,visual_prompt AS visualPrompt,aspect_ratio AS aspectRatio,status,approved_at AS approvedAt,created_at AS createdAt,updated_at AS updatedAt FROM media_scenes WHERE media_project_id=? ORDER BY position`).all(projectId) as MediaScene[];
+}
+
+function listMediaAssets(db: Database.Database, projectId: string): MediaAsset[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_assets WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaAsset[];
+}
+
+function listGenerationJobs(db: Database.Database, projectId: string): MediaGenerationJob[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,provider_key AS providerKey,status,request_json AS requestJson,result_json AS resultJson,
+    created_at AS createdAt,updated_at AS updatedAt FROM media_generation_jobs WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaGenerationJob[];
+}
+
+function replaceBrief(db: Database.Database, projectId: string, draft: BriefDraft, timestamp: string, createId: IdFactory): MediaBrief {
+  const existing = getMediaBrief(db, projectId);
+  const briefId = existing?.id ?? createId();
+  if (existing) {
+    db.prepare(`UPDATE media_video_briefs SET title=?,logline=?,audience=?,style=?,duration_seconds=?,constraints_json=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=?`)
+      .run(draft.title, draft.logline, draft.audience, draft.style, draft.durationSeconds, JSON.stringify(draft.constraints), timestamp, briefId);
+  } else {
+    db.prepare(`INSERT INTO media_video_briefs (id,media_project_id,title,logline,audience,style,duration_seconds,constraints_json,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(briefId, projectId, draft.title, draft.logline, draft.audience, draft.style, draft.durationSeconds, JSON.stringify(draft.constraints), "DRAFT", timestamp, timestamp);
+  }
+  db.prepare("DELETE FROM media_assets WHERE media_project_id=?").run(projectId);
+  db.prepare("DELETE FROM media_scenes WHERE media_project_id=?").run(projectId);
+  for (const [index, scene] of draft.scenes.entries()) {
+    const sceneId = createId();
+    db.prepare(`INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, scene.title, scene.description, scene.durationSeconds, "", scene.description, "16:9", "DRAFT", timestamp, timestamp);
+    db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(createId(), projectId, sceneId, "reference", scene.assetLabel, "chat-derived", "PLANNED", timestamp, timestamp);
+  }
+  db.prepare("DELETE FROM media_generation_jobs WHERE media_project_id=?").run(projectId);
+  seedProviderJobs(db, projectId, timestamp, createId, { briefId, title: draft.title });
+  return getMediaBrief(db, projectId) as MediaBrief;
+}
+
+function seedProviderJobs(db: Database.Database, projectId: string, timestamp: string, createId: IdFactory, request: Record<string, unknown> = {}) {
+  for (const provider of mediaProviderRegistry) {
+    db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(createId(), projectId, provider.key, "STUBBED", JSON.stringify({ providerKey: provider.key, mode: "not-implemented", ...request }), null, timestamp, timestamp);
+  }
+}
+
+function generateDeterministicBrief(projectName: string, messages: string[]): BriefDraft {
+  const combined = messages.join(" ").replace(/\s+/g, " ").trim();
+  const source = combined || projectName;
+  const sentence = source.split(/[.!?]/).map((part) => part.trim()).find(Boolean) ?? projectName;
+  const words = sentence.split(/\s+/).filter(Boolean);
+  const title = titleCase(words.slice(0, 8).join(" ") || projectName);
+  const lower = source.toLowerCase();
+  const style = lower.includes("cinematic") ? "Cinematic" : lower.includes("product") ? "Product demo" : lower.includes("education") || lower.includes("explain") ? "Educational" : "Documentary";
+  const audience = lower.includes("investor") ? "Investors" : lower.includes("customer") ? "Customers" : lower.includes("team") ? "Internal team" : "General audience";
+  const durationSeconds = lower.includes("short") ? 30 : lower.includes("minute") ? 60 : 45;
+  const logline = `A ${durationSeconds}-second ${style.toLowerCase()} video for ${audience.toLowerCase()} about ${sentence}.`;
+  return {
+    title,
+    logline,
+    audience,
+    style,
+    durationSeconds,
+    constraints: ["No external AI calls", "No rendering", "Provider jobs remain stubbed"],
+    scenes: [
+      { title: "Hook", description: `Open with the clearest promise from: ${sentence}.`, durationSeconds: Math.round(durationSeconds * 0.25), assetLabel: "Opening visual reference" },
+      { title: "Proof", description: `Show the concrete context and supporting details from the chat brief.`, durationSeconds: Math.round(durationSeconds * 0.5), assetLabel: "Supporting b-roll or product capture" },
+      { title: "Close", description: `End with the next action or takeaway for ${audience.toLowerCase()}.`, durationSeconds: durationSeconds - Math.round(durationSeconds * 0.25) - Math.round(durationSeconds * 0.5), assetLabel: "Closing title card" }
+    ]
+  };
+}
+
+function formatDirectorResponse(draft: BriefDraft) {
+  return [
+    `Draft brief: ${draft.title}`,
+    draft.logline,
+    "",
+    "Scenes:",
+    ...draft.scenes.map((scene, index) => `${index + 1}. ${scene.title} - ${scene.description}`)
+  ].join("\n");
+}
+
+function titleCase(value: string) {
+  return value.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+}
+
+function getMediaSceneOrThrow(db: Database.Database, projectId: string, sceneId: string): MediaScene {
+  const scene = db.prepare(`SELECT id,media_project_id AS mediaProjectId,brief_id AS briefId,position,title,description,duration_seconds AS durationSeconds,
+    dialogue,visual_prompt AS visualPrompt,aspect_ratio AS aspectRatio,status,approved_at AS approvedAt,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_scenes WHERE id=? AND media_project_id=?`).get(sceneId, projectId) as MediaScene | undefined;
+  if (!scene) throw new MediaStudioError("Media scene not found", 404);
+  return scene;
+}
+
+function getMediaAssetOrThrow(db: Database.Database, projectId: string, assetId: string): MediaAsset {
+  const asset = db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_assets WHERE id=? AND media_project_id=?`).get(assetId, projectId) as MediaAsset | undefined;
+  if (!asset) throw new MediaStudioError("Media asset not found", 404);
+  return asset;
+}
+
+function buildGoogleFlowPrompt(scene: Pick<MediaScene, "title" | "durationSeconds" | "dialogue" | "visualPrompt" | "aspectRatio">): string {
+  return [
+    `Scene: ${scene.title}`,
+    `Duration: ${scene.durationSeconds} seconds`,
+    `Aspect ratio: ${scene.aspectRatio}`,
+    "",
+    "Visual prompt:",
+    scene.visualPrompt.trim(),
+    "",
+    "Dialogue:",
+    scene.dialogue.trim() || "No spoken dialogue.",
+    "",
+    "Output guidance:",
+    "Generate a coherent single-scene video clip. Preserve the visual prompt, timing, and dialogue exactly. Do not add logos, watermarks, subtitles, or extra text unless explicitly requested."
+  ].join("\n");
+}
+
+function classifyAssetKind(mimeType: string): "image" | "video" | "audio" | null {
+  if (!mediaAssetMimeTypes.has(mimeType)) return null;
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType.startsWith("audio/")) return "audio";
+  return null;
+}
+
+function validateAssetUpload(originalName: string, mimeType: string, sizeBytes: number): void {
+  if (originalName !== path.basename(originalName) || originalName.includes("/") || originalName.includes("\\")) {
+    throw new MediaStudioError("Asset filename must not include a path", 400);
+  }
+  if (!mediaAssetMimeTypes.has(mimeType)) {
+    throw new MediaStudioError("Only allowed image, video, and audio MIME types can be uploaded", 400);
+  }
+  if (sizeBytes < 1) throw new MediaStudioError("Uploaded asset is empty", 400);
+  if (sizeBytes > mediaAssetMaxBytes) throw new MediaStudioError("Uploaded asset exceeds the size limit", 413);
+}
+
+function resolveStorageRoot(storageRoot?: string): string {
+  return path.resolve(storageRoot ?? process.env.S4_MEDIA_STORAGE_PATH ?? "./data/media-assets");
+}
+
+function resolveAssetPath(storageRoot: string, projectId: string, sceneId: string, fileName: string): string {
+  const resolved = path.resolve(storageRoot, sanitizePathSegment(projectId), sanitizePathSegment(sceneId), fileName);
+  assertAssetPathInsideRoot(resolved, storageRoot);
+  return resolved;
+}
+
+function assertAssetPathInsideRoot(candidatePath: string, storageRoot: string): void {
+  const root = path.resolve(storageRoot);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new MediaStudioError("Media asset path escapes storage root", 400);
+  }
+}
+
+function safeAssetFileName(assetId: string, originalName: string, mimeType: string): string {
+  const extension = extensionForMimeType(mimeType) ?? path.extname(originalName).toLowerCase();
+  const stem = path.basename(originalName, path.extname(originalName)).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "asset";
+  return `${sanitizePathSegment(assetId)}-${stem}${extension}`;
+}
+
+function sanitizePathSegment(value: string): string {
+  return value.replace(/[^a-z0-9._-]+/gi, "-").slice(0, 100) || "item";
+}
+
+function extensionForMimeType(mimeType: string): string | null {
+  switch (mimeType) {
+    case "image/jpeg": return ".jpg";
+    case "image/png": return ".png";
+    case "image/webp": return ".webp";
+    case "image/gif": return ".gif";
+    case "video/mp4": return ".mp4";
+    case "video/webm": return ".webm";
+    case "video/quicktime": return ".mov";
+    case "audio/mpeg": return ".mp3";
+    case "audio/mp4": return ".m4a";
+    case "audio/aac": return ".aac";
+    case "audio/wav":
+    case "audio/x-wav": return ".wav";
+    default: return null;
+  }
+}
+
+async function removeStoredAssetFile(localPath: string, storageRoot: string): Promise<void> {
+  assertAssetPathInsideRoot(localPath, storageRoot);
+  try {
+    await fs.unlink(localPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function parseConstraints(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}

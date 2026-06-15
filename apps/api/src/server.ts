@@ -1,0 +1,918 @@
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
+import { nanoid } from "nanoid";
+import { createReadStream } from "node:fs";
+import { db } from "@s4/db";
+import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaChatMessageSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, UpdateComfyWorkflowSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
+import { createPlan } from "./planner.js";
+import { inspectProject } from "./project-inspection.js";
+import { listProjectTree, readProjectFile } from "./project-files.js";
+import { assertReadableProjectFilePath, insertProposal } from "./change-proposals.js";
+import { analyzeTask, formatPlanningOnlyResponse } from "./task-analysis.js";
+import { loadProviderConfig, sanitizeProviderError, validateCodeProposalOutput } from "./ai-provider.js";
+import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./provider-factory.js";
+import { buildCodeProposalInput } from "./proposal-context.js";
+import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
+import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
+import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteMediaChatMessage, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceSceneAsset, updateMediaBrief, updateMediaProject, updateMediaScene, uploadSceneAsset } from "./media-studio.js";
+import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
+import { cancelRenderJob, listRenderJobs, renderDraftVideo } from "./media-rendering.js";
+import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
+import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders } from "./media-provider-router.js";
+import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
+
+const app = Fastify({ logger: true });
+const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
+await app.register(cors, {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("CORS origin is not allowed"), false);
+  }
+});
+await app.register(multipart, {
+  limits: { fileSize: mediaAssetMaxBytes, files: 1 }
+});
+const now = () => new Date().toISOString();
+
+function audit(eventType: string, summary: string, values: { projectId?: string; taskId?: string; agentId?: string; payload?: unknown } = {}) {
+  db.prepare(`INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, now());
+}
+
+app.get("/health", async () => ({ status: "ok", service: "s4-agent-studio-api", time: now() }));
+
+app.get("/api/providers/status", async () => getProviderStatus());
+
+app.post("/api/providers/test", async (_request, reply) => {
+  try {
+    return await testConfiguredProvider();
+  } catch (error) {
+    return reply.status(502).send({ ...getProviderStatus(), status: "error", sanitizedError: sanitizeProviderError(error) });
+  }
+});
+
+app.get("/api/bootstrap", async () => ({
+  product: "S4 Agent Studio",
+  projects: listActiveProjects(db),
+  agents: db.prepare("SELECT id,name,role,purpose,status,project_id AS projectId FROM agents ORDER BY created_at").all(),
+  pendingApprovals: db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status='PENDING'").get()
+}));
+
+app.get("/api/media/providers", async () => ({ providers: mediaProviderRegistry }));
+
+app.get("/api/media/provider-router", async (request: any) => {
+  const capabilities = getMediaProviderCapabilities(loadComfyConfig(), loadLongCatConfig());
+  return {
+    capabilities,
+    decision: request.query?.task ? selectMediaProviders(request.query.task, capabilities) : null
+  };
+});
+
+app.get("/api/media/ffmpeg/status", async () => detectFfmpeg());
+
+app.get("/api/media/comfyui/status", async () => comfyStatusResponse(loadComfyConfig()));
+
+app.post("/api/media/comfyui/test", async () => testComfyConnection(loadComfyConfig()));
+
+app.get("/api/media/longcat/status", async () => longCatStatusResponse(loadLongCatConfig()));
+
+app.post("/api/media/longcat/test", async () => testLongCatConnection(loadLongCatConfig()));
+
+app.get("/api/media/comfyui/workflows", async () => ({
+  templates: {
+    wanTextToVideo: wanTextToVideoWorkflowTemplate,
+    wanImageToVideo: wanImageToVideoWorkflowTemplate
+  }
+}));
+
+app.get("/api/media/projects", async (request: any) => ({
+  projects: listMediaProjects(db, request.query?.includeArchived === "true")
+}));
+
+app.post("/api/media/projects", async (request, reply) => {
+  const parsed = CreateMediaProjectSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media project", details: parsed.error.flatten() });
+  try {
+    const project = createMediaProject(db, { id: nanoid(), name: parsed.data.name, description: parsed.data.description, now: now() }, audit);
+    return reply.status(201).send({ project });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create media project" });
+  }
+});
+
+app.get("/api/media/projects/:projectId", async (request: any, reply) => {
+  try {
+    return { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load media project" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/comfy-workflows", async (request: any, reply) => {
+  try {
+    return { workflows: listComfyWorkflows(db, request.params.projectId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load ComfyUI workflows" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/comfy-workflows", async (request: any, reply) => {
+  const parsed = ImportComfyWorkflowSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid ComfyUI workflow", details: parsed.error.flatten() });
+  try {
+    const workflow = importComfyWorkflow(db, request.params.projectId, { id: nanoid(), name: parsed.data.name, workflowType: parsed.data.workflowType, workflowJson: parsed.data.workflowJson, mapping: parsed.data.mapping, activate: parsed.data.activate, now: now() }, audit);
+    return reply.status(201).send({ workflow });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to import ComfyUI workflow" });
+  }
+});
+
+app.put("/api/media/projects/:projectId/comfy-workflows/:workflowId", async (request: any, reply) => {
+  const parsed = UpdateComfyWorkflowSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid ComfyUI workflow update", details: parsed.error.flatten() });
+  try {
+    const workflow = updateComfyWorkflow(db, request.params.projectId, request.params.workflowId, { id: nanoid(), name: parsed.data.name, workflowJson: parsed.data.workflowJson, mapping: parsed.data.mapping, activate: parsed.data.activate, now: now() }, audit);
+    return reply.status(201).send({ workflow });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update ComfyUI workflow" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/comfy-workflows/:workflowId", async (request: any, reply) => {
+  try {
+    return deleteComfyWorkflow(db, request.params.projectId, request.params.workflowId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete ComfyUI workflow" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/comfy-workflows/:workflowId/activate", async (request: any, reply) => {
+  try {
+    return { workflow: activateComfyWorkflow(db, request.params.projectId, request.params.workflowId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to activate ComfyUI workflow" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/comfy-workflows/preview", async (request: any, reply) => {
+  const parsed = PreviewComfyWorkflowSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid ComfyUI workflow preview", details: parsed.error.flatten() });
+  try {
+    return previewCompiledWorkflow(db, request.params.projectId, parsed.data);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to preview ComfyUI workflow" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId", async (request: any, reply) => {
+  const parsed = UpdateMediaProjectSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media project update", details: parsed.error.flatten() });
+  try {
+    return { project: updateMediaProject(db, request.params.projectId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update media project" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId", async (request: any, reply) => {
+  try {
+    return { project: archiveMediaProject(db, request.params.projectId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to archive media project" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/messages", async (request: any, reply) => {
+  try {
+    return { messages: getMediaProjectBundle(db, request.params.projectId).messages };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load media messages" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/messages", async (request: any, reply) => {
+  const parsed = MediaChatMessageSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media chat message", details: parsed.error.flatten() });
+  try {
+    return addDirectorChatMessage(db, { projectId: request.params.projectId, message: parsed.data.message, now: now(), createId: nanoid }, audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to save media chat message" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/messages/:messageId", async (request: any, reply) => {
+  try {
+    return deleteMediaChatMessage(db, request.params.projectId, request.params.messageId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete media chat message" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId/brief", async (request: any, reply) => {
+  const parsed = UpdateMediaBriefSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media brief", details: parsed.error.flatten() });
+  try {
+    return { brief: updateMediaBrief(db, request.params.projectId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update media brief" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/brief/approve", async (request: any, reply) => {
+  try {
+    return { brief: approveMediaBrief(db, request.params.projectId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to approve media brief" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId/scenes/:sceneId", async (request: any, reply) => {
+  const parsed = UpdateMediaSceneSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media scene", details: parsed.error.flatten() });
+  try {
+    return { scene: updateMediaScene(db, request.params.projectId, request.params.sceneId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update media scene" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/approve", async (request: any, reply) => {
+  try {
+    return { scene: approveMediaScene(db, request.params.projectId, request.params.sceneId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to approve media scene" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/reject", async (request: any, reply) => {
+  try {
+    return { scene: rejectMediaScene(db, request.params.projectId, request.params.sceneId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reject media scene" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/reorder", async (request: any, reply) => {
+  const parsed = ReorderMediaScenesSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid scene order", details: parsed.error.flatten() });
+  try {
+    return { scenes: reorderMediaScenes(db, request.params.projectId, parsed.data.sceneIds, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reorder scenes" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/scenes/:sceneId/flow-prompt", async (request: any, reply) => {
+  try {
+    return getSceneFlowPrompt(db, request.params.projectId, request.params.sceneId);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to generate Flow prompt" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/generate/wan", async (request: any, reply) => {
+  const parsed = GenerateWanSceneSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid Wan generation request", details: parsed.error.flatten() });
+  try {
+    const result = await generateWanForScene(db, request.params.projectId, request.params.sceneId, {
+      jobId: nanoid(),
+      outputAssetId: nanoid(),
+      now: now(),
+      mode: parsed.data.mode,
+      approved: parsed.data.approved,
+      fps: parsed.data.fps,
+      seed: parsed.data.seed
+    }, audit);
+    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to generate Wan media" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (request: any, reply) => {
+  const parsed = RouteMediaGenerationSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid provider routing request", details: parsed.error.flatten() });
+  try {
+    const result = await routeMediaGeneration(db, request.params.projectId, request.params.sceneId, {
+      jobId: nanoid(),
+      outputAssetId: nanoid(),
+      now: now(),
+      task: parsed.data.task,
+      approved: parsed.data.approved,
+      paidProviderApproved: parsed.data.paidProviderApproved,
+      maxAttempts: parsed.data.maxAttempts,
+      fps: parsed.data.fps,
+      seed: parsed.data.seed,
+      longCatConfig: loadLongCatConfig()
+    }, audit);
+    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to route media generation" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/assets", async (request: any, reply) => {
+  const parsed = ImportMediaAssetSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media asset", details: parsed.error.flatten() });
+  try {
+    const asset = importSceneAsset(db, request.params.projectId, request.params.sceneId, { ...parsed.data, id: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ asset });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to import media asset" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/scenes/:sceneId/assets", async (request: any, reply) => {
+  try {
+    const bundle = getMediaProjectBundle(db, request.params.projectId);
+    return { assets: bundle.assets.filter((asset) => asset.sceneId === request.params.sceneId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load media assets" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/assets/upload", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Upload requires one image or video file" });
+    const bytes = await file.toBuffer();
+    const asset = await uploadSceneAsset(db, request.params.projectId, request.params.sceneId, {
+      id: nanoid(),
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to upload media asset" });
+  }
+});
+
+app.put("/api/media/projects/:projectId/scenes/:sceneId/assets/:assetId", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Replacement requires one image or video file" });
+    const bytes = await file.toBuffer();
+    const asset = await replaceSceneAsset(db, request.params.projectId, request.params.sceneId, request.params.assetId, {
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return { asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to replace media asset" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/assets/:assetId/:derivative", async (request: any, reply) => {
+  if (!["thumbnail", "preview"].includes(request.params.derivative)) return reply.status(404).send({ error: "Media derivative not found" });
+  try {
+    const derivative = getMediaDerivativeForDownload(db, request.params.projectId, request.params.assetId, request.params.derivative);
+    return reply.type(derivative.mimeType).send(createReadStream(derivative.localPath));
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to download media derivative" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/assets/:assetId/download", async (request: any, reply) => {
+  try {
+    const asset = getMediaAssetForDownload(db, request.params.projectId, request.params.assetId);
+    reply.header("content-disposition", `inline; filename="${asset.fileName ?? asset.originalName ?? "asset"}"`);
+    return reply.type(asset.mimeType ?? "application/octet-stream").send(createReadStream(asset.localPath as string));
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to download media asset" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/scenes/:sceneId/assets/:assetId", async (request: any, reply) => {
+  try {
+    return await deleteSceneAsset(db, request.params.projectId, request.params.sceneId, request.params.assetId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete media asset" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/render-jobs", async (request: any, reply) => {
+  try {
+    return { renderJobs: listRenderJobs(db, request.params.projectId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load render jobs" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/render", async (request: any, reply) => {
+  const parsed = RenderMediaDraftSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid render request", details: parsed.error.flatten() });
+  try {
+    const job = await renderDraftVideo(db, request.params.projectId, { ...parsed.data, jobId: nanoid(), outputAssetId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to render draft video" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/render-jobs/:jobId/cancel", async (request: any, reply) => {
+  try {
+    return { job: cancelRenderJob(db, request.params.projectId, request.params.jobId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to cancel render job" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/cancel", async (request: any, reply) => {
+  try {
+    const job = db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id=? AND media_project_id=?").get(request.params.jobId, request.params.projectId) as { providerKey: string } | undefined;
+    if (job?.providerKey === "google-flow") return { job: cancelFlowJob(db, request.params.projectId, request.params.jobId, now(), audit) };
+    if (job?.providerKey === "longcat-avatar") return { job: await cancelLongCatGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
+    return { job: await cancelComfyGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to cancel generation job" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/retry", async (request: any, reply) => {
+  const parsed = RetryWanGenerationSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid Wan retry request", details: parsed.error.flatten() });
+  try {
+    const existing = db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id=? AND media_project_id=?").get(request.params.jobId, request.params.projectId) as { providerKey: string } | undefined;
+    if (existing?.providerKey === "google-flow") {
+      const job = retryFlowJob(db, request.params.projectId, request.params.jobId, { jobId: nanoid(), now: now() }, audit);
+      return reply.status(201).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+    }
+    if (existing?.providerKey === "longcat-avatar") {
+      const result = await retryLongCatGeneration(db, request.params.projectId, request.params.jobId, {
+        jobId: nanoid(),
+        outputAssetId: nanoid(),
+        now: now(),
+        approved: parsed.data.approved
+      }, audit);
+      return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+    }
+    const result = await retryComfyGeneration(db, request.params.projectId, request.params.jobId, {
+      jobId: nanoid(),
+      outputAssetId: nanoid(),
+      now: now(),
+      approved: parsed.data.approved
+    }, audit);
+    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to retry generation job" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/generation-jobs/:jobId/flow-package", async (request: any, reply) => {
+  try {
+    return { package: getFlowPackage(db, request.params.projectId, request.params.jobId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load Flow package" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/flow-generated", async (request: any, reply) => {
+  try {
+    return { job: markFlowGenerated(db, request.params.projectId, request.params.jobId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to mark Flow job generated" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/reject", async (request: any, reply) => {
+  const parsed = FlowJobActionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid Flow reject request", details: parsed.error.flatten() });
+  try {
+    return { job: rejectFlowJob(db, request.params.projectId, request.params.jobId, now(), audit, parsed.data.note) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reject Flow job" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/fallback-wan", async (request: any, reply) => {
+  const parsed = FlowFallbackWanSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid Wan fallback request", details: parsed.error.flatten() });
+  try {
+    const result = await fallbackFlowJobToWan(db, request.params.projectId, request.params.jobId, {
+      jobId: nanoid(),
+      outputAssetId: nanoid(),
+      now: now(),
+      approved: parsed.data.approved
+    }, audit);
+    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to fallback Flow job to Wan" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/generation-jobs/:jobId/import-flow", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Flow import requires one generated image or video file" });
+    const bytes = await file.toBuffer();
+    const result = await importFlowGeneratedAsset(db, request.params.projectId, request.params.jobId, {
+      assetId: nanoid(),
+      processingJobId: nanoid(),
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Imported Flow asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to import Flow asset" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/export", async (request: any, reply) => {
+  try {
+    return exportMediaProductionPackage(db, request.params.projectId, now());
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to export media package" });
+  }
+});
+
+app.post("/api/projects", async (request, reply) => {
+  const parsed = CreateProjectSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid project", details: parsed.error.flatten() });
+  const id = nanoid();
+  const timestamp = now();
+  try {
+    const project = registerOrReactivateProject(db, { id, name: parsed.data.name, rootPath: parsed.data.rootPath, now: timestamp }, audit);
+    return reply.status(project.reactivated ? 200 : 201).send(project);
+  } catch (error) {
+    if (error instanceof ProjectRegistrationError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to register project" });
+  }
+});
+
+app.delete("/api/projects/:projectId", async (request: any, reply) => {
+  try {
+    return deregisterProject(db, request.params.projectId, now(), audit);
+  } catch (error) {
+    if (error instanceof ProjectRegistrationError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to de-register project" });
+  }
+});
+
+app.get("/api/projects/:projectId/tree", async (request: any, reply) => {
+  const project = db.prepare("SELECT root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
+  if (!project) return reply.status(404).send({ error: "Project not found" });
+  try { return { entries: await listProjectTree(project.rootPath, request.query?.path ?? ".", 2) }; }
+  catch (error) { return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to inspect project" }); }
+});
+
+app.get("/api/projects/:projectId/file", async (request: any, reply) => {
+  const project = db.prepare("SELECT root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
+  if (!project) return reply.status(404).send({ error: "Project not found" });
+  try {
+    assertReadableProjectFilePath(project.rootPath, request.query.path);
+    return { path: request.query.path, content: await readProjectFile(project.rootPath, request.query.path) };
+  }
+  catch (error) { return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to read file" }); }
+});
+
+app.post("/api/chat", async (request, reply) => {
+  const parsed = ChatRequestSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid request", details: parsed.error.flatten() });
+  const project = db.prepare("SELECT id,name,root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(parsed.data.projectId) as any;
+  if (!project) return reply.status(404).send({ error: "Select or register a project first" });
+  const timestamp = now();
+  const conversationId = parsed.data.conversationId ?? nanoid();
+  if (!parsed.data.conversationId) {
+    db.prepare("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)")
+      .run(conversationId, project.id, parsed.data.message.slice(0, 80), timestamp, timestamp);
+  }
+  db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+    .run(nanoid(), conversationId, "user", parsed.data.message, timestamp);
+
+  if (isReadOnlyInspectionRequest(parsed.data.message)) {
+    const riskLevel = classifyRisk(parsed.data.message);
+    const taskId = nanoid();
+    const { inspection, report } = await inspectProject(project.rootPath);
+    const plan = {
+      summary: `Read-only inspection for: ${parsed.data.message.slice(0, 120)}`,
+      steps: [],
+      requiredApproval: false,
+      rollback: "No rollback required. This task is read-only.",
+      acceptanceCriteria: ["Inspection report returned", "No project files modified"],
+      inspectionResult: inspection
+    };
+    db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, "COMPLETED", riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+    db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+      .run(nanoid(), conversationId, "agent", report, now());
+    audit("READ_ONLY_INSPECTION_COMPLETED", `Read-only inspection completed for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel, inspection } });
+    return { conversationId, taskId, approvalId: null, agent: "Developer Agent", response: report, riskLevel, approvalRequired: false, plan, nextStep: "COMPLETED" };
+  }
+
+  const riskLevel = classifyRisk(parsed.data.message);
+  if (isMutationRequest(parsed.data.message)) {
+    const { inspection } = await inspectProject(project.rootPath);
+    const providerConfig = loadProviderConfig();
+    const analysis = await analyzeTask(project.rootPath, parsed.data.message, inspection, providerConfig.configured);
+    const taskId = nanoid();
+    const planningOnly = analysis.mode === "PLANNING_ONLY";
+    const mutationPlan = {
+      summary: `${analysis.featureCategory}: ${parsed.data.message.slice(0, 120)}`,
+      steps: analysis.implementationPlan,
+      requiredApproval: analysis.approvalRequired,
+      inspectionResult: inspection,
+      analysis,
+      expectedFiles: [] as string[],
+      proposals: [] as Array<{ id: string; filePath: string; operation: string; reason: string }>,
+      acceptanceCriteria: analysis.acceptanceCriteria,
+      rollback: "No project files were changed. Reject this plan or revise the request before any code proposal is generated."
+    };
+    if (!planningOnly) {
+      try {
+        const provider = createAiProvider(providerConfig);
+        const input = await buildCodeProposalInput(project.rootPath, project.name, parsed.data.message, inspection, analysis, {
+          maximumFiles: providerConfig.maxProposalFiles,
+          maximumOutputBytes: providerConfig.maxOutputBytes
+        });
+        const rawOutput = await provider.generateCodeProposal(input);
+        const output = validateCodeProposalOutput(rawOutput, project.rootPath, {
+          maximumFiles: providerConfig.maxProposalFiles,
+          maximumOutputBytes: providerConfig.maxOutputBytes
+        });
+        mutationPlan.summary = output.summary;
+        mutationPlan.steps = output.plan;
+        mutationPlan.acceptanceCriteria = analysis.acceptanceCriteria;
+        mutationPlan.expectedFiles = output.proposals.map((proposal) => proposal.relativePath);
+        db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, timestamp);
+        const insertedProposals = [];
+        try {
+          for (const providerProposal of output.proposals) {
+            const proposal = await insertProposal(db, {
+              id: nanoid(),
+              taskId,
+              projectId: project.id,
+              rootPath: project.rootPath,
+              filePath: providerProposal.relativePath,
+              operation: providerProposal.operation,
+              proposedContent: providerProposal.proposedContent,
+              reason: providerProposal.reason,
+              now: timestamp
+            });
+            insertedProposals.push({ id: proposal.id, filePath: proposal.filePath, operation: proposal.operation, reason: proposal.reason });
+          }
+        } catch (error) {
+          db.prepare("DELETE FROM change_proposals WHERE task_id=?").run(taskId);
+          throw error;
+        }
+        mutationPlan.proposals = insertedProposals;
+        db.prepare("UPDATE tasks SET plan_json=?,updated_at=? WHERE id=?").run(JSON.stringify({ ...mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), timestamp, taskId);
+        const approvalId = nanoid();
+        db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+          .run(approvalId, taskId, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), analysis.riskLevel, "PENDING", timestamp);
+        const responseText = [
+          `I inspected ${project.name} and generated code proposals for review.`,
+          "",
+          `Provider: ${providerConfig.provider}`,
+          `Model: ${providerConfig.model}`,
+          `Risk level: ${analysis.riskLevel}`,
+          "Approval required: Yes.",
+          "No files were modified.",
+          "",
+          "Affected files:",
+          ...insertedProposals.map((proposal) => `- ${proposal.operation} ${proposal.filePath}`),
+          "",
+          "Warnings:",
+          ...(output.warnings.length ? output.warnings.map((warning) => `- ${warning}`) : ["- None"])
+        ].join("\n");
+        db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+          .run(nanoid(), conversationId, "agent", responseText, now());
+        audit("CODE_PROPOSAL_CREATED", `Code proposals created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, provider: providerConfig.provider, model: providerConfig.model, proposalCount: insertedProposals.length } });
+        return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: true, plan: mutationPlan, nextStep: "AWAITING_APPROVAL" };
+      } catch (error) {
+        const sanitizedError = sanitizeProviderError(error);
+        const failedPlan = { ...mutationPlan, providerError: sanitizedError };
+        db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", failedPlan.summary, parsed.data.message, "FAILED", analysis.riskLevel, JSON.stringify(failedPlan), failedPlan.acceptanceCriteria.join("\n"), failedPlan.rollback, timestamp, timestamp);
+        const responseText = `Code proposal generation failed: ${sanitizedError}\n\nNo files were modified.`;
+        db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+          .run(nanoid(), conversationId, "agent", responseText, now());
+        audit("CODE_PROPOSAL_FAILED", "Code proposal generation failed", { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, provider: providerConfig.provider, model: providerConfig.model, sanitizedError } });
+        return { conversationId, taskId, approvalId: null, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: false, plan: failedPlan, nextStep: "FAILED" };
+      }
+    }
+
+    db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, timestamp);
+    const approvalId = nanoid();
+    db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(approvalId, taskId, "PLANNING_ONLY", `Approve plan for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan }), analysis.riskLevel, "PENDING", timestamp);
+    const responseText = formatPlanningOnlyResponse(project.name, analysis);
+    db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+      .run(nanoid(), conversationId, "agent", responseText, now());
+    audit(planningOnly ? "PLANNING_ONLY_CREATED" : "CODE_PROPOSAL_PENDING_PROVIDER", `Plan created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, inspection, analysis } });
+    return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: analysis.approvalRequired, plan: mutationPlan, nextStep: "AWAITING_APPROVAL" };
+  }
+
+  const plan = createPlan(parsed.data.message, riskLevel);
+  const taskId = nanoid();
+  const taskStatus = requiresApproval(riskLevel) ? "AWAITING_APPROVAL" : "PLANNING";
+  db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, taskStatus, riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+  let approvalId: string | null = null;
+  if (requiresApproval(riskLevel)) {
+    approvalId = nanoid();
+    db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(approvalId, taskId, "PLAN_EXECUTION", `Approve execution of: ${plan.summary}`, JSON.stringify({ plan }), riskLevel, "PENDING", timestamp);
+  }
+  const responseText = `I created a ${plan.steps.length}-step plan for ${project.name}. ${requiresApproval(riskLevel) ? "The plan is waiting for your approval before sensitive work begins." : "I can continue with safe inspection and planning."}`;
+  db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+    .run(nanoid(), conversationId, "agent", responseText, now());
+  audit("TASK_CREATED", responseText, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel, plan } });
+  return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel, approvalRequired: Boolean(approvalId), plan, nextStep: taskStatus };
+});
+
+app.get("/api/conversations/:conversationId/messages", async (request: any) => ({
+  messages: db.prepare("SELECT id,sender,content,created_at AS createdAt FROM messages WHERE conversation_id=? ORDER BY created_at").all(request.params.conversationId)
+}));
+
+app.get("/api/tasks", async (request: any) => ({
+  tasks: db.prepare(`SELECT t.id,t.title,t.objective,t.status,t.risk_level AS riskLevel,t.plan_json AS planJson,t.created_at AS createdAt,p.name AS projectName
+    FROM tasks t JOIN projects p ON p.id=t.project_id WHERE (? IS NULL OR t.project_id=?) ORDER BY t.created_at DESC LIMIT 100`).all(request.query?.projectId ?? null, request.query?.projectId ?? null)
+}));
+
+app.get("/api/approvals", async () => ({
+  approvals: db.prepare(`SELECT a.id,a.task_id AS taskId,a.action_type AS actionType,a.summary,a.payload_json AS payloadJson,a.risk_level AS riskLevel,a.status,a.created_at AS createdAt,t.title,p.name AS projectName
+    FROM approvals a JOIN tasks t ON t.id=a.task_id JOIN projects p ON p.id=t.project_id ORDER BY CASE a.status WHEN 'PENDING' THEN 0 ELSE 1 END,a.created_at DESC`).all()
+}));
+
+app.post("/api/proposals", async (request, reply) => {
+  const parsed = CreateProposalSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid proposal", details: parsed.error.flatten() });
+  const task = db.prepare(`SELECT t.id,t.project_id AS projectId,p.root_path AS rootPath
+    FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?`).get(parsed.data.taskId) as any;
+  if (!task) return reply.status(404).send({ error: "Task not found" });
+  try {
+    const proposal = await insertProposal(db, {
+      id: nanoid(),
+      taskId: task.id,
+      projectId: task.projectId,
+      rootPath: task.rootPath,
+      filePath: parsed.data.filePath,
+      operation: parsed.data.operation,
+      proposedContent: parsed.data.proposedContent,
+      reason: parsed.data.reason,
+      now: now()
+    });
+    audit("CHANGE_PROPOSAL_CREATED", `Proposal ${proposal.operation} ${proposal.filePath}`, { projectId: task.projectId, taskId: task.id, payload: { proposalId: proposal.id } });
+    return reply.status(201).send({ proposal });
+  } catch (error) {
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to create proposal" });
+  }
+});
+
+app.get("/api/tasks/:taskId/proposals", async (request: any) => ({
+  proposals: db.prepare(`SELECT id,task_id AS taskId,file_path AS filePath,operation,original_content_hash AS originalContentHash,reason,status,created_at AS createdAt,updated_at AS updatedAt
+    FROM change_proposals WHERE task_id=? ORDER BY created_at`).all(request.params.taskId)
+}));
+
+app.get("/api/proposals/:proposalId/diff", async (request: any, reply) => {
+  const proposal = db.prepare("SELECT id,file_path AS filePath,operation,unified_diff AS unifiedDiff,reason,status FROM change_proposals WHERE id=?").get(request.params.proposalId) as any;
+  if (!proposal) return reply.status(404).send({ error: "Proposal not found" });
+  return { proposal };
+});
+
+app.post("/api/tasks/:taskId/apply", async (request: any, reply) => {
+  try {
+    return await applyTaskProposals(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to apply task proposals" });
+  }
+});
+
+app.get("/api/tasks/:taskId/execution", async (request: any, reply) => {
+  const task = db.prepare("SELECT id FROM tasks WHERE id=?").get(request.params.taskId);
+  if (!task) return reply.status(404).send({ error: "Task not found" });
+  return getTaskExecution(db, request.params.taskId);
+});
+
+app.post("/api/tasks/:taskId/run-checks", async (request: any, reply) => {
+  try {
+    return await runTaskChecks(db, request.params.taskId, now(), request.body?.action);
+  } catch (error) {
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to run checks" });
+  }
+});
+
+app.post("/api/tasks/:taskId/rollback", async (request: any, reply) => {
+  try {
+    return await rollbackTask(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to roll back task" });
+  }
+});
+
+app.post("/api/proposals/:proposalId/approve", async (request: any, reply) => {
+  const parsed = ProposalActionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid proposal action" });
+  const proposal = db.prepare("SELECT id,task_id AS taskId,project_id AS projectId,file_path AS filePath,status FROM change_proposals WHERE id=?").get(request.params.proposalId) as any;
+  if (!proposal) return reply.status(404).send({ error: "Proposal not found" });
+  if (proposal.status !== "PENDING") return reply.status(409).send({ error: "Proposal is already decided" });
+  db.prepare("UPDATE change_proposals SET status='APPROVED',updated_at=? WHERE id=?").run(now(), proposal.id);
+  audit("CHANGE_PROPOSAL_APPROVED", `Proposal approved for ${proposal.filePath}`, { projectId: proposal.projectId, taskId: proposal.taskId, payload: parsed.data });
+  return { status: "APPROVED" };
+});
+
+app.post("/api/proposals/:proposalId/reject", async (request: any, reply) => {
+  const parsed = ProposalActionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid proposal action" });
+  const proposal = db.prepare("SELECT id,task_id AS taskId,project_id AS projectId,file_path AS filePath,status FROM change_proposals WHERE id=?").get(request.params.proposalId) as any;
+  if (!proposal) return reply.status(404).send({ error: "Proposal not found" });
+  if (proposal.status !== "PENDING") return reply.status(409).send({ error: "Proposal is already decided" });
+  db.prepare("UPDATE change_proposals SET status='REJECTED',updated_at=? WHERE id=?").run(now(), proposal.id);
+  audit("CHANGE_PROPOSAL_REJECTED", `Proposal rejected for ${proposal.filePath}`, { projectId: proposal.projectId, taskId: proposal.taskId, payload: parsed.data });
+  return { status: "REJECTED" };
+});
+
+app.post("/api/tasks/:taskId/proposals/apply", async (request: any, reply) => {
+  try {
+    return await applyTaskProposals(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to apply proposals" });
+  }
+});
+
+app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
+  const parsed = ApprovalActionSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid decision" });
+  const approval = db.prepare("SELECT id,task_id AS taskId,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
+  if (!approval) return reply.status(404).send({ error: "Approval not found" });
+  if (approval.status !== "PENDING") return reply.status(409).send({ error: "Approval is already decided" });
+  const decidedAt = now();
+  db.prepare("UPDATE approvals SET status=?,decision_note=?,decided_at=? WHERE id=?").run(parsed.data.decision, parsed.data.note ?? null, decidedAt, approval.id);
+  db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  audit("APPROVAL_DECIDED", `Approval ${parsed.data.decision.toLowerCase()}`, { taskId: approval.taskId, payload: parsed.data });
+  return { status: parsed.data.decision };
+});
+
+app.post("/api/agents", async (request, reply) => {
+  const parsed = CreateAgentSchema.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid agent", details: parsed.error.flatten() });
+  const id = nanoid(); const timestamp = now();
+  const instructions = `Purpose: ${parsed.data.purpose}
+Rules: Work only within assigned projects. Request approval before writes, installs, external submissions, deployments, secret access, or destructive actions.`;
+  db.prepare("INSERT INTO agents (id,name,role,purpose,instructions,status,project_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+    .run(id, parsed.data.name, "SPECIALIST", parsed.data.purpose, instructions, "DRAFT", parsed.data.projectId ?? null, timestamp, timestamp);
+  audit("AGENT_CREATED", `${parsed.data.name} created as draft`, { agentId: id, projectId: parsed.data.projectId, payload: { purpose: parsed.data.purpose } });
+  return reply.status(201).send({ id, name: parsed.data.name, purpose: parsed.data.purpose, status: "DRAFT", instructions });
+});
+
+app.get("/api/audit", async () => ({
+  events: db.prepare("SELECT id,event_type AS eventType,summary,project_id AS projectId,task_id AS taskId,created_at AS createdAt FROM audit_events ORDER BY created_at DESC LIMIT 200").all()
+}));
+
+const port = Number(process.env.S4_API_PORT ?? 4310);
+await app.listen({ host: "127.0.0.1", port });

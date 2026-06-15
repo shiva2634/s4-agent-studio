@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build and test output
+dist/
+**/dist/
+build/
+**/build/
+coverage/
+**/coverage/
+*.tsbuildinfo
+.vite/
+**/.vite/
+
+# Logs
+logs/
+**/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# SQLite and local runtime data
+data/
+**/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Uploaded/generated media and derivatives
+media-assets/
+**/media-assets/
+uploads/
+**/uploads/
+proxies/
+**/proxies/
+thumbnails/
+**/thumbnails/
+renders/
+**/renders/
+rendered/
+**/rendered/
+render-outputs/
+**/render-outputs/
+previews/
+**/previews/
+derivatives/
+**/derivatives/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.avi
+
+# Keep intentional empty directories trackable
+!.gitkeep
+!**/.gitkeep

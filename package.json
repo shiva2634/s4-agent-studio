@@ -1,0 +1,19 @@
+{
+  "name": "s4-agent-studio",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c auto \"npm run dev -w @s4/api\" \"npm run dev -w @s4/web\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:init": "npm run db:init -w @s4/db"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
