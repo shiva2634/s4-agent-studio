@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaScene, createMediaProject, reorderMediaScenes, updateMediaScene, uploadSceneAsset } from "./media-studio.js";
+import { addDirectorChatMessage, approveMediaScene, createMediaProject, reorderMediaScenes, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaScene, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { cancelRenderJob, renderDraftVideo, validateRenderReadiness, type RenderDraftOptions } from "./media-rendering.js";
 import type { ProcessRunner } from "./media-processing.js";
 
@@ -35,7 +35,7 @@ function idFactory(prefix: string) {
 
 async function readyProject(db: Database.Database, storageRoot: string) {
   createMediaProject(db, { id: "media-1", name: "Render", now: "created" }, audit(db));
-  const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short cinematic product video.", now: "chat", createId: idFactory("id") }, audit(db));
+  const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short cinematic product video.", now: "chat", createId: idFactory("id") }, audit(db));
   for (const scene of bundle.scenes) {
     updateMediaScene(db, "media-1", scene.id, { title: scene.title, durationSeconds: scene.durationSeconds, dialogue: `Line ${scene.position}`, visualPrompt: scene.visualPrompt, aspectRatio: "16:9", status: "DRAFT", now: "edit" }, audit(db));
     approveMediaScene(db, "media-1", scene.id, "approved", audit(db));
@@ -92,6 +92,57 @@ describe("media rendering", () => {
       assert.equal(calls.some((call) => call.args.join(" ").includes("drawtext=text='Line 1'")), true);
       assert.equal(calls.some((call) => call.args.includes("-f") && call.args.includes("concat")), true);
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_RENDER_COMPLETED'").get() as { count: number }).count, 1);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("mixes scene narration and background music while ducking music volume", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-render-"));
+    const calls: Array<{ command: string; args: string[] }> = [];
+    try {
+      const sceneIds = await readyProject(db, storageRoot);
+      const narration = await uploadSceneAsset(db, "media-1", sceneIds[0] as string, {
+        id: "voice-1",
+        originalName: "voice.wav",
+        mimeType: "audio/wav",
+        bytes: Buffer.from("voice"),
+        now: "voice-upload",
+        storageRoot
+      }, audit(db));
+      updateAudioAssetSettings(db, "media-1", narration.id, {
+        role: "NARRATION",
+        volume: 1,
+        trimStartSeconds: 0.5,
+        trimEndSeconds: 4,
+        fadeInSeconds: 0.25,
+        fadeOutSeconds: 0.5,
+        now: "voice-settings"
+      }, audit(db));
+      const music = await uploadProjectAsset(db, "media-1", {
+        id: "music-1",
+        originalName: "music.mp3",
+        mimeType: "audio/mpeg",
+        bytes: Buffer.from("music"),
+        audioRole: "MUSIC",
+        now: "music-upload",
+        storageRoot
+      }, audit(db));
+      updateAudioAssetSettings(db, "media-1", music.id, { role: "MUSIC", volume: 1, fadeInSeconds: 1, fadeOutSeconds: 1, now: "music-settings" }, audit(db));
+      selectProjectBackgroundMusic(db, "media-1", music.id, "music-select", audit(db));
+
+      await renderDraftVideo(db, "media-1", renderOptions(storageRoot, writingRunner(storageRoot, calls)), audit(db));
+      const sceneRender = calls.find((call) => call.args.includes(narration.localPath as string) && call.args.includes(music.localPath as string));
+      assert.ok(sceneRender);
+      const joined = sceneRender.args.join(" ");
+      assert.match(joined, /-ss 0\.5/);
+      assert.match(joined, /-t 3\.5/);
+      assert.match(joined, /volume=1\.000/);
+      assert.match(joined, /volume=0\.250/);
+      assert.match(joined, /afade=t=in/);
+      assert.match(joined, /amix=inputs=3/);
+      assert.match(joined, /-map \[aout\]/);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

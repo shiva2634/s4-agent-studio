@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteSceneAsset, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, replaceSceneAsset, updateMediaBrief, updateMediaScene, uploadSceneAsset } from "./media-studio.js";
+import { addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteSceneAsset, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, replaceSceneAsset, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateMediaScene, uploadProjectAsset, uploadSceneAsset, type VideoDirectorProvider } from "./media-studio.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
@@ -124,6 +124,65 @@ function idFactory(prefix: string) {
   return () => `${prefix}-${++counter}`;
 }
 
+function successfulDirectorProvider(): VideoDirectorProvider {
+  return {
+    async generatePlan() {
+      return {
+        provider: "nvidia",
+        model: "nvidia/test",
+        usage: { promptTokens: 11, completionTokens: 22, totalTokens: 33 },
+        value: {
+          brief: {
+            title: "Provider Launch Film",
+            logline: "A provider-authored launch story.",
+            audience: "Creators",
+            style: "Cinematic",
+            durationSeconds: 24,
+            constraints: ["Keep shots grounded"]
+          },
+          script: "Narrator: Build locally. Create globally.",
+          scenes: [{
+            title: "Provider Hook",
+            description: "A confident studio opening.",
+            durationSeconds: 8,
+            dialogue: "Build locally. Create globally.",
+            visualPrompt: "A polished local-first media workspace with timeline screens and soft daylight.",
+            aspectRatio: "16:9",
+            assetLabel: "Provider opening reference"
+          }]
+        }
+      };
+    },
+    async generateScene() {
+      return {
+        provider: "nvidia",
+        model: "nvidia/test",
+        usage: { totalTokens: 12 },
+        value: {
+          title: "Regenerated Provider Scene",
+          description: "A tighter scene beat.",
+          durationSeconds: 7,
+          dialogue: "Here is the improved beat.",
+          visualPrompt: "A close camera move across a refined product interface.",
+          aspectRatio: "9:16",
+          assetLabel: "Regenerated scene reference"
+        }
+      };
+    }
+  };
+}
+
+function failingDirectorProvider(): VideoDirectorProvider {
+  return {
+    async generatePlan() {
+      throw new Error("Provider returned invalid JSON");
+    },
+    async generateScene() {
+      throw new Error("Provider timed out");
+    }
+  };
+}
+
 async function tempStorage() {
   return fs.mkdtemp(path.join(os.tmpdir(), "s4-media-assets-"));
 }
@@ -141,11 +200,11 @@ describe("media studio", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROJECT_CREATED'").get() as { count: number }).count, 1);
   });
 
-  it("persists chat messages and deterministic brief records", () => {
+  it("persists chat messages and deterministic brief records", async () => {
     const db = dbFixture();
     createMediaProject(db, { id: "media-1", name: "Explainer", now: "created" }, audit(db));
 
-    const bundle = addDirectorChatMessage(db, {
+    const bundle = await addDirectorChatMessage(db, {
       projectId: "media-1",
       message: "Create a short cinematic product video for customers about S4 Media Studio.",
       now: "chat-time",
@@ -163,15 +222,91 @@ describe("media studio", () => {
     assert.equal(bundle.scenes[0]?.status, "DRAFT");
     assert.equal(bundle.scenes[0]?.aspectRatio, "16:9");
     assert.equal(bundle.assets.length, 3);
-    assert.equal(bundle.generationJobs.length, mediaProviderRegistry.length);
+    assert.equal(bundle.generationJobs.length, mediaProviderRegistry.length + 1);
     assert.ok(bundle.messages[1]?.content.includes("Draft brief"));
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_DIRECTOR_BRIEF_UPDATED'").get() as { count: number }).count, 1);
   });
 
-  it("archives media projects without deleting chat or brief history", () => {
+  it("uses NVIDIA director output, stores provider metadata, and requires approval before replacement", async () => {
+    const db = dbFixture();
+    createMediaProject(db, { id: "media-1", name: "Provider", now: "created" }, audit(db));
+
+    const bundle = await addDirectorChatMessage(db, {
+      projectId: "media-1",
+      message: "Create a provider-authored launch film.",
+      now: "chat-time",
+      createId: idFactory("provider"),
+      directorProvider: successfulDirectorProvider()
+    }, audit(db));
+
+    assert.equal(bundle.brief?.title, "Provider Launch Film");
+    assert.equal(bundle.scenes.length, 1);
+    assert.equal(bundle.scenes[0]?.dialogue, "Build locally. Create globally.");
+    assert.equal(bundle.scenes[0]?.visualPrompt, "A polished local-first media workspace with timeline screens and soft daylight.");
+    const job = db.prepare("SELECT provider_key AS providerKey,result_json AS resultJson FROM media_generation_jobs WHERE provider_key='nvidia-video-director'").get() as { providerKey: string; resultJson: string };
+    const result = JSON.parse(job.resultJson) as { provider: string; model: string; usage: { totalTokens: number }; fallback: boolean };
+    assert.equal(result.provider, "nvidia");
+    assert.equal(result.model, "nvidia/test");
+    assert.equal(result.usage.totalTokens, 33);
+    assert.equal(result.fallback, false);
+
+    await assert.rejects(() => addDirectorChatMessage(db, {
+      projectId: "media-1",
+      message: "Replace this without approval.",
+      now: "blocked",
+      createId: idFactory("blocked"),
+      directorProvider: successfulDirectorProvider()
+    }, audit(db)), /requires approval/);
+  });
+
+  it("falls back to deterministic planning when the director provider fails", async () => {
+    const db = dbFixture();
+    createMediaProject(db, { id: "media-1", name: "Fallback", now: "created" }, audit(db));
+
+    const bundle = await addDirectorChatMessage(db, {
+      projectId: "media-1",
+      message: "Create a short product video for customers.",
+      now: "chat-time",
+      createId: idFactory("fallback"),
+      directorProvider: failingDirectorProvider()
+    }, audit(db));
+
+    assert.equal(bundle.brief?.title, "Create A Short Product Video For Customers");
+    const job = db.prepare("SELECT result_json AS resultJson FROM media_generation_jobs WHERE provider_key='nvidia-video-director'").get() as { resultJson: string };
+    const result = JSON.parse(job.resultJson) as { fallback: boolean; error: string };
+    assert.equal(result.fallback, true);
+    assert.match(result.error, /invalid JSON/);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_DIRECTOR_PROVIDER_FALLBACK'").get() as { count: number }).count, 1);
+  });
+
+  it("regenerates a selected scene without replacing the full scene list", async () => {
+    const db = dbFixture();
+    createMediaProject(db, { id: "media-1", name: "Scene Regen", now: "created" }, audit(db));
+    const initial = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+    const sceneId = initial.scenes[0]?.id as string;
+
+    const bundle = await addDirectorChatMessage(db, {
+      projectId: "media-1",
+      message: "Regenerate only the first scene.",
+      replaceApproved: true,
+      regenerateSceneId: sceneId,
+      now: "regen",
+      createId: idFactory("regen"),
+      directorProvider: successfulDirectorProvider()
+    }, audit(db));
+
+    assert.equal(bundle.scenes.length, 3);
+    assert.equal(bundle.scenes[0]?.id, sceneId);
+    assert.equal(bundle.scenes[0]?.title, "Regenerated Provider Scene");
+    assert.equal(bundle.scenes[0]?.aspectRatio, "9:16");
+    assert.equal(bundle.scenes[0]?.status, "DRAFT");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_DIRECTOR_SCENE_REGENERATED'").get() as { count: number }).count, 1);
+  });
+
+  it("archives media projects without deleting chat or brief history", async () => {
     const db = dbFixture();
     createMediaProject(db, { id: "media-1", name: "Archive Me", now: "created" }, audit(db));
-    addDirectorChatMessage(db, { projectId: "media-1", message: "Explain the product to investors in one minute.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+    await addDirectorChatMessage(db, { projectId: "media-1", message: "Explain the product to investors in one minute.", now: "chat-time", createId: idFactory("chat") }, audit(db));
 
     const archived = archiveMediaProject(db, "media-1", "archived", audit(db));
 
@@ -183,10 +318,10 @@ describe("media studio", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROJECT_ARCHIVED'").get() as { count: number }).count, 1);
   });
 
-  it("edits and approves video briefs and scenes", () => {
+  it("edits and approves video briefs and scenes", async () => {
     const db = dbFixture();
     createMediaProject(db, { id: "media-1", name: "Flow Companion", now: "created" }, audit(db));
-    const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a cinematic launch film.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+    const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a cinematic launch film.", now: "chat-time", createId: idFactory("chat") }, audit(db));
     const sceneId = bundle.scenes[0]?.id as string;
 
     const brief = updateMediaBrief(db, "media-1", {
@@ -222,10 +357,10 @@ describe("media studio", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_FLOW_PROMPT_UPDATED'").get() as { count: number }).count, 1);
   });
 
-  it("exports a complete production package as JSON-ready data", () => {
+  it("exports a complete production package as JSON-ready data", async () => {
     const db = dbFixture();
     createMediaProject(db, { id: "media-1", name: "Export Film", now: "created" }, audit(db));
-    const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short product video for customers.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+    const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short product video for customers.", now: "chat-time", createId: idFactory("chat") }, audit(db));
     const sceneId = bundle.scenes[0]?.id as string;
     importSceneAsset(db, "media-1", sceneId, {
       id: "asset-1",
@@ -246,10 +381,10 @@ describe("media studio", () => {
     assert.doesNotThrow(() => JSON.stringify(exported));
   });
 
-  it("validates and associates imported scene assets", () => {
+  it("validates and associates imported scene assets", async () => {
     const db = dbFixture();
     createMediaProject(db, { id: "media-1", name: "Assets", now: "created" }, audit(db));
-    const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+    const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
     const sceneId = bundle.scenes[0]?.id as string;
 
     const asset = importSceneAsset(db, "media-1", sceneId, {
@@ -281,7 +416,7 @@ describe("media studio", () => {
     const storageRoot = await tempStorage();
     try {
       createMediaProject(db, { id: "media-1", name: "Upload", now: "created" }, audit(db));
-      const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
       const sceneId = bundle.scenes[0]?.id as string;
 
       const asset = await uploadSceneAsset(db, "media-1", sceneId, {
@@ -313,7 +448,7 @@ describe("media studio", () => {
     const storageRoot = await tempStorage();
     try {
       createMediaProject(db, { id: "media-1", name: "Upload", now: "created" }, audit(db));
-      const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
       const sceneId = bundle.scenes[0]?.id as string;
 
       await assert.rejects(() => uploadSceneAsset(db, "media-1", sceneId, {
@@ -345,7 +480,7 @@ describe("media studio", () => {
     const storageRoot = await tempStorage();
     try {
       createMediaProject(db, { id: "media-1", name: "Replace", now: "created" }, audit(db));
-      const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
       const sceneId = bundle.scenes[0]?.id as string;
       const original = await uploadSceneAsset(db, "media-1", sceneId, {
         id: "asset-1",
@@ -380,7 +515,7 @@ describe("media studio", () => {
     const storageRoot = await tempStorage();
     try {
       createMediaProject(db, { id: "media-1", name: "Delete", now: "created" }, audit(db));
-      const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
       const sceneId = bundle.scenes[0]?.id as string;
       const asset = await uploadSceneAsset(db, "media-1", sceneId, {
         id: "asset-1",
@@ -406,7 +541,7 @@ describe("media studio", () => {
     const storageRoot = await tempStorage();
     try {
       createMediaProject(db, { id: "media-1", name: "Traversal", now: "created" }, audit(db));
-      const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
       const sceneId = bundle.scenes[0]?.id as string;
 
       await assert.rejects(() => uploadSceneAsset(db, "media-1", sceneId, {
@@ -419,6 +554,64 @@ describe("media studio", () => {
       }, audit(db)), /must not include a path/);
 
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_SCENE_ASSET_UPLOADED'").get() as { count: number }).count, 0);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stores scene narration settings and project background music selection", async () => {
+    const db = dbFixture();
+    const storageRoot = await tempStorage();
+    try {
+      createMediaProject(db, { id: "media-1", name: "Audio", now: "created" }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const sceneId = bundle.scenes[0]?.id as string;
+
+      const narration = await uploadSceneAsset(db, "media-1", sceneId, {
+        id: "voice-1",
+        originalName: "voice.wav",
+        mimeType: "audio/wav",
+        bytes: Buffer.from("voice"),
+        now: "upload-time",
+        storageRoot
+      }, audit(db));
+      assert.equal(narration.kind, "audio");
+      assert.equal(JSON.parse(narration.metadataJson as string).audioRole, "NARRATION");
+
+      const updated = updateAudioAssetSettings(db, "media-1", "voice-1", {
+        role: "SFX",
+        volume: 0.6,
+        trimStartSeconds: 1,
+        trimEndSeconds: 4,
+        fadeInSeconds: 0.5,
+        fadeOutSeconds: 0.25,
+        muted: false,
+        now: "audio-edit"
+      }, audit(db));
+      const updatedMetadata = JSON.parse(updated.metadataJson as string);
+      assert.equal(updatedMetadata.audioRole, "SFX");
+      assert.equal(updatedMetadata.volume, 0.6);
+      assert.equal(updatedMetadata.trimStartSeconds, 1);
+      assert.equal(updatedMetadata.trimEndSeconds, 4);
+
+      const music = await uploadProjectAsset(db, "media-1", {
+        id: "music-1",
+        originalName: "music.mp3",
+        mimeType: "audio/mpeg",
+        bytes: Buffer.from("music"),
+        audioRole: "MUSIC",
+        now: "music-upload",
+        storageRoot
+      }, audit(db));
+      const selection = selectProjectBackgroundMusic(db, "media-1", music.id, "music-select", audit(db));
+      const selected = db.prepare("SELECT scene_id AS sceneId,metadata_json AS metadataJson FROM media_assets WHERE id='music-1'").get() as { sceneId: string | null; metadataJson: string };
+
+      assert.equal(selection.selectedAssetId, "music-1");
+      assert.equal(selected.sceneId, null);
+      assert.equal(JSON.parse(selected.metadataJson).backgroundMusic, true);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROJECT_ASSET_UPLOADED'").get() as { count: number }).count, 1);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_AUDIO_SETTINGS_UPDATED'").get() as { count: number }).count, 1);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_BACKGROUND_MUSIC_SELECTED'").get() as { count: number }).count, 1);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

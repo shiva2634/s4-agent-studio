@@ -13,7 +13,8 @@ type MediaMessage = { id: string; sender: "user" | "director"; content: string; 
 type MediaBrief = { id: string; title: string; logline: string; audience: string; style: string; durationSeconds: number; constraintsJson: string; status: "DRAFT" | "APPROVED"; approvedAt: string | null };
 type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
 type MediaScene = { id: string; position: number; title: string; description: string; durationSeconds: number; dialogue: string; visualPrompt: string; aspectRatio: string; status: MediaSceneStatus; approvedAt: string | null };
-type MediaAsset = { id: string; sceneId: string | null; kind: string; label: string; source: string; status: string; fileName: string | null; originalName: string | null; mimeType: string | null; sizeBytes: number | null; checksumSha256: string | null; localPath: string | null; inspectionJson: string | null; qcStatus: string; qcIssuesJson: string; previewPath: string | null; thumbnailPath: string | null };
+type MediaAsset = { id: string; sceneId: string | null; kind: string; label: string; source: string; status: string; fileName: string | null; originalName: string | null; mimeType: string | null; sizeBytes: number | null; checksumSha256: string | null; localPath: string | null; inspectionJson: string | null; qcStatus: string; qcIssuesJson: string; previewPath: string | null; thumbnailPath: string | null; metadataJson: string | null };
+type AudioSettings = { audioRole: "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO"; volume: number; trimStartSeconds: number; trimEndSeconds: number | null; fadeInSeconds: number; fadeOutSeconds: number; muted: boolean; backgroundMusic: boolean };
 type MediaGenerationJob = { id: string; providerKey: string; status: string; requestJson: string; resultJson: string | null };
 type MediaProvider = { key: string; name: string; capabilities: readonly string[]; status: string };
 type RouterCapability = { key: string; name: string; supports: string[]; enabled: boolean; healthy: boolean; priority: number; paid: boolean; mode: string; reason: string };
@@ -218,6 +219,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   const [projects, setProjects] = useState<MediaProject[]>([]);
   const [providers, setProviders] = useState<MediaProvider[]>([]);
   const [routerCapabilities, setRouterCapabilities] = useState<RouterCapability[]>([]);
+  const [directorStatus, setDirectorStatus] = useState<ProviderStatus>();
   const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus>();
   const [comfyStatus, setComfyStatus] = useState<ComfyStatus>();
   const [longCatStatus, setLongCatStatus] = useState<LongCatStatus>();
@@ -239,6 +241,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     setProjects(projectData.projects);
     setProviders(providerData.providers);
     fetch(`${API}/api/media/provider-router`).then(r=>r.json()).then(data=>setRouterCapabilities(data.capabilities ?? [])).catch(()=>setRouterCapabilities([]));
+    fetch(`${API}/api/media/director/status`).then(r=>r.json()).then(setDirectorStatus).catch(()=>setDirectorStatus(undefined));
     fetch(`${API}/api/media/ffmpeg/status`).then(r=>r.json()).then(setFfmpegStatus).catch(()=>setFfmpegStatus(undefined));
     fetch(`${API}/api/media/comfyui/status`).then(r=>r.json()).then(setComfyStatus).catch(()=>setComfyStatus(undefined));
     fetch(`${API}/api/media/longcat/status`).then(r=>r.json()).then(setLongCatStatus).catch(()=>setLongCatStatus(undefined));
@@ -264,9 +267,11 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   async function sendMessage() {
     const value = input.trim();
     if (!selectedId || !value || busy) return;
+    const replaceApproved = Boolean(bundle?.brief || bundle?.scenes.length) ? window.confirm("Replace the existing video brief and scenes?") : false;
+    if ((bundle?.brief || bundle?.scenes.length) && !replaceApproved) return;
     setBusy(true); setInput(""); setError("");
     try {
-      const response = await fetch(`${API}/api/media/projects/${selectedId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: value }) });
+      const response = await fetch(`${API}/api/media/projects/${selectedId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: value, replaceApproved }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Unable to save media chat");
       setBundle(data);
@@ -276,6 +281,34 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     } finally {
       setBusy(false);
     }
+  }
+
+  async function regeneratePlan() {
+    if (!selectedId || !bundle) return;
+    if (!window.confirm("Regenerate and replace the full video brief and scene list?")) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Regenerate the full video plan with improved structure, dialogue, and provider-ready prompts.", replaceApproved: true })
+    });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to regenerate plan"); return; }
+    setBundle(data);
+    setNotice("Video plan regenerated");
+  }
+
+  async function regenerateScene(sceneId: string) {
+    if (!selectedId) return;
+    if (!window.confirm("Regenerate this scene and replace its current fields?")) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Regenerate the selected scene with stronger dialogue and a provider-ready visual prompt.", replaceApproved: true, regenerateSceneId: sceneId })
+    });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to regenerate scene"); return; }
+    setBundle(data);
+    setNotice("Scene regenerated");
   }
 
   async function reloadBundle() {
@@ -381,6 +414,40 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     await reloadBundle();
   }
 
+  async function importProjectAudio(file: File | undefined) {
+    if (!selectedId || !file) return;
+    if (!file.type.startsWith("audio/")) { setError("Only audio files can be uploaded as project music"); return; }
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/assets/upload?audioRole=MUSIC`, { method: "POST", body: form });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to upload project audio"); return; }
+    setNotice("Project audio uploaded");
+    await reloadBundle();
+  }
+
+  async function updateAudioSettings(assetId: string, settings: Partial<AudioSettings>) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/assets/${assetId}/audio`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: settings.audioRole, volume: settings.volume, trimStartSeconds: settings.trimStartSeconds, trimEndSeconds: settings.trimEndSeconds ?? undefined, fadeInSeconds: settings.fadeInSeconds, fadeOutSeconds: settings.fadeOutSeconds, muted: settings.muted })
+    });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to update audio settings"); return; }
+    setNotice("Audio settings saved");
+    await reloadBundle();
+  }
+
+  async function selectBackgroundMusic(assetId: string | null) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/background-music`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assetId }) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to select background music"); return; }
+    setNotice(assetId ? "Background music selected" : "Background music cleared");
+    await reloadBundle();
+  }
+
   async function replaceAsset(sceneId: string, assetId: string, file: File | undefined) {
     if (!selectedId || !file) return;
     if (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !file.type.startsWith("audio/")) {
@@ -446,6 +513,12 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const response = await fetch(`${API}/api/media/comfyui/test`, { method: "POST" });
     const data = await response.json();
     setComfyStatus(data);
+  }
+
+  async function testDirectorProvider() {
+    const response = await fetch(`${API}/api/media/director/test`, { method: "POST" });
+    const data = await response.json();
+    setDirectorStatus(data);
   }
 
   async function testLongCat() {
@@ -616,6 +689,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         {providers.map(provider => <div className="provider-box media-provider" key={provider.key}><strong>{provider.name}</strong><small>{provider.capabilities.join(", ")}</small><span className="risk medium">{provider.status}</span></div>)}
         <h3>Provider router</h3>
         {routerCapabilities.length ? routerCapabilities.map(provider => <div className="provider-box media-provider" key={provider.key}><strong>{provider.name}</strong><small>{provider.supports.join(", ")} · priority {provider.priority}</small><small>{provider.reason}</small><span className={`risk ${provider.enabled&&provider.healthy?"low":provider.enabled?"medium":"critical"}`}>{provider.mode} · {provider.enabled?"enabled":"disabled"}</span></div>) : <div className="provider-box media-provider"><strong>Checking</strong><small>Router status pending</small></div>}
+        <h3>Video Director AI</h3>
+        {directorStatus?<div className="provider-box media-provider"><strong>{directorStatus.configured?"Configured":"Fallback"}</strong><small>{directorStatus.provider} · {directorStatus.model || "deterministic"}</small><small>{directorStatus.baseUrlHostname}</small><span className={`risk ${directorStatus.status==="ok"?"low":directorStatus.status==="error"?"critical":"medium"}`}>{directorStatus.status}</span>{directorStatus.sanitizedError&&<p className="error">{directorStatus.sanitizedError}</p>}<button className="secondary" onClick={()=>void testDirectorProvider()}>Test NVIDIA</button></div>:<div className="provider-box media-provider"><strong>Checking</strong><small>Director provider status pending</small></div>}
         <h3>FFmpeg</h3>
         {ffmpegStatus?<div className="provider-box media-provider"><strong>{ffmpegStatus.available?"Available":"Unavailable"}</strong><small>{ffmpegStatus.ffmpegPath}</small><small>{ffmpegStatus.ffprobePath}</small><span className={`risk ${ffmpegStatus.available?"low":"medium"}`}>{ffmpegStatus.available?"ready":"uploads still work"}</span></div>:<div className="provider-box media-provider"><strong>Checking</strong><small>Media processing status pending</small></div>}
         <h3>ComfyUI</h3>
@@ -624,7 +699,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         {longCatStatus?<div className="provider-box media-provider"><strong>{longCatStatus.enabled?"Enabled":"Disabled"}</strong><small>{longCatStatus.baseUrlHostname}</small><small>{longCatStatus.timeoutMs} ms timeout</small><span className={`risk ${longCatStatus.status==="ok"?"low":longCatStatus.status==="error"?"critical":"medium"}`}>{longCatStatus.status ?? "configured"}</span>{longCatStatus.sanitizedError&&<p className="error">{longCatStatus.sanitizedError}</p>}<button className="secondary" onClick={()=>void testLongCat()}>Test LongCat</button></div>:<div className="provider-box media-provider"><strong>Checking</strong><small>LongCat status pending</small></div>}
       </aside>
       {selectedId && bundle ? <section className="chat-panel">
-        <div className="chat-header"><div><h2>{bundle.project.name}</h2><p>{bundle.project.description || "Director chat generates deterministic briefs, scenes, assets, and job stubs."}</p></div><div className="header-actions"><button className="secondary compact" onClick={()=>void exportPackage()}>Export JSON</button><button className="secondary compact" onClick={()=>setDialog("archive")}>Archive</button></div></div>
+        <div className="chat-header"><div><h2>{bundle.project.name}</h2><p>{bundle.project.description || "Director chat generates NVIDIA-backed briefs with deterministic fallback."}</p></div><div className="header-actions"><button className="secondary compact" onClick={()=>void regeneratePlan()}>Regenerate</button><button className="secondary compact" onClick={()=>void exportPackage()}>Export JSON</button><button className="secondary compact" onClick={()=>setDialog("archive")}>Archive</button></div></div>
         <div className="messages">
           {bundle.messages.length ? bundle.messages.map(message => <article key={message.id} className={`message ${message.sender==="user"?"user":"agent"}`}><strong>{message.sender==="user"?"You":"Video Director"}</strong><p>{message.content}</p></article>) : <article className="message agent"><strong>Video Director</strong><p>Describe the video you want. I will draft a brief and scene plan without calling external AI or rendering anything.</p></article>}
           <div ref={messagesEndRef}/>
@@ -642,9 +717,10 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         {bundle&&<RenderPanel jobs={bundle.renderJobs ?? []} onRender={renderDraft} onCancel={cancelRender} rendering={rendering}/>}
         <h3>Scenes</h3>
         {bundle?.scenes.length ? <div className="scene-list">{bundle.scenes.map((scene,index) => <div key={scene.id} className={`scene-tab ${scene.id===selectedScene?.id?"active":""}`}><button onClick={()=>setSelectedSceneId(scene.id)}><span>{scene.position}. {scene.title}</span><small>{scene.status}</small></button><div className="scene-order"><button onClick={()=>void reorderScenes(scene.id,-1)} disabled={index===0}>Up</button><button onClick={()=>void reorderScenes(scene.id,1)} disabled={index===bundle.scenes.length-1}>Down</button></div></div>)}</div> : <div className="card"><strong>No scenes</strong><p>Scene cards will appear after the first chat.</p></div>}
-        {selectedId&&selectedScene&&<SceneEditor projectId={selectedId} scene={selectedScene} assets={bundle?.assets.filter(asset=>asset.sceneId===selectedScene.id) ?? []} onSave={saveScene} onApprove={approveScene} onReject={rejectScene} onCopyPrompt={copyPrompt} onGenerateWan={generateWan} onGeneratePresenter={generatePresenter} onImportAsset={importAsset} onReplaceAsset={replaceAsset} onDeleteAsset={deleteAsset}/>}
+        {selectedId&&selectedScene&&<SceneEditor projectId={selectedId} scene={selectedScene} assets={bundle?.assets.filter(asset=>asset.sceneId===selectedScene.id) ?? []} onSave={saveScene} onApprove={approveScene} onReject={rejectScene} onCopyPrompt={copyPrompt} onRegenerateScene={regenerateScene} onGenerateWan={generateWan} onGeneratePresenter={generatePresenter} onImportAsset={importAsset} onReplaceAsset={replaceAsset} onDeleteAsset={deleteAsset} onUpdateAudio={updateAudioSettings} onSelectBackgroundMusic={selectBackgroundMusic}/>}
         <h3>Assets</h3>
-        {bundle?.assets.length ? bundle.assets.map(asset => <div className="mini" key={asset.id}><span>{asset.label}</span><small>{asset.mimeType ?? asset.status}</small></div>) : <div className="mini"><span>No planned assets</span><small>Waiting</small></div>}
+        {bundle&&<div className="mini"><span>Project music</span><label className="replace-button">Upload<input type="file" accept="audio/*" onChange={event=>void importProjectAudio(event.target.files?.[0])}/></label><button onClick={()=>void selectBackgroundMusic(null)}>Clear music</button></div>}
+        {bundle?.assets.length ? bundle.assets.map(asset => <div className="mini" key={asset.id}><span>{asset.label}</span><small>{asset.mimeType ?? asset.status}</small>{asset.kind==="audio"&&<div className="decision wrap"><button onClick={()=>void selectBackgroundMusic(asset.id)}>Use as music</button></div>}</div>) : <div className="mini"><span>No planned assets</span><small>Waiting</small></div>}
         <h3>Generation jobs</h3>
         {bundle?.generationJobs.length ? bundle.generationJobs.map(job => { const routing=parseRouting(job.resultJson); const flow=parseFlowPackage(job.resultJson); return <div className="mini" key={job.id}><span>{job.providerKey}</span><small>{job.status}</small>{routing&&<small>Route: {routing.selectedProvider} · {routing.reason}</small>}{job.providerKey==="google-flow"&&flow&&<small>{flow.scene.aspectRatio} · {flow.scene.durationSeconds}s</small>}{job.providerKey==="google-flow"&&<div className="decision wrap"><button onClick={()=>void copyFlowPrompt(job)}>Copy prompt</button><button onClick={()=>exportFlowPackage(job)}>Export package</button><a className="button-link" href="https://labs.google/fx/tools/flow" target="_blank" rel="noreferrer">Open Flow</a><button onClick={()=>void markFlowGenerated(job.id)} disabled={!["WAITING_FOR_USER","GENERATED"].includes(job.status)}>Generated</button><label className="replace-button">Import<input type="file" accept="image/*,video/*" onChange={event=>void importFlowAsset(job.id,event.target.files?.[0])}/></label><button onClick={()=>void rejectFlow(job.id)} disabled={["IMPORTED","FAILED","CANCELLED"].includes(job.status)}>Reject</button><button onClick={()=>void fallbackFlowToWan(job.id)} disabled={["IMPORTED","CANCELLED"].includes(job.status)}>Fallback Wan</button></div>}{["wan-2.2","longcat-avatar"].includes(job.providerKey)&&<div className="decision wrap"><button onClick={()=>void cancelGeneration(job.id)} disabled={["COMPLETED","FAILED","CANCELLED"].includes(job.status)}>Cancel</button><button onClick={()=>void retryGeneration(job.id)} disabled={!["FAILED","CANCELLED"].includes(job.status)}>Retry</button></div>}</div>; }) : <div className="mini"><span>Provider stubs</span><small>Not seeded</small></div>}
       </aside>
@@ -745,21 +821,27 @@ function ComfyWorkflowPanel({workflows,sceneId,onImport,onUpdate,onActivate,onDe
   return <div className="card editor-card workflow-card"><div className="row first-row"><strong>{editing?`Edit v${editing.version}`:"Import workflow"}</strong><button onClick={()=>{setEditing(null);setJsonText("");setMappingText(JSON.stringify(defaultWorkflowMapping,null,2));setPreview("");}}>New</button></div><div className="split-fields"><label>Type<select value={workflowType} onChange={event=>setWorkflowType(event.target.value as "WAN_T2V"|"WAN_I2V")} disabled={Boolean(editing)}><option>WAN_T2V</option><option>WAN_I2V</option></select></label><label>Name<input value={name} onChange={event=>setName(event.target.value)}/></label></div><label>Workflow JSON<textarea value={jsonText} onChange={event=>setJsonText(event.target.value)} placeholder='{"3":{"class_type":"KSampler","inputs":{"seed":1}}}'/></label><label>Mapping JSON<textarea value={mappingText} onChange={event=>setMappingText(event.target.value)}/></label><label className="checkbox-row"><input type="checkbox" checked={activate} onChange={event=>setActivate(event.target.checked)}/> Activate when valid</label>{error&&<p className="error">{error}</p>}<div className="decision wrap"><button onClick={()=>void save()}>{editing?"Save new version":"Import"}</button><button onClick={()=>void previewCurrent()} disabled={!editing}>Preview compiled</button></div>{preview&&<pre>{preview}</pre>}<div className="workflow-list">{workflows.map(workflow => <div className="mini" key={workflow.id}><span>{workflow.name} v{workflow.version}</span><small>{workflow.workflowType} · {workflow.status} · {workflow.isActive?"active":"inactive"}</small><div className="decision wrap"><button onClick={()=>loadWorkflow(workflow)}>Edit</button><button onClick={()=>void previewCurrent(workflow)} disabled={workflow.status!=="VALID"}>Preview</button><button onClick={()=>void onActivate(workflow.id)} disabled={workflow.status!=="VALID" || Boolean(workflow.isActive)}>Activate</button><button onClick={()=>void onDelete(workflow.id)}>Delete</button></div>{parseValidationIssues(workflow.validationJson).map(issue=><small className="error" key={`${workflow.id}-${issue.code}-${issue.message}`}>{issue.code}: {issue.message}</small>)}</div>)}</div></div>;
 }
 
-function SceneEditor({projectId,scene,assets,onSave,onApprove,onReject,onCopyPrompt,onGenerateWan,onGeneratePresenter,onImportAsset,onReplaceAsset,onDeleteAsset}:{projectId:string;scene:MediaScene;assets:MediaAsset[];onSave:(scene:MediaScene)=>Promise<void>;onApprove:(sceneId:string)=>Promise<void>;onReject:(sceneId:string)=>Promise<void>;onCopyPrompt:(sceneId:string)=>Promise<void>;onGenerateWan:(sceneId:string,mode:"text-to-video"|"image-to-video")=>Promise<void>;onGeneratePresenter:(sceneId:string)=>Promise<void>;onImportAsset:(sceneId:string,file:File|undefined)=>Promise<void>;onReplaceAsset:(sceneId:string,assetId:string,file:File|undefined)=>Promise<void>;onDeleteAsset:(sceneId:string,assetId:string)=>Promise<void>}) {
+function SceneEditor({projectId,scene,assets,onSave,onApprove,onReject,onCopyPrompt,onRegenerateScene,onGenerateWan,onGeneratePresenter,onImportAsset,onReplaceAsset,onDeleteAsset,onUpdateAudio,onSelectBackgroundMusic}:{projectId:string;scene:MediaScene;assets:MediaAsset[];onSave:(scene:MediaScene)=>Promise<void>;onApprove:(sceneId:string)=>Promise<void>;onReject:(sceneId:string)=>Promise<void>;onCopyPrompt:(sceneId:string)=>Promise<void>;onRegenerateScene:(sceneId:string)=>Promise<void>;onGenerateWan:(sceneId:string,mode:"text-to-video"|"image-to-video")=>Promise<void>;onGeneratePresenter:(sceneId:string)=>Promise<void>;onImportAsset:(sceneId:string,file:File|undefined)=>Promise<void>;onReplaceAsset:(sceneId:string,assetId:string,file:File|undefined)=>Promise<void>;onDeleteAsset:(sceneId:string,assetId:string)=>Promise<void>;onUpdateAudio:(assetId:string,settings:Partial<AudioSettings>)=>Promise<void>;onSelectBackgroundMusic:(assetId:string|null)=>Promise<void>}) {
   const [draft,setDraft]=useState(scene);
   useEffect(()=>setDraft(scene),[scene]);
   const hasImage = assets.some(asset=>asset.kind==="image" && asset.localPath);
   const hasAudio = assets.some(asset=>asset.kind==="audio" && asset.localPath);
-  return <div className="card editor-card scene-editor"><div className="row first-row"><strong>Scene {scene.position}</strong><span className={`scene-status ${scene.status.toLowerCase()}`}>{scene.status}</span></div><label>Title<input value={draft.title} onChange={event=>setDraft({...draft,title:event.target.value})}/></label><div className="split-fields"><label>Duration<input type="number" min="1" value={draft.durationSeconds} onChange={event=>setDraft({...draft,durationSeconds:Number(event.target.value)})}/></label><label>Aspect ratio<select value={draft.aspectRatio} onChange={event=>setDraft({...draft,aspectRatio:event.target.value})}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label></div><label>Status<select value={draft.status} onChange={event=>setDraft({...draft,status:event.target.value as MediaSceneStatus})}><option>DRAFT</option><option>APPROVED</option><option>GENERATING</option><option>ASSET_READY</option><option>REJECTED</option></select></label><label>Dialogue<textarea value={draft.dialogue} onChange={event=>setDraft({...draft,dialogue:event.target.value})}/></label><label>Visual prompt<textarea value={draft.visualPrompt} onChange={event=>setDraft({...draft,visualPrompt:event.target.value})}/></label><div className="decision wrap"><button onClick={()=>void onSave(draft)}>Save scene</button><button onClick={()=>void onApprove(scene.id)} disabled={scene.status==="APPROVED"}>Approve</button><button onClick={()=>void onReject(scene.id)} disabled={scene.status==="REJECTED"}>Reject</button><button onClick={()=>void onCopyPrompt(scene.id)}>Copy prompt</button><button onClick={()=>void onGenerateWan(scene.id,"text-to-video")} disabled={scene.status!=="APPROVED"}>Generate Wan T2V</button><button onClick={()=>void onGenerateWan(scene.id,"image-to-video")} disabled={scene.status!=="APPROVED" || !hasImage}>Generate Wan I2V</button><button onClick={()=>void onGeneratePresenter(scene.id)} disabled={scene.status!=="APPROVED" || !hasImage || !hasAudio}>Generate Presenter</button></div><label className="file-import">Upload media<input type="file" accept="image/*,video/*,audio/*" onChange={event=>void onImportAsset(scene.id,event.target.files?.[0])}/></label>{assets.length?<div className="asset-stack">{assets.map(asset=><AssetItem key={asset.id} projectId={projectId} sceneId={scene.id} asset={asset} onReplaceAsset={onReplaceAsset} onDeleteAsset={onDeleteAsset}/>)}</div>:null}</div>;
+  return <div className="card editor-card scene-editor"><div className="row first-row"><strong>Scene {scene.position}</strong><span className={`scene-status ${scene.status.toLowerCase()}`}>{scene.status}</span></div><label>Title<input value={draft.title} onChange={event=>setDraft({...draft,title:event.target.value})}/></label><div className="split-fields"><label>Duration<input type="number" min="1" value={draft.durationSeconds} onChange={event=>setDraft({...draft,durationSeconds:Number(event.target.value)})}/></label><label>Aspect ratio<select value={draft.aspectRatio} onChange={event=>setDraft({...draft,aspectRatio:event.target.value})}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label></div><label>Status<select value={draft.status} onChange={event=>setDraft({...draft,status:event.target.value as MediaSceneStatus})}><option>DRAFT</option><option>APPROVED</option><option>GENERATING</option><option>ASSET_READY</option><option>REJECTED</option></select></label><label>Dialogue<textarea value={draft.dialogue} onChange={event=>setDraft({...draft,dialogue:event.target.value})}/></label><label>Visual prompt<textarea value={draft.visualPrompt} onChange={event=>setDraft({...draft,visualPrompt:event.target.value})}/></label><div className="decision wrap"><button onClick={()=>void onSave(draft)}>Save scene</button><button onClick={()=>void onApprove(scene.id)} disabled={scene.status==="APPROVED"}>Approve</button><button onClick={()=>void onReject(scene.id)} disabled={scene.status==="REJECTED"}>Reject</button><button onClick={()=>void onCopyPrompt(scene.id)}>Copy prompt</button><button onClick={()=>void onRegenerateScene(scene.id)}>Regenerate Scene</button><button onClick={()=>void onGenerateWan(scene.id,"text-to-video")} disabled={scene.status!=="APPROVED"}>Generate Wan T2V</button><button onClick={()=>void onGenerateWan(scene.id,"image-to-video")} disabled={scene.status!=="APPROVED" || !hasImage}>Generate Wan I2V</button><button onClick={()=>void onGeneratePresenter(scene.id)} disabled={scene.status!=="APPROVED" || !hasImage || !hasAudio}>Generate Presenter</button></div><label className="file-import">Upload media<input type="file" accept="image/*,video/*,audio/*" onChange={event=>void onImportAsset(scene.id,event.target.files?.[0])}/></label>{assets.length?<div className="asset-stack">{assets.map(asset=><AssetItem key={asset.id} projectId={projectId} sceneId={scene.id} asset={asset} onReplaceAsset={onReplaceAsset} onDeleteAsset={onDeleteAsset} onUpdateAudio={onUpdateAudio} onSelectBackgroundMusic={onSelectBackgroundMusic}/>)}</div>:null}</div>;
 }
 
-function AssetItem({projectId,sceneId,asset,onReplaceAsset,onDeleteAsset}:{projectId:string;sceneId:string;asset:MediaAsset;onReplaceAsset:(sceneId:string,assetId:string,file:File|undefined)=>Promise<void>;onDeleteAsset:(sceneId:string,assetId:string)=>Promise<void>}) {
+function AssetItem({projectId,sceneId,asset,onReplaceAsset,onDeleteAsset,onUpdateAudio,onSelectBackgroundMusic}:{projectId:string;sceneId:string;asset:MediaAsset;onReplaceAsset:(sceneId:string,assetId:string,file:File|undefined)=>Promise<void>;onDeleteAsset:(sceneId:string,assetId:string)=>Promise<void>;onUpdateAudio:(assetId:string,settings:Partial<AudioSettings>)=>Promise<void>;onSelectBackgroundMusic:(assetId:string|null)=>Promise<void>}) {
   const downloadUrl = `${API}/api/media/projects/${projectId}/assets/${asset.id}/download`;
   const thumbnailUrl = asset.thumbnailPath ? `${API}/api/media/projects/${projectId}/assets/${asset.id}/thumbnail` : downloadUrl;
   const previewUrl = asset.previewPath ? `${API}/api/media/projects/${projectId}/assets/${asset.id}/preview` : downloadUrl;
   const inspection = parseInspection(asset.inspectionJson);
   const issues = parseQcIssues(asset.qcIssuesJson);
-  return <div className="asset-item"><div className="asset-preview">{asset.mimeType?.startsWith("image/")?<img src={thumbnailUrl} alt={asset.originalName ?? asset.label}/>:asset.mimeType?.startsWith("video/")?<video poster={asset.thumbnailPath?thumbnailUrl:undefined} src={previewUrl} controls/>:asset.mimeType?.startsWith("audio/")?<audio src={downloadUrl} controls/>:<span>No preview</span>}</div><div className="asset-meta"><strong>{asset.originalName ?? asset.fileName ?? asset.label}</strong><small>{asset.mimeType ?? asset.status} · {formatBytes(asset.sizeBytes)} · {asset.checksumSha256?.slice(0,12) ?? "no checksum"}</small><span className={`qc-pill ${asset.qcStatus.toLowerCase()}`}>QC {asset.qcStatus}</span>{inspection&&<div className="metadata-grid"><span>Duration</span><strong>{inspection.durationSeconds?.toFixed(2) ?? "n/a"}s</strong><span>Resolution</span><strong>{inspection.width&&inspection.height?`${inspection.width}x${inspection.height}`:"n/a"}</strong><span>FPS</span><strong>{inspection.fps ?? "n/a"}</strong><span>Codecs</span><strong>{[inspection.videoCodec,inspection.audioCodec].filter(Boolean).join(" / ") || "n/a"}</strong><span>Audio</span><strong>{inspection.hasAudio?"yes":"no"}</strong></div>}{issues.length?<div className="qc-list">{issues.map(issue=><small key={issue.code}>{issue.code}: {issue.message}</small>)}</div>:null}<div className="decision wrap"><a className="button-link" href={downloadUrl} download={asset.originalName ?? asset.fileName ?? "asset"}>Download</a><label className="replace-button">Replace<input type="file" accept="image/*,video/*,audio/*" onChange={event=>void onReplaceAsset(sceneId,asset.id,event.target.files?.[0])}/></label><button onClick={()=>void onDeleteAsset(sceneId,asset.id)}>Delete</button></div></div></div>;
+  const audioSettings = asset.kind === "audio" ? parseAudioSettings(asset.metadataJson) : null;
+  return <div className="asset-item"><div className="asset-preview">{asset.mimeType?.startsWith("image/")?<img src={thumbnailUrl} alt={asset.originalName ?? asset.label}/>:asset.mimeType?.startsWith("video/")?<video poster={asset.thumbnailPath?thumbnailUrl:undefined} src={previewUrl} controls/>:asset.mimeType?.startsWith("audio/")?<audio src={downloadUrl} controls/>:<span>No preview</span>}</div><div className="asset-meta"><strong>{asset.originalName ?? asset.fileName ?? asset.label}</strong><small>{asset.mimeType ?? asset.status} | {formatBytes(asset.sizeBytes)} | {asset.checksumSha256?.slice(0,12) ?? "no checksum"}</small><span className={`qc-pill ${asset.qcStatus.toLowerCase()}`}>QC {asset.qcStatus}</span>{inspection&&<div className="metadata-grid"><span>Duration</span><strong>{inspection.durationSeconds?.toFixed(2) ?? "n/a"}s</strong><span>Resolution</span><strong>{inspection.width&&inspection.height?`${inspection.width}x${inspection.height}`:"n/a"}</strong><span>FPS</span><strong>{inspection.fps ?? "n/a"}</strong><span>Codecs</span><strong>{[inspection.videoCodec,inspection.audioCodec].filter(Boolean).join(" / ") || "n/a"}</strong><span>Audio</span><strong>{inspection.hasAudio?"yes":"no"}</strong></div>}{audioSettings&&<AudioControls assetId={asset.id} settings={audioSettings} onUpdateAudio={onUpdateAudio} onSelectBackgroundMusic={onSelectBackgroundMusic}/>} {issues.length?<div className="qc-list">{issues.map(issue=><small key={issue.code}>{issue.code}: {issue.message}</small>)}</div>:null}<div className="decision wrap"><a className="button-link" href={downloadUrl} download={asset.originalName ?? asset.fileName ?? "asset"}>Download</a><label className="replace-button">Replace<input type="file" accept="image/*,video/*,audio/*" onChange={event=>void onReplaceAsset(sceneId,asset.id,event.target.files?.[0])}/></label><button onClick={()=>void onDeleteAsset(sceneId,asset.id)}>Delete</button></div></div></div>;
+}
+
+function AudioControls({assetId,settings,onUpdateAudio,onSelectBackgroundMusic}:{assetId:string;settings:AudioSettings;onUpdateAudio:(assetId:string,settings:Partial<AudioSettings>)=>Promise<void>;onSelectBackgroundMusic:(assetId:string|null)=>Promise<void>}) {
+  const update = (patch: Partial<AudioSettings>) => void onUpdateAudio(assetId, patch);
+  return <div className="audio-controls"><div className="metadata-grid"><span>Role</span><select value={settings.audioRole} onChange={event=>update({audioRole:event.target.value as AudioSettings["audioRole"]})}><option>NARRATION</option><option>MUSIC</option><option>SFX</option><option>SCENE_AUDIO</option></select><span>Volume</span><input type="number" min="0" max="2" step="0.05" value={settings.volume} onChange={event=>update({volume:Number(event.target.value)})}/><span>Trim</span><div className="inline-inputs"><input type="number" min="0" step="0.1" value={settings.trimStartSeconds} onChange={event=>update({trimStartSeconds:Number(event.target.value)})}/><input type="number" min="0" step="0.1" value={settings.trimEndSeconds ?? ""} placeholder="end" onChange={event=>update({trimEndSeconds:event.target.value ? Number(event.target.value) : null})}/></div><span>Fade</span><div className="inline-inputs"><input type="number" min="0" max="60" step="0.1" value={settings.fadeInSeconds} onChange={event=>update({fadeInSeconds:Number(event.target.value)})}/><input type="number" min="0" max="60" step="0.1" value={settings.fadeOutSeconds} onChange={event=>update({fadeOutSeconds:Number(event.target.value)})}/></div><span>Muted</span><input type="checkbox" checked={settings.muted} onChange={event=>update({muted:event.target.checked})}/></div><div className="decision wrap"><button onClick={()=>void onSelectBackgroundMusic(assetId)} disabled={settings.backgroundMusic}>Use as music</button>{settings.backgroundMusic&&<button onClick={()=>void onSelectBackgroundMusic(null)}>Clear music</button>}</div></div>;
 }
 
 function parseJsonList(value: string): string[] {
@@ -782,6 +864,26 @@ function parseInspection(value: string | null): { durationSeconds: number | null
   if (!value) return null;
   try { return JSON.parse(value) as { durationSeconds: number | null; width: number | null; height: number | null; fps: number | null; videoCodec: string | null; audioCodec: string | null; hasAudio: boolean }; }
   catch { return null; }
+}
+
+function parseAudioSettings(value: string | null): AudioSettings | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<AudioSettings>;
+    const audioRole = parsed.audioRole === "MUSIC" || parsed.audioRole === "SFX" || parsed.audioRole === "SCENE_AUDIO" ? parsed.audioRole : "NARRATION";
+    return {
+      audioRole,
+      volume: typeof parsed.volume === "number" ? parsed.volume : audioRole === "MUSIC" ? 0.25 : 1,
+      trimStartSeconds: typeof parsed.trimStartSeconds === "number" ? parsed.trimStartSeconds : 0,
+      trimEndSeconds: typeof parsed.trimEndSeconds === "number" ? parsed.trimEndSeconds : null,
+      fadeInSeconds: typeof parsed.fadeInSeconds === "number" ? parsed.fadeInSeconds : 0,
+      fadeOutSeconds: typeof parsed.fadeOutSeconds === "number" ? parsed.fadeOutSeconds : 0,
+      muted: Boolean(parsed.muted),
+      backgroundMusic: Boolean(parsed.backgroundMusic)
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseQcIssues(value: string): Array<{ code: string; message: string }> {

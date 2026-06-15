@@ -2,11 +2,14 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { sanitizeProviderError } from "./ai-provider.js";
+import type { VideoDirectorPlan, VideoDirectorProviderResult, VideoDirectorScene } from "./media-director-provider.js";
 
 export type MediaProjectStatus = "ACTIVE" | "ARCHIVED";
 export type MediaSender = "user" | "director";
 export type MediaBriefStatus = "DRAFT" | "APPROVED";
 export type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
+export type MediaAudioRole = "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO";
 
 export type MediaAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
 
@@ -134,7 +137,13 @@ type BriefDraft = {
   style: string;
   durationSeconds: number;
   constraints: string[];
-  scenes: Array<{ title: string; description: string; durationSeconds: number; assetLabel: string }>;
+  script?: string;
+  scenes: Array<{ title: string; description: string; durationSeconds: number; dialogue?: string; visualPrompt?: string; aspectRatio?: string; assetLabel: string }>;
+};
+
+export type VideoDirectorProvider = {
+  generatePlan(input: { projectName: string; projectDescription: string | null; userIdea: string; existingContext: unknown }): Promise<VideoDirectorProviderResult<VideoDirectorPlan>>;
+  generateScene(input: { projectName: string; projectDescription: string | null; userIdea: string; existingBrief: unknown; existingScene: unknown }): Promise<VideoDirectorProviderResult<VideoDirectorScene>>;
 };
 
 export type MediaProductionPackage = {
@@ -321,7 +330,7 @@ export async function uploadSceneAsset(db: Database.Database, projectId: string,
   await fs.mkdir(path.dirname(localPath), { recursive: true });
   await fs.writeFile(localPath, input.bytes, { flag: "wx" });
   const checksum = createHash("sha256").update(input.bytes).digest("hex");
-  const metadata = { uploadedVia: "multipart", sceneId, originalStatus: scene.status };
+  const metadata = kind === "audio" ? normalizeAudioMetadata({ uploadedVia: "multipart", sceneId, originalStatus: scene.status, audioRole: "NARRATION" }) : { uploadedVia: "multipart", sceneId, originalStatus: scene.status };
   db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, sceneId, kind, input.originalName, "local-upload", "UPLOADED", safeName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify(metadata), input.now, input.now);
   db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -330,6 +339,72 @@ export async function uploadSceneAsset(db: Database.Database, projectId: string,
     payload: { sceneId, assetId: input.id, originalName: input.originalName, mimeType: input.mimeType, sizeBytes: input.bytes.length, checksumSha256: checksum, localPath }
   });
   return getMediaAssetOrThrow(db, projectId, input.id);
+}
+
+export async function uploadProjectAsset(db: Database.Database, projectId: string, input: {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  bytes: Buffer;
+  now: string;
+  audioRole?: MediaAudioRole;
+  storageRoot?: string;
+}, audit: MediaAuditWriter): Promise<MediaAsset> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  validateAssetUpload(input.originalName, input.mimeType, input.bytes.length);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind) throw new MediaStudioError("Only allowed image, video, and audio assets can be uploaded", 400);
+  const storageRoot = resolveStorageRoot(input.storageRoot);
+  const safeName = safeAssetFileName(input.id, input.originalName, input.mimeType);
+  const localPath = resolveAssetPath(storageRoot, projectId, "project", safeName);
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, input.bytes, { flag: "wx" });
+  const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  const metadata = kind === "audio" ? normalizeAudioMetadata({ audioRole: input.audioRole ?? "MUSIC" }) : { uploadedVia: "project-upload" };
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, null, kind, input.originalName, "local-upload", "UPLOADED", safeName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify(metadata), input.now, input.now);
+  audit("MEDIA_PROJECT_ASSET_UPLOADED", `Project asset ${input.originalName} uploaded`, {
+    projectId,
+    payload: { assetId: input.id, originalName: input.originalName, mimeType: input.mimeType, sizeBytes: input.bytes.length, checksumSha256: checksum, audioRole: input.audioRole ?? null }
+  });
+  return getMediaAssetOrThrow(db, projectId, input.id);
+}
+
+export function updateAudioAssetSettings(db: Database.Database, projectId: string, assetId: string, input: {
+  role?: MediaAudioRole;
+  volume?: number;
+  trimStartSeconds?: number;
+  trimEndSeconds?: number;
+  fadeInSeconds?: number;
+  fadeOutSeconds?: number;
+  muted?: boolean;
+  now: string;
+}, audit: MediaAuditWriter): MediaAsset {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  if (asset.kind !== "audio") throw new MediaStudioError("Audio settings can only be applied to audio assets", 400);
+  const metadata = normalizeAudioMetadata({ ...parseMetadata(asset.metadataJson), ...input, audioRole: input.role ?? parseMetadata(asset.metadataJson).audioRole });
+  if (metadata.trimEndSeconds !== null && metadata.trimEndSeconds < metadata.trimStartSeconds) {
+    throw new MediaStudioError("Audio trim end must be after trim start", 400);
+  }
+  db.prepare("UPDATE media_assets SET metadata_json=?,updated_at=? WHERE id=? AND media_project_id=?").run(JSON.stringify(metadata), input.now, assetId, projectId);
+  audit("MEDIA_AUDIO_SETTINGS_UPDATED", `Audio settings updated for ${asset.originalName ?? asset.label}`, { projectId, payload: { assetId, settings: metadata } });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export function selectProjectBackgroundMusic(db: Database.Database, projectId: string, assetId: string | null, timestamp: string, audit: MediaAuditWriter): { selectedAssetId: string | null } {
+  getActiveMediaProjectOrThrow(db, projectId);
+  if (assetId) {
+    const asset = getMediaAssetOrThrow(db, projectId, assetId);
+    if (asset.kind !== "audio") throw new MediaStudioError("Background music must be an audio asset", 400);
+  }
+  const assets = listMediaAssets(db, projectId).filter((asset) => asset.kind === "audio");
+  for (const asset of assets) {
+    const metadata = normalizeAudioMetadata({ ...parseMetadata(asset.metadataJson), backgroundMusic: asset.id === assetId, audioRole: asset.id === assetId ? "MUSIC" : parseMetadata(asset.metadataJson).audioRole });
+    db.prepare("UPDATE media_assets SET metadata_json=?,updated_at=? WHERE id=? AND media_project_id=?").run(JSON.stringify(metadata), timestamp, asset.id, projectId);
+  }
+  audit("MEDIA_BACKGROUND_MUSIC_SELECTED", assetId ? "Project background music selected" : "Project background music cleared", { projectId, payload: { assetId } });
+  return { selectedAssetId: assetId };
 }
 
 export async function replaceSceneAsset(db: Database.Database, projectId: string, sceneId: string, assetId: string, input: {
@@ -357,7 +432,7 @@ export async function replaceSceneAsset(db: Database.Database, projectId: string
   if (existing.previewPath) await removeStoredAssetFile(existing.previewPath, storageRoot);
   if (existing.thumbnailPath) await removeStoredAssetFile(existing.thumbnailPath, storageRoot);
   const checksum = createHash("sha256").update(input.bytes).digest("hex");
-  const metadata = { uploadedVia: "multipart-replace", sceneId, replacedAssetId: assetId, previousChecksumSha256: existing.checksumSha256 };
+  const metadata = kind === "audio" ? normalizeAudioMetadata({ ...parseMetadata(existing.metadataJson), uploadedVia: "multipart-replace", sceneId, replacedAssetId: assetId, previousChecksumSha256: existing.checksumSha256 }) : { uploadedVia: "multipart-replace", sceneId, replacedAssetId: assetId, previousChecksumSha256: existing.checksumSha256 };
   db.prepare(`UPDATE media_assets SET kind=?,label=?,source='local-upload',status='UPLOADED',file_name=?,original_name=?,mime_type=?,size_bytes=?,checksum_sha256=?,local_path=?,inspection_json=NULL,qc_status='PENDING',qc_issues_json='[]',preview_path=NULL,thumbnail_path=NULL,metadata_json=?,updated_at=? WHERE id=? AND media_project_id=?`)
     .run(kind, input.originalName, safeName, input.originalName, input.mimeType, input.bytes.length, checksum, nextLocalPath, JSON.stringify(metadata), input.now, assetId, projectId);
   db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -416,22 +491,68 @@ export function listMediaMessages(db: Database.Database, projectId: string): Med
     FROM media_chat_messages WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaChatMessage[];
 }
 
-export function addDirectorChatMessage(db: Database.Database, input: { projectId: string; message: string; now: string; createId: IdFactory }, audit: MediaAuditWriter) {
+export async function addDirectorChatMessage(db: Database.Database, input: {
+  projectId: string;
+  message: string;
+  now: string;
+  createId: IdFactory;
+  replaceApproved?: boolean;
+  regenerateSceneId?: string;
+  directorProvider?: VideoDirectorProvider | null;
+}, audit: MediaAuditWriter) {
   const project = getActiveMediaProjectOrThrow(db, input.projectId);
+  const existingBrief = getMediaBrief(db, project.id);
+  const existingScenes = listMediaScenes(db, project.id);
+  if ((input.regenerateSceneId || existingBrief || existingScenes.length) && !input.replaceApproved) {
+    throw new MediaStudioError("Replacing existing Video Director plan content requires approval", 403);
+  }
   const userMessageId = input.createId();
   db.prepare("INSERT INTO media_chat_messages (id,media_project_id,sender,content,created_at) VALUES (?,?,?,?,?)")
     .run(userMessageId, project.id, "user", input.message, input.now);
 
   const messages = listMediaMessages(db, project.id);
-  const draft = generateDeterministicBrief(project.name, messages.map((message) => message.content));
+  if (input.regenerateSceneId) {
+    const scene = getMediaSceneOrThrow(db, project.id, input.regenerateSceneId);
+    const result = await generateSceneWithFallback(project, existingBrief, scene, input.message, input.directorProvider ?? null);
+    audit(result.jobResult.fallback ? "MEDIA_DIRECTOR_PROVIDER_FALLBACK" : "MEDIA_DIRECTOR_PROVIDER_COMPLETED", result.jobResult.fallback ? "Video Director scene provider failed; deterministic fallback used" : "Video Director scene provider completed", {
+      projectId: project.id,
+      payload: { sceneId: scene.id, provider: result.jobResult.provider, model: result.jobResult.model, usage: result.jobResult.usage, error: result.jobResult.error }
+    });
+    const updatedScene = replaceSceneFromDirector(db, project.id, scene.id, result.scene, input.now);
+    insertDirectorGenerationJob(db, input.createId(), project.id, result.providerKey, "COMPLETED", {
+      mode: "SCENE_REGENERATION",
+      sceneId: scene.id,
+      message: input.message
+    }, result.jobResult, input.now);
+    const response = formatSceneResponse(updatedScene, result.source);
+    const directorMessageId = input.createId();
+    db.prepare("INSERT INTO media_chat_messages (id,media_project_id,sender,content,created_at) VALUES (?,?,?,?,?)")
+      .run(directorMessageId, project.id, "director", response, input.now);
+    audit("MEDIA_DIRECTOR_SCENE_REGENERATED", `Scene regenerated for ${project.name}`, {
+      projectId: project.id,
+      payload: { sceneId: scene.id, userMessageId, directorMessageId, provider: result.jobResult.provider, model: result.jobResult.model, usage: result.jobResult.usage, fallback: result.jobResult.fallback }
+    });
+    return getMediaProjectBundle(db, project.id);
+  }
+
+  const result = await generatePlanWithFallback(project, input.message, messages.map((message) => message.content), getMediaProjectBundle(db, project.id), input.directorProvider ?? null);
+  audit(result.jobResult.fallback ? "MEDIA_DIRECTOR_PROVIDER_FALLBACK" : "MEDIA_DIRECTOR_PROVIDER_COMPLETED", result.jobResult.fallback ? "Video Director provider failed; deterministic fallback used" : "Video Director provider completed", {
+    projectId: project.id,
+    payload: { provider: result.jobResult.provider, model: result.jobResult.model, usage: result.jobResult.usage, error: result.jobResult.error }
+  });
+  const draft = planToBriefDraft(result.plan);
   const brief = replaceBrief(db, project.id, draft, input.now, input.createId);
-  const response = formatDirectorResponse(draft);
+  insertDirectorGenerationJob(db, input.createId(), project.id, result.providerKey, "COMPLETED", {
+    mode: "FULL_PLAN",
+    message: input.message
+  }, result.jobResult, input.now);
+  const response = formatDirectorResponse(draft, result.source);
   const directorMessageId = input.createId();
   db.prepare("INSERT INTO media_chat_messages (id,media_project_id,sender,content,created_at) VALUES (?,?,?,?,?)")
     .run(directorMessageId, project.id, "director", response, input.now);
   audit("MEDIA_DIRECTOR_BRIEF_UPDATED", `Video brief updated for ${project.name}`, {
     projectId: project.id,
-    payload: { briefId: brief.id, userMessageId, directorMessageId, sceneCount: draft.scenes.length }
+    payload: { briefId: brief.id, userMessageId, directorMessageId, sceneCount: draft.scenes.length, provider: result.jobResult.provider, model: result.jobResult.model, usage: result.jobResult.usage, fallback: result.jobResult.fallback }
   });
   return getMediaProjectBundle(db, project.id);
 }
@@ -491,7 +612,7 @@ function replaceBrief(db: Database.Database, projectId: string, draft: BriefDraf
   for (const [index, scene] of draft.scenes.entries()) {
     const sceneId = createId();
     db.prepare(`INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, scene.title, scene.description, scene.durationSeconds, "", scene.description, "16:9", "DRAFT", timestamp, timestamp);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, scene.title, scene.description, scene.durationSeconds, scene.dialogue ?? "", scene.visualPrompt ?? scene.description, scene.aspectRatio ?? "16:9", "DRAFT", timestamp, timestamp);
     db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?)`).run(createId(), projectId, sceneId, "reference", scene.assetLabel, "chat-derived", "PLANNED", timestamp, timestamp);
   }
@@ -505,6 +626,126 @@ function seedProviderJobs(db: Database.Database, projectId: string, timestamp: s
     db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(createId(), projectId, provider.key, "STUBBED", JSON.stringify({ providerKey: provider.key, mode: "not-implemented", ...request }), null, timestamp, timestamp);
   }
+}
+
+async function generatePlanWithFallback(project: MediaProject, userIdea: string, messages: string[], existingContext: unknown, provider: VideoDirectorProvider | null) {
+  if (provider) {
+    try {
+      const result = await provider.generatePlan({ projectName: project.name, projectDescription: project.description, userIdea, existingContext });
+      return {
+        source: `${result.provider}:${result.model}`,
+        providerKey: "nvidia-video-director",
+        plan: result.value,
+        jobResult: { provider: result.provider, model: result.model, usage: result.usage, fallback: false, plan: result.value }
+      };
+    } catch (error) {
+      const fallbackPlan = deterministicPlan(project.name, messages);
+      return {
+        source: "deterministic fallback",
+        providerKey: "nvidia-video-director",
+        plan: fallbackPlan,
+        jobResult: { provider: "nvidia", model: null, usage: null, fallback: true, error: sanitizeProviderError(error), plan: fallbackPlan }
+      };
+    }
+  }
+  const plan = deterministicPlan(project.name, messages);
+  return {
+    source: "deterministic generator",
+    providerKey: "deterministic-video-director",
+    plan,
+    jobResult: { provider: "deterministic", model: null, usage: null, fallback: false, plan }
+  };
+}
+
+async function generateSceneWithFallback(project: MediaProject, brief: MediaBrief | null, scene: MediaScene, userIdea: string, provider: VideoDirectorProvider | null) {
+  if (provider) {
+    try {
+      const result = await provider.generateScene({ projectName: project.name, projectDescription: project.description, userIdea, existingBrief: brief, existingScene: scene });
+      return {
+        source: `${result.provider}:${result.model}`,
+        providerKey: "nvidia-video-director",
+        scene: result.value,
+        jobResult: { provider: result.provider, model: result.model, usage: result.usage, fallback: false, scene: result.value }
+      };
+    } catch (error) {
+      const fallbackScene = deterministicSceneFromMessage(scene, userIdea);
+      return {
+        source: "deterministic fallback",
+        providerKey: "nvidia-video-director",
+        scene: fallbackScene,
+        jobResult: { provider: "nvidia", model: null, usage: null, fallback: true, error: sanitizeProviderError(error), scene: fallbackScene }
+      };
+    }
+  }
+  const fallbackScene = deterministicSceneFromMessage(scene, userIdea);
+  return {
+    source: "deterministic generator",
+    providerKey: "deterministic-video-director",
+    scene: fallbackScene,
+    jobResult: { provider: "deterministic", model: null, usage: null, fallback: false, scene: fallbackScene }
+  };
+}
+
+function planToBriefDraft(plan: VideoDirectorPlan): BriefDraft {
+  return {
+    title: plan.brief.title,
+    logline: plan.brief.logline,
+    audience: plan.brief.audience,
+    style: plan.brief.style,
+    durationSeconds: plan.brief.durationSeconds,
+    constraints: plan.brief.constraints,
+    script: plan.script,
+    scenes: plan.scenes
+  };
+}
+
+function deterministicPlan(projectName: string, messages: string[]): VideoDirectorPlan {
+  const draft = generateDeterministicBrief(projectName, messages);
+  return {
+    brief: {
+      title: draft.title,
+      logline: draft.logline,
+      audience: draft.audience,
+      style: draft.style,
+      durationSeconds: draft.durationSeconds,
+      constraints: draft.constraints
+    },
+    script: draft.scenes.map((scene) => `${scene.title}: ${scene.description}`).join("\n"),
+    scenes: draft.scenes.map((scene) => ({
+      title: scene.title,
+      description: scene.description,
+      durationSeconds: scene.durationSeconds,
+      dialogue: scene.dialogue ?? "",
+      visualPrompt: scene.visualPrompt ?? scene.description,
+      aspectRatio: (scene.aspectRatio ?? "16:9") as VideoDirectorScene["aspectRatio"],
+      assetLabel: scene.assetLabel
+    }))
+  };
+}
+
+function deterministicSceneFromMessage(existing: MediaScene, message: string): VideoDirectorScene {
+  const cleaned = message.replace(/\s+/g, " ").trim();
+  const prompt = cleaned || existing.visualPrompt || existing.description;
+  return {
+    title: existing.title,
+    description: prompt,
+    durationSeconds: existing.durationSeconds,
+    dialogue: existing.dialogue,
+    visualPrompt: prompt,
+    aspectRatio: existing.aspectRatio as VideoDirectorScene["aspectRatio"],
+    assetLabel: `${existing.title} regenerated reference`
+  };
+}
+
+function replaceSceneFromDirector(db: Database.Database, projectId: string, sceneId: string, scene: VideoDirectorScene, timestamp: string): MediaScene {
+  db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
+    .run(scene.title, scene.description, scene.durationSeconds, scene.dialogue, scene.visualPrompt, scene.aspectRatio, timestamp, sceneId, projectId);
+  return getMediaSceneOrThrow(db, projectId, sceneId);
+}
+
+function insertDirectorGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: string, request: unknown, result: unknown, timestamp: string) {
+  db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), JSON.stringify(result), timestamp, timestamp);
 }
 
 function generateDeterministicBrief(projectName: string, messages: string[]): BriefDraft {
@@ -533,13 +774,29 @@ function generateDeterministicBrief(projectName: string, messages: string[]): Br
   };
 }
 
-function formatDirectorResponse(draft: BriefDraft) {
+function formatDirectorResponse(draft: BriefDraft, source = "deterministic generator") {
   return [
     `Draft brief: ${draft.title}`,
+    `Source: ${source}`,
     draft.logline,
+    draft.script ? `\nScript:\n${draft.script}` : "",
     "",
     "Scenes:",
     ...draft.scenes.map((scene, index) => `${index + 1}. ${scene.title} - ${scene.description}`)
+  ].filter((line) => line !== "").join("\n");
+}
+
+function formatSceneResponse(scene: MediaScene, source = "deterministic generator") {
+  return [
+    `Regenerated scene: ${scene.title}`,
+    `Source: ${source}`,
+    scene.description,
+    "",
+    "Prompt:",
+    scene.visualPrompt,
+    "",
+    "Dialogue:",
+    scene.dialogue || "No spoken dialogue."
   ].join("\n");
 }
 
@@ -661,4 +918,33 @@ function parseConstraints(value: string): string[] {
   } catch {
     return [];
   }
+}
+
+function parseMetadata(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeAudioMetadata(input: Record<string, unknown>) {
+  const role = input.audioRole === "MUSIC" || input.audioRole === "SFX" || input.audioRole === "SCENE_AUDIO" || input.audioRole === "NARRATION" ? input.audioRole : "NARRATION";
+  return {
+    ...input,
+    audioRole: role,
+    volume: clampNumber(input.volume, role === "MUSIC" ? 0.25 : 1, 0, 2),
+    trimStartSeconds: clampNumber(input.trimStartSeconds, 0, 0, 24 * 60 * 60),
+    trimEndSeconds: typeof input.trimEndSeconds === "number" && Number.isFinite(input.trimEndSeconds) ? Math.max(0, input.trimEndSeconds) : null,
+    fadeInSeconds: clampNumber(input.fadeInSeconds, 0, 0, 60),
+    fadeOutSeconds: clampNumber(input.fadeOutSeconds, 0, 0, 60),
+    muted: Boolean(input.muted),
+    backgroundMusic: Boolean(input.backgroundMusic)
+  };
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
 }

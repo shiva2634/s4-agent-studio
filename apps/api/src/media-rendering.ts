@@ -112,14 +112,19 @@ function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: 
   const scenes = db.prepare(`SELECT id,position,title,duration_seconds AS durationSeconds,dialogue,aspect_ratio AS aspectRatio,approved_at AS approvedAt
     FROM media_scenes WHERE media_project_id=? ORDER BY position`).all(projectId) as SceneRow[];
   if (!scenes.length) throw new MediaStudioError("Cannot render without scenes", 409);
-  const assets = db.prepare(`SELECT id,scene_id AS sceneId,kind,label,local_path AS localPath,qc_status AS qcStatus
+  const assets = db.prepare(`SELECT id,scene_id AS sceneId,kind,label,local_path AS localPath,qc_status AS qcStatus,metadata_json AS metadataJson
     FROM media_assets WHERE media_project_id=? ORDER BY created_at DESC`).all(projectId) as AssetRow[];
+  const backgroundMusic = assets.find((asset) => asset.kind === "audio" && asset.localPath && parseAudioMetadata(asset).backgroundMusic) ?? null;
   const scenePlans = scenes.map((scene) => {
     if (!scene.approvedAt) throw new MediaStudioError(`Scene "${scene.title}" must be approved before rendering`, 409);
     const asset = assets.find((candidate) => candidate.sceneId === scene.id && ["image", "video"].includes(candidate.kind) && candidate.localPath);
     if (!asset) throw new MediaStudioError(`Scene "${scene.title}" is missing an image or video asset`, 409);
     if (asset.qcStatus === "FAILED") throw new MediaStudioError(`Scene "${scene.title}" has failed QC`, 409);
-    return { ...scene, asset };
+    const sceneAudio = assets
+      .filter((candidate) => candidate.sceneId === scene.id && candidate.kind === "audio" && candidate.localPath && candidate.qcStatus !== "FAILED")
+      .map((audio) => ({ asset: audio, settings: parseAudioMetadata(audio) }))
+      .filter((audio) => !audio.settings.muted);
+    return { ...scene, asset, audio: sceneAudio, backgroundMusic: backgroundMusic ? { asset: backgroundMusic, settings: parseAudioMetadata(backgroundMusic) } : null };
   });
   const logo = includeLogo ? assets.find((asset) => asset.sceneId === null && asset.kind === "image" && asset.localPath && /logo/i.test(asset.label)) ?? null : null;
   return { scenes: scenePlans, logo };
@@ -130,21 +135,83 @@ function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: Re
   if (scene.asset.kind === "image") args.push("-loop", "1", "-t", String(scene.durationSeconds));
   args.push("-i", scene.asset.localPath);
   if (logoPath) args.push("-i", logoPath);
+  const audioInputs: Array<{ inputIndex: number; settings: AudioSettings; label: string }> = [];
+  let nextInputIndex = logoPath ? 2 : 1;
+  for (const audio of scene.audio) {
+    args.push(...audioInputArgs(audio.asset.localPath, audio.settings));
+    audioInputs.push({ inputIndex: nextInputIndex, settings: audio.settings, label: `a${audioInputs.length}` });
+    nextInputIndex += 1;
+  }
+  if (scene.backgroundMusic && !scene.backgroundMusic.settings.muted) {
+    args.push(...audioInputArgs(scene.backgroundMusic.asset.localPath, scene.backgroundMusic.settings));
+    audioInputs.push({ inputIndex: nextInputIndex, settings: { ...scene.backgroundMusic.settings, volume: Math.min(scene.backgroundMusic.settings.volume, scene.audio.length ? 0.25 : 0.35) }, label: `a${audioInputs.length}` });
+    nextInputIndex += 1;
+  }
   args.push("-f", "lavfi", "-t", String(scene.durationSeconds), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
-  const audioInputIndex = logoPath ? 2 : 1;
+  const silentInputIndex = nextInputIndex;
   const filters = [
     `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease`,
     `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`,
     `fps=${settings.fps}`,
     `drawtext=text='${escapeDrawText(scene.dialogue || "")}':x=(w-text_w)/2:y=h-(text_h*2):fontcolor=white:fontsize=36:box=1:boxcolor=black@0.55:boxborderw=12`
   ];
-  if (logoPath) {
-    args.push("-filter_complex", `[0:v]${filters.join(",")}[base];[base][1:v]overlay=W-w-32:32[v]`, "-map", "[v]", "-map", `${audioInputIndex}:a`);
+  const audioFilter = buildAudioFilter(audioInputs, silentInputIndex, scene.durationSeconds);
+  if (logoPath || audioFilter) {
+    const videoFilter = logoPath ? `[0:v]${filters.join(",")}[base];[base][1:v]overlay=W-w-32:32[v]` : `[0:v]${filters.join(",")}[v]`;
+    args.push("-filter_complex", [videoFilter, audioFilter].filter(Boolean).join(";"), "-map", "[v]", "-map", audioFilter ? "[aout]" : `${silentInputIndex}:a`);
   } else {
-    args.push("-vf", filters.join(","), "-map", "0:v", "-map", `${audioInputIndex}:a`);
+    args.push("-vf", filters.join(","), "-map", "0:v", "-map", `${silentInputIndex}:a`);
   }
   args.push("-t", String(scene.durationSeconds), "-r", String(settings.fps), "-s", `${settings.width}x${settings.height}`, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-shortest", "-c:a", "aac", "-ar", "48000", "-ac", "2", outputPath);
   return args;
+}
+
+function audioInputArgs(localPath: string, settings: AudioSettings): string[] {
+  const args: string[] = [];
+  if (settings.trimStartSeconds > 0) args.push("-ss", String(settings.trimStartSeconds));
+  if (settings.trimEndSeconds !== null && settings.trimEndSeconds > settings.trimStartSeconds) args.push("-t", String(settings.trimEndSeconds - settings.trimStartSeconds));
+  args.push("-i", localPath);
+  return args;
+}
+
+function buildAudioFilter(inputs: Array<{ inputIndex: number; settings: AudioSettings; label: string }>, silentInputIndex: number, sceneDurationSeconds: number): string {
+  if (!inputs.length) return "";
+  const chains = inputs.map((input) => {
+    const filters = [`volume=${input.settings.volume.toFixed(3)}`];
+    if (input.settings.fadeInSeconds > 0) filters.push(`afade=t=in:st=0:d=${input.settings.fadeInSeconds}`);
+    if (input.settings.fadeOutSeconds > 0) filters.push(`afade=t=out:st=${Math.max(0, sceneDurationSeconds - input.settings.fadeOutSeconds)}:d=${input.settings.fadeOutSeconds}`);
+    filters.push("aresample=48000", "aformat=channel_layouts=stereo");
+    return `[${input.inputIndex}:a]${filters.join(",")}[${input.label}]`;
+  });
+  const labels = inputs.map((input) => `[${input.label}]`).join("");
+  return `${chains.join(";")};${labels}[${silentInputIndex}:a]amix=inputs=${inputs.length + 1}:duration=first:dropout_transition=0,volume=1.0[aout]`;
+}
+
+function parseAudioMetadata(asset: AssetRow): AudioSettings {
+  let parsed: Record<string, unknown> = {};
+  if (asset.metadataJson) {
+    try {
+      const value = JSON.parse(asset.metadataJson) as unknown;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+    } catch {
+      parsed = {};
+    }
+  }
+  const role = typeof parsed.audioRole === "string" ? parsed.audioRole : "NARRATION";
+  return {
+    role,
+    volume: numberSetting(parsed.volume, role === "MUSIC" ? 0.25 : 1),
+    trimStartSeconds: numberSetting(parsed.trimStartSeconds, 0),
+    trimEndSeconds: typeof parsed.trimEndSeconds === "number" && Number.isFinite(parsed.trimEndSeconds) ? parsed.trimEndSeconds : null,
+    fadeInSeconds: numberSetting(parsed.fadeInSeconds, 0),
+    fadeOutSeconds: numberSetting(parsed.fadeOutSeconds, 0),
+    muted: Boolean(parsed.muted),
+    backgroundMusic: Boolean(parsed.backgroundMusic)
+  };
+}
+
+function numberSetting(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : fallback;
 }
 
 function resolveRenderSettings(aspectRatio: string, options: RenderDraftOptions): RenderSettings {
@@ -202,8 +269,9 @@ async function runProcess(command: string, args: string[], options: { timeoutMs:
 
 type RenderSettings = { width: number; height: number; fps: number };
 type SceneRow = { id: string; position: number; title: string; durationSeconds: number; dialogue: string; aspectRatio: string; approvedAt: string | null };
-type AssetRow = { id: string; sceneId: string | null; kind: string; label: string; localPath: string; qcStatus: string };
-type ScenePlan = SceneRow & { asset: AssetRow };
+type AssetRow = { id: string; sceneId: string | null; kind: string; label: string; localPath: string; qcStatus: string; metadataJson?: string | null };
+type AudioSettings = { role: string; volume: number; trimStartSeconds: number; trimEndSeconds: number | null; fadeInSeconds: number; fadeOutSeconds: number; muted: boolean; backgroundMusic: boolean };
+type ScenePlan = SceneRow & { asset: AssetRow; audio: Array<{ asset: AssetRow; settings: AudioSettings }>; backgroundMusic: { asset: AssetRow; settings: AudioSettings } | null };
 
 class RenderCancelledError extends Error {}
 

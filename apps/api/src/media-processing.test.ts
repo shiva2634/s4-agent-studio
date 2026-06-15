@@ -127,7 +127,7 @@ function idFactory(prefix: string) {
 
 async function fixtureAsset(db: Database.Database, storageRoot: string, mimeType = "video/mp4") {
   createMediaProject(db, { id: "media-1", name: "Processing", now: "created" }, audit(db));
-  const bundle = addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+  const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
   const sceneId = bundle.scenes[0]?.id as string;
   updateMediaScene(db, "media-1", sceneId, {
     title: "QC Scene",
@@ -199,6 +199,38 @@ describe("media processing", () => {
       assert.equal(JSON.parse(stored.inspectionJson).videoCodec, "h264");
       assert.deepEqual(JSON.parse(stored.qcIssuesJson).map((issue: { code: string }) => issue.code), ["MISSING_AUDIO", "DURATION_MISMATCH", "LOW_RESOLUTION"]);
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROCESSING_COMPLETED'").get() as { count: number }).count, 1);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stores audio inspection metadata without requiring video derivatives", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-processing-"));
+    try {
+      const { asset } = await fixtureAsset(db, storageRoot, "audio/mpeg");
+      const result = await processMediaAsset(db, "media-1", asset.id, {
+        jobId: "job-1",
+        now: "processed",
+        storageRoot,
+        runner: okRunner({
+          streams: [
+            { codec_type: "audio", codec_name: "mp3" }
+          ],
+          format: { duration: "10" }
+        })
+      }, audit(db));
+      const stored = db.prepare("SELECT inspection_json AS inspectionJson,qc_status AS qcStatus,preview_path AS previewPath,thumbnail_path AS thumbnailPath FROM media_assets WHERE id='asset-1'").get() as { inspectionJson: string; qcStatus: string; previewPath: string | null; thumbnailPath: string | null };
+      const inspection = JSON.parse(stored.inspectionJson) as { hasAudio: boolean; hasVideo: boolean; audioCodec: string; durationSeconds: number };
+
+      assert.equal(result.status, "COMPLETED");
+      assert.equal(stored.qcStatus, "PASSED");
+      assert.equal(inspection.hasAudio, true);
+      assert.equal(inspection.hasVideo, false);
+      assert.equal(inspection.audioCodec, "mp3");
+      assert.equal(inspection.durationSeconds, 10);
+      assert.equal(stored.previewPath, null);
+      assert.equal(stored.thumbnailPath, null);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

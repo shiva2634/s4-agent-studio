@@ -4,24 +4,25 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaChatMessageSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, UpdateComfyWorkflowSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaChatMessageSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
 import { listProjectTree, readProjectFile } from "./project-files.js";
 import { assertReadableProjectFilePath, insertProposal } from "./change-proposals.js";
 import { analyzeTask, formatPlanningOnlyResponse } from "./task-analysis.js";
-import { loadProviderConfig, sanitizeProviderError, validateCodeProposalOutput } from "./ai-provider.js";
+import { loadProviderConfig, providerStatusResponse, sanitizeProviderError, validateCodeProposalOutput } from "./ai-provider.js";
 import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./provider-factory.js";
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteMediaChatMessage, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceSceneAsset, updateMediaBrief, updateMediaProject, updateMediaScene, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteMediaChatMessage, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceSceneAsset, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateMediaProject, updateMediaScene, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo } from "./media-rendering.js";
 import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
 import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders } from "./media-provider-router.js";
 import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
+import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -61,6 +62,15 @@ app.get("/api/bootstrap", async () => ({
 }));
 
 app.get("/api/media/providers", async () => ({ providers: mediaProviderRegistry }));
+
+app.get("/api/media/director/status", async () => providerStatusResponse(loadProviderConfig()));
+
+app.post("/api/media/director/test", async () => {
+  const config = loadProviderConfig();
+  const provider = new NvidiaVideoDirectorProvider(config);
+  const health = await provider.testConnection();
+  return providerStatusResponse(config, health);
+});
 
 app.get("/api/media/provider-router", async (request: any) => {
   const capabilities = getMediaProviderCapabilities(loadComfyConfig(), loadLongCatConfig());
@@ -207,7 +217,17 @@ app.post("/api/media/projects/:projectId/messages", async (request: any, reply) 
   const parsed = MediaChatMessageSchema.safeParse(request.body);
   if (!parsed.success) return reply.status(400).send({ error: "Invalid media chat message", details: parsed.error.flatten() });
   try {
-    return addDirectorChatMessage(db, { projectId: request.params.projectId, message: parsed.data.message, now: now(), createId: nanoid }, audit);
+    const providerConfig = loadProviderConfig();
+    const directorProvider = providerConfig.configured ? new NvidiaVideoDirectorProvider(providerConfig) : null;
+    return await addDirectorChatMessage(db, {
+      projectId: request.params.projectId,
+      message: parsed.data.message,
+      replaceApproved: parsed.data.replaceApproved,
+      regenerateSceneId: parsed.data.regenerateSceneId,
+      now: now(),
+      createId: nanoid,
+      directorProvider
+    }, audit);
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to save media chat message" });
@@ -375,6 +395,51 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/assets/upload", async (
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
     return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to upload media asset" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/assets/upload", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Upload requires one media file" });
+    const bytes = await file.toBuffer();
+    const audioRole = typeof request.query?.audioRole === "string" ? request.query.audioRole : undefined;
+    const parsedAudioRole = audioRole === "NARRATION" || audioRole === "MUSIC" || audioRole === "SFX" || audioRole === "SCENE_AUDIO" ? audioRole : undefined;
+    const asset = await uploadProjectAsset(db, request.params.projectId, {
+      id: nanoid(),
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      audioRole: parsedAudioRole,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to upload project asset" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId/assets/:assetId/audio", async (request: any, reply) => {
+  const parsed = UpdateMediaAudioSettingsSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid audio settings", details: parsed.error.flatten() });
+  try {
+    return { asset: updateAudioAssetSettings(db, request.params.projectId, request.params.assetId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update audio settings" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/background-music", async (request: any, reply) => {
+  const assetId = typeof request.body?.assetId === "string" ? request.body.assetId : null;
+  try {
+    return selectProjectBackgroundMusic(db, request.params.projectId, assetId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to select background music" });
   }
 });
 

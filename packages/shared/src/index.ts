@@ -52,7 +52,9 @@ export const UpdateMediaProjectSchema = z.object({
 });
 
 export const MediaChatMessageSchema = z.object({
-  message: z.string().trim().min(1).max(20_000)
+  message: z.string().trim().min(1).max(20_000),
+  replaceApproved: z.boolean().optional(),
+  regenerateSceneId: z.string().min(1).optional()
 });
 
 export const MediaSceneStatusSchema = z.enum(["DRAFT", "APPROVED", "GENERATING", "ASSET_READY", "REJECTED"]);
@@ -81,6 +83,18 @@ export const ImportMediaAssetSchema = z.object({
   mimeType: z.string().trim().min(1).max(100),
   sizeBytes: z.number().int().min(1).max(2_000_000_000),
   label: z.string().trim().min(1).max(200).optional()
+});
+
+export const MediaAudioRoleSchema = z.enum(["NARRATION", "MUSIC", "SFX", "SCENE_AUDIO"]);
+
+export const UpdateMediaAudioSettingsSchema = z.object({
+  role: MediaAudioRoleSchema.optional(),
+  volume: z.number().min(0).max(2).optional(),
+  trimStartSeconds: z.number().min(0).max(24 * 60 * 60).optional(),
+  trimEndSeconds: z.number().min(0).max(24 * 60 * 60).optional(),
+  fadeInSeconds: z.number().min(0).max(60).optional(),
+  fadeOutSeconds: z.number().min(0).max(60).optional(),
+  muted: z.boolean().optional()
 });
 
 export const ReorderMediaScenesSchema = z.object({
@@ -170,6 +184,8 @@ export type MediaSceneStatus = z.infer<typeof MediaSceneStatusSchema>;
 export type UpdateMediaBrief = z.infer<typeof UpdateMediaBriefSchema>;
 export type UpdateMediaScene = z.infer<typeof UpdateMediaSceneSchema>;
 export type ImportMediaAsset = z.infer<typeof ImportMediaAssetSchema>;
+export type MediaAudioRole = z.infer<typeof MediaAudioRoleSchema>;
+export type UpdateMediaAudioSettings = z.infer<typeof UpdateMediaAudioSettingsSchema>;
 export type ReorderMediaScenes = z.infer<typeof ReorderMediaScenesSchema>;
 export type RenderMediaDraft = z.infer<typeof RenderMediaDraftSchema>;
 export type GenerateWanScene = z.infer<typeof GenerateWanSceneSchema>;
