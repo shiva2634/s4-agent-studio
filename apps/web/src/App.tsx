@@ -700,7 +700,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const response = await fetch(`${API}/api/media/projects/${selectedId}/scenes/${sceneId}/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ task, approved: true, paidProviderApproved: true, maxAttempts: 2 })
+      body: JSON.stringify({ task, providerKey: "wan-2.2", approved: true, maxAttempts: 1 })
     });
     const data = await response.json();
     if (!response.ok) { setError(data.error ?? "Unable to route media generation"); return; }

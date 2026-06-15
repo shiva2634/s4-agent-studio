@@ -53,6 +53,7 @@ export type ProviderRouterOptions = {
   outputAssetId: string;
   now: string;
   task: MediaProviderTask;
+  providerKey?: ProviderKey;
   approved: boolean;
   paidProviderApproved?: boolean;
   maxAttempts?: number;
@@ -152,10 +153,10 @@ export function selectMediaProviders(task: MediaProviderTask, capabilities: Prov
 export async function routeMediaGeneration(db: Database.Database, projectId: string, sceneId: string, options: ProviderRouterOptions, audit: MediaAuditWriter) {
   if (!options.approved) throw new MediaStudioError("Media provider routing requires explicit approval", 403);
   const capabilities = options.capabilities ?? getMediaProviderCapabilities(options.config, options.longCatConfig, options.oviConfig, options.ltxConfig);
-  const candidates = capabilities.filter((provider) => provider.supports.includes(options.task)).sort((a, b) => a.priority - b.priority);
+  const candidates = getProviderCandidates(capabilities, options.task, options.providerKey);
   const maxAttempts = options.maxAttempts ?? 2;
   const attempted: Array<{ providerKey: ProviderKey; status: "SKIPPED" | "FAILED" | "SELECTED" | "HUMAN_ASSISTED"; reason: string }> = [];
-  audit("MEDIA_PROVIDER_ROUTE_SELECTION_STARTED", `Selecting media provider for ${options.task}`, { projectId, payload: { sceneId, task: options.task, maxAttempts } });
+  audit("MEDIA_PROVIDER_ROUTE_SELECTION_STARTED", `Selecting media provider for ${options.task}`, { projectId, payload: { sceneId, task: options.task, providerKey: options.providerKey, maxAttempts } });
 
   let attempts = 0;
   for (const provider of candidates) {
@@ -197,6 +198,15 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
   }
   audit("MEDIA_PROVIDER_ROUTE_EXHAUSTED", `No provider completed ${options.task}`, { projectId, payload: { sceneId, task: options.task, attempted } });
   throw new MediaStudioError(`No provider completed ${options.task}`, 409);
+}
+
+function getProviderCandidates(capabilities: ProviderCapability[], task: MediaProviderTask, providerKey?: ProviderKey) {
+  const taskCandidates = capabilities.filter((provider) => provider.supports.includes(task));
+  if (!providerKey) return taskCandidates.sort((a, b) => a.priority - b.priority);
+  const provider = capabilities.find((candidate) => candidate.key === providerKey);
+  if (!provider) throw new MediaStudioError(`Unknown media provider: ${providerKey}`, 400);
+  if (!provider.supports.includes(task)) throw new MediaStudioError(`${provider.name} does not support ${task}`, 400);
+  return [provider];
 }
 
 function defaultAdapter(providerKey: ProviderKey): RouterAdapter {

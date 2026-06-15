@@ -506,6 +506,7 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
       outputAssetId: nanoid(),
       now: now(),
       task: parsed.data.task,
+      providerKey: parsed.data.providerKey,
       approved: parsed.data.approved,
       paidProviderApproved: parsed.data.paidProviderApproved,
       maxAttempts: parsed.data.maxAttempts,

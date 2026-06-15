@@ -200,9 +200,11 @@ export const FlowFallbackWanSchema = z.object({
 });
 
 export const MediaProviderTaskSchema = z.enum(["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"]);
+export const MediaProviderKeySchema = z.enum(["google-flow", "wan-2.2", "longcat-avatar", "ovi", "ltx"]);
 
 export const RouteMediaGenerationSchema = z.object({
   task: MediaProviderTaskSchema,
+  providerKey: MediaProviderKeySchema.optional(),
   approved: z.boolean(),
   paidProviderApproved: z.boolean().optional(),
   maxAttempts: z.number().int().min(1).max(5).optional(),

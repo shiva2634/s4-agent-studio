@@ -85,6 +85,70 @@ describe("media provider router", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROVIDER_ROUTE_SELECTED'").get() as { count: number }).count, 1);
   });
 
+  it("honors Wan T2V provider override instead of silently routing to Flow", async () => {
+    const db = dbFixture();
+    const result = await routeMediaGeneration(db, "media-1", "scene-1", {
+      jobId: "wan-t2v-override",
+      outputAssetId: "asset-t2v",
+      now: "now",
+      task: "T2V",
+      providerKey: "wan-2.2",
+      approved: true,
+      paidProviderApproved: true,
+      capabilities: capabilities(),
+      adapters: {
+        "wan-2.2": async ({ db, projectId, jobId, now, task }) => {
+          db.prepare("INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+            .run(jobId, projectId, "wan-2.2", "COMPLETED", JSON.stringify({ task }), "{}", now, now);
+          return { job: { id: jobId, status: "COMPLETED" } };
+        }
+      }
+    }, audit(db));
+
+    assert.equal(result.routing.selectedProvider, "wan-2.2");
+    assert.equal(result.routing.attempted.some((attempt) => attempt.providerKey === "google-flow"), false);
+    assert.equal((db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id='wan-t2v-override'").get() as { providerKey: string }).providerKey, "wan-2.2");
+  });
+
+  it("honors Wan I2V provider override instead of silently routing to Flow", async () => {
+    const db = dbFixture();
+    const result = await routeMediaGeneration(db, "media-1", "scene-1", {
+      jobId: "wan-i2v-override",
+      outputAssetId: "asset-i2v",
+      now: "now",
+      task: "I2V",
+      providerKey: "wan-2.2",
+      approved: true,
+      paidProviderApproved: true,
+      capabilities: capabilities(),
+      adapters: {
+        "wan-2.2": async ({ db, projectId, jobId, now, task }) => {
+          db.prepare("INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+            .run(jobId, projectId, "wan-2.2", "COMPLETED", JSON.stringify({ task }), "{}", now, now);
+          return { job: { id: jobId, status: "COMPLETED" } };
+        }
+      }
+    }, audit(db));
+
+    assert.equal(result.routing.selectedProvider, "wan-2.2");
+    assert.equal(result.routing.attempted.some((attempt) => attempt.providerKey === "google-flow"), false);
+    assert.equal((db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id='wan-i2v-override'").get() as { providerKey: string }).providerKey, "wan-2.2");
+  });
+
+  it("rejects invalid provider overrides", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => routeMediaGeneration(db, "media-1", "scene-1", {
+      jobId: "invalid-override",
+      outputAssetId: "asset-invalid",
+      now: "now",
+      task: "T2V",
+      providerKey: "not-a-provider" as never,
+      approved: true,
+      capabilities: capabilities()
+    }, audit(db)), (error: unknown) => error instanceof MediaStudioError && error.statusCode === 400 && /Unknown media provider/.test(error.message));
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_generation_jobs WHERE id='invalid-override'").get() as { count: number }).count, 0);
+  });
+
   it("falls back after a failed provider attempt", async () => {
     const db = dbFixture();
     const result = await routeMediaGeneration(db, "media-1", "scene-1", {
