@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -16,9 +16,9 @@ import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./p
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectMediaScene, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
-import { cancelRenderJob, listRenderJobs, renderDraftVideo } from "./media-rendering.js";
+import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
 import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
 import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders } from "./media-provider-router.js";
 import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
@@ -738,6 +738,59 @@ app.post("/api/media/projects/:projectId/render", async (request: any, reply) =>
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to render draft video" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/exports/preflight", async (request: any, reply) => {
+  const parsed = RenderMediaExportSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid export preflight request", details: parsed.error.flatten() });
+  try {
+    return validateExportReadiness(db, request.params.projectId, parsed.data);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to validate export readiness" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/exports", async (request: any, reply) => {
+  const parsed = RenderMediaExportSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid export request", details: parsed.error.flatten() });
+  try {
+    const job = await renderProductionExport(db, request.params.projectId, { ...parsed.data, jobId: nanoid(), outputAssetId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to render final export" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/render-jobs/:jobId/retry-export", async (request: any, reply) => {
+  try {
+    const job = await retryProductionExport(db, request.params.projectId, request.params.jobId, { jobId: nanoid(), outputAssetId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId) } });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to retry final export" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId/assets/:assetId", async (request: any, reply) => {
+  const parsed = RenameMediaAssetSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid asset rename", details: parsed.error.flatten() });
+  try {
+    return { asset: renameMediaAsset(db, request.params.projectId, request.params.assetId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to rename media asset" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/assets/:assetId", async (request: any, reply) => {
+  try {
+    return await deleteProjectAsset(db, request.params.projectId, request.params.assetId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete media asset" });
   }
 });
 

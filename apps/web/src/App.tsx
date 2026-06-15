@@ -19,7 +19,8 @@ type MediaGenerationJob = { id: string; providerKey: string; status: string; req
 type MediaProvider = { key: string; name: string; capabilities: readonly string[]; status: string };
 type RouterCapability = { key: string; name: string; supports: string[]; enabled: boolean; healthy: boolean; priority: number; paid: boolean; mode: string; reason: string };
 type MediaProcessingJob = { id: string; assetId: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"; error: string | null; createdAt: string };
-type MediaRenderJob = { id: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"; progress: number; outputAssetId: string | null; error: string | null; logText: string };
+type MediaRenderJob = { id: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"; progress: number; outputAssetId: string | null; requestJson: string; error: string | null; logText: string };
+type ExportSettings = { preset: "9:16"|"16:9"|"1:1"; resolution: "720p"|"1080p"; fps: number; bitrateKbps: number; includeCaptions: boolean; includeLogo: boolean; includeDisclaimer: boolean; includeMusic: boolean };
 type ComfyWorkflow = { id: string; workflowType: "WAN_T2V" | "WAN_I2V"; name: string; version: number; status: "VALID" | "INVALID"; isActive: 0 | 1; isBuiltin: 0 | 1; workflowJson: string; mappingJson: string; validationJson: string; createdAt: string; updatedAt: string };
 type MediaBrandKit = { id: string; name: string; colorsJson: string; fontsJson: string; tagline: string; tone: string; disclaimer: string };
 type MediaPresenterProfile = { id: string; name: string; appearancePrompt: string; voiceAccent: string; clothing: string; consistencyRules: string };
@@ -232,6 +233,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [exportSettings,setExportSettings]=useState<ExportSettings>({preset:"16:9",resolution:"1080p",fps:30,bitrateKbps:8000,includeCaptions:true,includeLogo:true,includeDisclaimer:true,includeMusic:true});
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState("");
   const [notice, setNotice] = useState("");
@@ -607,6 +609,47 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     setNotice("Draft render completed");
   }
 
+  async function renderFinalExport() {
+    if (!selectedId || rendering) return;
+    setRendering(true); setError("");
+    const preflight = await fetch(`${API}/api/media/projects/${selectedId}/exports/preflight`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(exportSettings) });
+    const preflightData = await preflight.json();
+    if (!preflight.ok) { setRendering(false); setError(preflightData.error ?? "Export preflight failed"); return; }
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/exports`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(exportSettings) });
+    const data = await response.json();
+    setRendering(false);
+    if (!response.ok) { setError(data.error ?? "Unable to render final export"); return; }
+    setBundle(data.bundle);
+    setNotice("Final export completed");
+  }
+
+  async function retryExport(jobId: string) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/render-jobs/${jobId}/retry-export`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to retry export"); return; }
+    setBundle(data.bundle);
+    setNotice("Export retried");
+  }
+
+  async function renameAsset(assetId: string) {
+    if (!selectedId) return;
+    const label = window.prompt("Export name");
+    if (!label) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/assets/${assetId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to rename export"); return; }
+    await reloadBundle();
+  }
+
+  async function deleteProjectAsset(assetId: string) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/assets/${assetId}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to delete export"); return; }
+    await reloadBundle();
+  }
+
   async function cancelRender(jobId: string) {
     if (!selectedId) return;
     const response = await fetch(`${API}/api/media/projects/${selectedId}/render-jobs/${jobId}/cancel`, { method: "POST" });
@@ -821,7 +864,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         <h3>ComfyUI workflows</h3>
         {bundle&&selectedScene?<ComfyWorkflowPanel workflows={bundle.comfyWorkflows ?? []} sceneId={selectedScene.id} onImport={importWorkflow} onUpdate={updateWorkflow} onActivate={activateWorkflow} onDelete={deleteWorkflow} onPreview={previewWorkflow}/>:<div className="card"><strong>No scene selected</strong><p>Select a scene before previewing compiled workflows.</p></div>}
         <h3>Render</h3>
-        {bundle&&<RenderPanel jobs={bundle.renderJobs ?? []} onRender={renderDraft} onCancel={cancelRender} rendering={rendering}/>}
+        {bundle&&<RenderPanel projectId={selectedId ?? ""} assets={bundle.assets} jobs={bundle.renderJobs ?? []} settings={exportSettings} onSettings={setExportSettings} onRender={renderDraft} onExport={renderFinalExport} onCancel={cancelRender} onRetryExport={retryExport} onRenameAsset={renameAsset} onDeleteAsset={deleteProjectAsset} rendering={rendering}/>}
         <h3>Scenes</h3>
         {bundle?.scenes.length ? <div className="scene-list">{bundle.scenes.map((scene,index) => <div key={scene.id} className={`scene-tab ${scene.id===selectedScene?.id?"active":""}`}><button onClick={()=>setSelectedSceneId(scene.id)}><span>{scene.position}. {scene.title}</span><small>{scene.status}</small></button><div className="scene-order"><button onClick={()=>void reorderScenes(scene.id,-1)} disabled={index===0}>Up</button><button onClick={()=>void reorderScenes(scene.id,1)} disabled={index===bundle.scenes.length-1}>Down</button></div></div>)}</div> : <div className="card"><strong>No scenes</strong><p>Scene cards will appear after the first chat.</p></div>}
         {selectedId&&selectedScene&&<SceneEditor projectId={selectedId} scene={selectedScene} assets={bundle?.assets.filter(asset=>asset.sceneId===selectedScene.id) ?? []} onSave={saveScene} onApprove={approveScene} onReject={rejectScene} onCopyPrompt={copyPrompt} onRegenerateScene={regenerateScene} onGenerateWan={generateWan} onGeneratePresenter={generatePresenter} onImportAsset={importAsset} onReplaceAsset={replaceAsset} onDeleteAsset={deleteAsset} onUpdateAudio={updateAudioSettings} onSelectBackgroundMusic={selectBackgroundMusic}/>}
@@ -870,9 +913,10 @@ function BriefEditor({brief,onSave,onApprove}:{brief:MediaBrief;onSave:(brief:Me
   return <div className="card editor-card"><div className="row first-row"><strong>Brief</strong><span className={`scene-status ${brief.status.toLowerCase()}`}>{brief.status}</span></div><label>Title<input value={draft.title} onChange={event=>setDraft({...draft,title:event.target.value})}/></label><label>Logline<textarea value={draft.logline} onChange={event=>setDraft({...draft,logline:event.target.value})}/></label><div className="split-fields"><label>Audience<input value={draft.audience} onChange={event=>setDraft({...draft,audience:event.target.value})}/></label><label>Style<input value={draft.style} onChange={event=>setDraft({...draft,style:event.target.value})}/></label></div><label>Duration seconds<input type="number" min="1" value={draft.durationSeconds} onChange={event=>setDraft({...draft,durationSeconds:Number(event.target.value)})}/></label><label>Constraints<textarea value={constraints} onChange={event=>setConstraints(event.target.value)}/></label><div className="decision"><button onClick={()=>void onSave(draft,constraints.split("\n").map(item=>item.trim()).filter(Boolean))}>Save brief</button><button onClick={()=>void onApprove()} disabled={brief.status==="APPROVED"}>Approve brief</button></div></div>;
 }
 
-function RenderPanel({jobs,onRender,onCancel,rendering}:{jobs:MediaRenderJob[];onRender:()=>Promise<void>;onCancel:(jobId:string)=>Promise<void>;rendering:boolean}) {
+function RenderPanel({projectId,assets,jobs,settings,onSettings,onRender,onExport,onCancel,onRetryExport,onRenameAsset,onDeleteAsset,rendering}:{projectId:string;assets:MediaAsset[];jobs:MediaRenderJob[];settings:ExportSettings;onSettings:(settings:ExportSettings)=>void;onRender:()=>Promise<void>;onExport:()=>Promise<void>;onCancel:(jobId:string)=>Promise<void>;onRetryExport:(jobId:string)=>Promise<void>;onRenameAsset:(assetId:string)=>Promise<void>;onDeleteAsset:(assetId:string)=>Promise<void>;rendering:boolean}) {
   const latest = jobs[0];
-  return <div className="card render-card"><button className="primary" onClick={()=>void onRender()} disabled={rendering}>{rendering?"Rendering...":"Render Draft MP4"}</button>{latest?<div className="render-job"><div className="row"><strong>{latest.status}</strong><span>{latest.progress}%</span></div><div className="progress-bar"><span style={{width:`${latest.progress}%`}}/></div>{latest.error&&<p className="error">{latest.error}</p>}{latest.status==="RUNNING"||latest.status==="QUEUED"?<button onClick={()=>void onCancel(latest.id)}>Cancel</button>:null}{latest.logText&&<pre>{latest.logText}</pre>}</div>:<p>Approved scenes with passing assets can be rendered into a local draft video.</p>}</div>;
+  const finalJobs = jobs.filter(job=>parseRenderMode(job.requestJson)==="FINAL_EXPORT");
+  return <div className="card render-card"><div className="decision wrap"><button className="primary" onClick={()=>void onRender()} disabled={rendering}>{rendering?"Rendering...":"Render Draft MP4"}</button><button className="primary" onClick={()=>void onExport()} disabled={rendering}>{rendering?"Exporting...":"Final Export"}</button></div><div className="split-fields"><label>Preset<select value={settings.preset} onChange={event=>onSettings({...settings,preset:event.target.value as ExportSettings["preset"]})}><option>16:9</option><option>9:16</option><option>1:1</option></select></label><label>Resolution<select value={settings.resolution} onChange={event=>onSettings({...settings,resolution:event.target.value as ExportSettings["resolution"]})}><option>1080p</option><option>720p</option></select></label><label>FPS<input type="number" min="12" max="60" value={settings.fps} onChange={event=>onSettings({...settings,fps:Number(event.target.value)})}/></label><label>Bitrate<input type="number" min="500" max="50000" value={settings.bitrateKbps} onChange={event=>onSettings({...settings,bitrateKbps:Number(event.target.value)})}/></label></div><div className="decision wrap"><label><input type="checkbox" checked={settings.includeCaptions} onChange={event=>onSettings({...settings,includeCaptions:event.target.checked})}/> Captions</label><label><input type="checkbox" checked={settings.includeLogo} onChange={event=>onSettings({...settings,includeLogo:event.target.checked})}/> Logo</label><label><input type="checkbox" checked={settings.includeDisclaimer} onChange={event=>onSettings({...settings,includeDisclaimer:event.target.checked})}/> Disclaimer</label><label><input type="checkbox" checked={settings.includeMusic} onChange={event=>onSettings({...settings,includeMusic:event.target.checked})}/> Music</label></div>{latest?<div className="render-job"><div className="row"><strong>{parseRenderMode(latest.requestJson)==="FINAL_EXPORT"?"Export":"Draft"} {latest.status}</strong><span>{latest.progress}%</span></div><div className="progress-bar"><span style={{width:`${latest.progress}%`}}/></div>{latest.error&&<p className="error">{latest.error}</p>}{latest.status==="RUNNING"||latest.status==="QUEUED"?<button onClick={()=>void onCancel(latest.id)}>Cancel</button>:null}{latest.status==="FAILED"&&parseRenderMode(latest.requestJson)==="FINAL_EXPORT"?<button onClick={()=>void onRetryExport(latest.id)}>Retry export</button>:null}{latest.logText&&<pre>{latest.logText}</pre>}</div>:<p>Approved scenes with passing assets can be rendered into local draft or final export videos.</p>}<div className="workflow-list">{finalJobs.map(job=>{ const asset=assets.find(item=>item.id===job.outputAssetId); return <div className="mini" key={job.id}><span>{asset?.label ?? "Final export"}</span><small>{job.status} | {job.progress}%</small>{asset&&<div className="decision wrap"><a className="button-link" href={`${API}/api/media/projects/${projectId}/assets/${asset.id}/download`} download={asset.originalName ?? asset.fileName ?? "export.mp4"}>Download</a><button onClick={()=>void onRenameAsset(asset.id)}>Rename</button><button onClick={()=>void onDeleteAsset(asset.id)}>Delete</button></div>}{job.status==="FAILED"&&<button onClick={()=>void onRetryExport(job.id)}>Retry</button>}</div>; })}</div></div>;
 }
 
 type WorkflowMapping = { prompt: string; image?: string; width: string; height: string; frames: string; fps: string; seed: string; outputNodeId: string };
@@ -1039,6 +1083,15 @@ function compactJson(value: string): string {
     return keys.length ? keys.slice(0, 3).join(", ") : "none";
   } catch {
     return "none";
+  }
+}
+
+function parseRenderMode(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as { mode?: unknown };
+    return typeof parsed.mode === "string" ? parsed.mode : "DRAFT_RENDER";
+  } catch {
+    return "DRAFT_RENDER";
   }
 }
 

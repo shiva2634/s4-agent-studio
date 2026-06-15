@@ -26,6 +26,17 @@ export type RenderDraftOptions = {
   runner?: ProcessRunner;
 };
 
+export type ProductionExportOptions = Omit<RenderDraftOptions, "fps" | "includeLogo"> & {
+  preset: "9:16" | "16:9" | "1:1";
+  resolution: "720p" | "1080p";
+  fps: number;
+  bitrateKbps: number;
+  includeCaptions: boolean;
+  includeLogo: boolean;
+  includeDisclaimer: boolean;
+  includeMusic: boolean;
+};
+
 export async function renderDraftVideo(db: Database.Database, projectId: string, options: RenderDraftOptions, audit: MediaAuditWriter) {
   const project = getProject(db, projectId);
   const renderSettings = resolveRenderSettings(project.aspectRatio, options);
@@ -89,6 +100,86 @@ export async function renderDraftVideo(db: Database.Database, projectId: string,
   }
 }
 
+export async function renderProductionExport(db: Database.Database, projectId: string, options: ProductionExportOptions, audit: MediaAuditWriter) {
+  const project = getProject(db, projectId);
+  const renderSettings = resolveExportSettings(options);
+  const plan = buildRenderPlan(db, projectId, options.includeLogo);
+  if (!options.includeMusic) {
+    plan.scenes = plan.scenes.map((scene) => ({ ...scene, backgroundMusic: null }));
+  }
+  const storageRoot = resolveStorageRoot(options.storageRoot);
+  const renderDir = path.resolve(storageRoot, "exports", sanitizeSegment(projectId), sanitizeSegment(options.jobId));
+  assertInsideRoot(renderDir, storageRoot);
+  await fs.mkdir(renderDir, { recursive: true });
+  const outputPath = path.join(renderDir, `final-${sanitizeSegment(options.preset)}-${options.resolution}.mp4`);
+  const concatPath = path.join(renderDir, "concat.txt");
+  const request = { mode: "FINAL_EXPORT", preset: options.preset, resolution: options.resolution, fps: options.fps, bitrateKbps: options.bitrateKbps, includeCaptions: options.includeCaptions, includeLogo: options.includeLogo, includeDisclaimer: options.includeDisclaimer, includeMusic: options.includeMusic, renderSettings, sceneCount: plan.scenes.length };
+
+  insertRenderJob(db, options.jobId, projectId, options.now, request);
+  setRenderStatus(db, options.jobId, "RUNNING", 1, options.now);
+  audit("MEDIA_EXPORT_STARTED", `Final export started for ${project.name}`, { projectId, payload: { jobId: options.jobId, request } });
+
+  const logs: string[] = [];
+  try {
+    const detection = await detectFfmpeg(options);
+    logs.push(`ffmpeg: ${detection.ffmpeg.available ? "available" : "unavailable"}`);
+    if (!detection.ffmpeg.available) throw new MediaStudioError("FFmpeg is unavailable", 409);
+
+    const segments: string[] = [];
+    for (const [index, scene] of plan.scenes.entries()) {
+      assertNotCancelled(db, options.jobId);
+      const segmentPath = path.join(renderDir, `scene-${String(index + 1).padStart(3, "0")}.mp4`);
+      const args = buildSceneRenderArgs(scene, segmentPath, renderSettings, plan.logo?.localPath ?? null, options.includeDisclaimer ? plan.disclaimer : "", { includeCaptions: options.includeCaptions });
+      const result = await (options.runner ?? runProcess)(detection.ffmpegPath, args, { timeoutMs: options.timeoutMs ?? 120_000 });
+      logs.push(`scene ${index + 1}: ${result.exitCode}\n${result.stderr}`);
+      if (result.exitCode !== 0) throw new Error(`FFmpeg export scene render failed for ${scene.title}: ${result.stderr}`);
+      segments.push(segmentPath);
+      setRenderStatus(db, options.jobId, "RUNNING", Math.round(((index + 1) / (plan.scenes.length + 1)) * 90), options.now, logs.join("\n"));
+    }
+
+    assertNotCancelled(db, options.jobId);
+    await fs.writeFile(concatPath, segments.map((segment) => `file '${segment.replaceAll("'", "'\\''")}'`).join("\n"), "utf8");
+    const concatArgs = ["-y", "-f", "concat", "-safe", "0", "-i", concatPath, "-c:v", "libx264", "-b:v", `${options.bitrateKbps}k`, "-maxrate", `${options.bitrateKbps}k`, "-bufsize", `${options.bitrateKbps * 2}k`, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", outputPath];
+    const concatResult = await (options.runner ?? runProcess)(detection.ffmpegPath, concatArgs, { timeoutMs: options.timeoutMs ?? 120_000 });
+    logs.push(`export: ${concatResult.exitCode}\n${concatResult.stderr}`);
+    if (concatResult.exitCode !== 0) throw new Error(`FFmpeg final export failed: ${concatResult.stderr}`);
+
+    const fileBuffer = await fs.readFile(outputPath).catch(() => Buffer.alloc(0));
+    const checksum = createHash("sha256").update(fileBuffer).digest("hex");
+    db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,preview_path,qc_status,qc_issues_json,metadata_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(options.outputAssetId, projectId, null, "video", `Final export ${options.preset} ${options.resolution}`, "final-export", "EXPORTED", path.basename(outputPath), path.basename(outputPath), "video/mp4", fileBuffer.length, checksum, outputPath, outputPath, "PENDING", "[]", JSON.stringify({ renderJobId: options.jobId, exportSettings: request, sceneIds: plan.scenes.map((scene) => scene.id) }), options.now, options.now);
+    db.prepare("UPDATE media_render_jobs SET output_asset_id=? WHERE id=?").run(options.outputAssetId, options.jobId);
+    setRenderStatus(db, options.jobId, "COMPLETED", 100, options.now, logs.join("\n"), null, options.now);
+    audit("MEDIA_EXPORT_COMPLETED", `Final export completed for ${project.name}`, { projectId, payload: { jobId: options.jobId, outputAssetId: options.outputAssetId, outputPath } });
+    return getRenderJob(db, projectId, options.jobId);
+  } catch (error) {
+    if (error instanceof RenderCancelledError) {
+      setRenderStatus(db, options.jobId, "CANCELLED", getRenderProgress(db, options.jobId), options.now, logs.join("\n"), "Export cancelled", options.now);
+      audit("MEDIA_EXPORT_CANCELLED", `Final export cancelled for ${project.name}`, { projectId, payload: { jobId: options.jobId } });
+      return getRenderJob(db, projectId, options.jobId);
+    }
+    const message = error instanceof Error ? error.message : "Final export failed";
+    setRenderStatus(db, options.jobId, "FAILED", getRenderProgress(db, options.jobId), options.now, logs.join("\n"), message, options.now);
+    audit("MEDIA_EXPORT_FAILED", message, { projectId, payload: { jobId: options.jobId } });
+    if (error instanceof MediaStudioError) throw error;
+    throw new MediaStudioError(message, 500);
+  }
+}
+
+export function validateExportReadiness(db: Database.Database, projectId: string, options: Pick<ProductionExportOptions, "preset" | "resolution" | "fps" | "bitrateKbps" | "includeLogo">) {
+  const settings = resolveExportSettings(options);
+  const plan = buildRenderPlan(db, projectId, options.includeLogo);
+  return { ready: true, preset: options.preset, resolution: options.resolution, settings, sceneCount: plan.scenes.length };
+}
+
+export async function retryProductionExport(db: Database.Database, projectId: string, failedJobId: string, options: { jobId: string; outputAssetId: string; now: string; runner?: ProcessRunner; storageRoot?: string; timeoutMs?: number }, audit: MediaAuditWriter) {
+  const previous = getRenderJob(db, projectId, failedJobId);
+  if (previous.status !== "FAILED" && previous.status !== "CANCELLED") throw new MediaStudioError("Only failed or cancelled exports can be retried", 409);
+  const request = parseRenderRequest(previous.requestJson);
+  return renderProductionExport(db, projectId, { ...request, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, runner: options.runner, storageRoot: options.storageRoot, timeoutMs: options.timeoutMs }, audit);
+}
+
 export function listRenderJobs(db: Database.Database, projectId: string) {
   return db.prepare(`SELECT id,media_project_id AS mediaProjectId,status,progress,output_asset_id AS outputAssetId,request_json AS requestJson,log_text AS logText,error,cancel_requested AS cancelRequested,created_at AS createdAt,updated_at AS updatedAt,completed_at AS completedAt
     FROM media_render_jobs WHERE media_project_id=? ORDER BY created_at DESC`).all(projectId);
@@ -132,7 +223,7 @@ function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: 
   return { scenes: scenePlans, logo, disclaimer: brand?.disclaimer ?? "" };
 }
 
-function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: RenderSettings, logoPath: string | null, disclaimer = "") {
+function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: RenderSettings, logoPath: string | null, disclaimer = "", controls: { includeCaptions?: boolean } = {}) {
   const args = ["-y"];
   if (scene.asset.kind === "image") args.push("-loop", "1", "-t", String(scene.durationSeconds));
   args.push("-i", scene.asset.localPath);
@@ -154,9 +245,9 @@ function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: Re
   const filters = [
     `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease`,
     `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`,
-    `fps=${settings.fps}`,
-    `drawtext=text='${escapeDrawText(scene.dialogue || "")}':x=(w-text_w)/2:y=h-(text_h*2):fontcolor=white:fontsize=36:box=1:boxcolor=black@0.55:boxborderw=12`
+    `fps=${settings.fps}`
   ];
+  if (controls.includeCaptions !== false) filters.push(`drawtext=text='${escapeDrawText(scene.dialogue || "")}':x=(w-text_w)/2:y=h-(text_h*2):fontcolor=white:fontsize=36:box=1:boxcolor=black@0.55:boxborderw=12`);
   if (disclaimer.trim()) filters.push(`drawtext=text='${escapeDrawText(disclaimer.trim())}':x=32:y=24:fontcolor=white:fontsize=22:box=1:boxcolor=black@0.45:boxborderw=8`);
   const audioFilter = buildAudioFilter(audioInputs, silentInputIndex, scene.durationSeconds);
   if (logoPath || audioFilter) {
@@ -242,6 +333,34 @@ function resolveRenderSettings(aspectRatio: string, options: RenderDraftOptions)
   if (aspectRatio === "9:16") return { width: 1080, height: 1920, fps };
   if (aspectRatio === "1:1") return { width: 1080, height: 1080, fps };
   return { width: 1920, height: 1080, fps };
+}
+
+function resolveExportSettings(options: Pick<ProductionExportOptions, "preset" | "resolution" | "fps">): RenderSettings {
+  const longEdge = options.resolution === "720p" ? 1280 : 1920;
+  const shortEdge = options.resolution === "720p" ? 720 : 1080;
+  if (options.preset === "9:16") return { width: shortEdge, height: longEdge, fps: options.fps };
+  if (options.preset === "1:1") return { width: shortEdge, height: shortEdge, fps: options.fps };
+  return { width: longEdge, height: shortEdge, fps: options.fps };
+}
+
+function parseRenderRequest(value: string): ProductionExportOptions {
+  const parsed = JSON.parse(value) as Partial<ProductionExportOptions> & { mode?: string };
+  if (parsed.mode !== "FINAL_EXPORT") throw new MediaStudioError("Render job is not a final export", 400);
+  if (parsed.preset !== "9:16" && parsed.preset !== "16:9" && parsed.preset !== "1:1") throw new MediaStudioError("Export job has invalid preset", 400);
+  if (parsed.resolution !== "720p" && parsed.resolution !== "1080p") throw new MediaStudioError("Export job has invalid resolution", 400);
+  return {
+    jobId: "",
+    outputAssetId: "",
+    now: "",
+    preset: parsed.preset,
+    resolution: parsed.resolution,
+    fps: typeof parsed.fps === "number" ? parsed.fps : 30,
+    bitrateKbps: typeof parsed.bitrateKbps === "number" ? parsed.bitrateKbps : 8000,
+    includeCaptions: parsed.includeCaptions !== false,
+    includeLogo: parsed.includeLogo !== false,
+    includeDisclaimer: parsed.includeDisclaimer !== false,
+    includeMusic: parsed.includeMusic !== false
+  };
 }
 
 function insertRenderJob(db: Database.Database, id: string, projectId: string, timestamp: string, request: unknown) {

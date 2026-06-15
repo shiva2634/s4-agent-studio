@@ -697,6 +697,27 @@ export async function deleteLibraryAsset(db: Database.Database, projectId: strin
   return { deleted: true };
 }
 
+export function renameMediaAsset(db: Database.Database, projectId: string, assetId: string, input: { label: string; now: string }, audit: MediaAuditWriter): MediaAsset {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  db.prepare("UPDATE media_assets SET label=?,updated_at=? WHERE id=? AND media_project_id=?").run(input.label, input.now, assetId, projectId);
+  audit("MEDIA_ASSET_RENAMED", `Media asset renamed to ${input.label}`, { projectId, payload: { assetId, previousLabel: asset.label, label: input.label } });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export async function deleteProjectAsset(db: Database.Database, projectId: string, assetId: string, timestamp: string, audit: MediaAuditWriter, storageRoot?: string): Promise<{ deleted: true }> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  if (asset.sceneId) throw new MediaStudioError("Scene assets must be deleted from their scene", 400);
+  const root = resolveStorageRoot(storageRoot);
+  if (asset.localPath) await removeStoredAssetFile(asset.localPath, root);
+  if (asset.previewPath && asset.previewPath !== asset.localPath) await removeStoredAssetFile(asset.previewPath, root);
+  if (asset.thumbnailPath) await removeStoredAssetFile(asset.thumbnailPath, root);
+  db.prepare("DELETE FROM media_assets WHERE id=? AND media_project_id=?").run(assetId, projectId);
+  audit("MEDIA_ASSET_DELETED", `Media asset ${asset.label} deleted`, { projectId, payload: { assetId, source: asset.source, label: asset.label } });
+  return { deleted: true };
+}
+
 export function updateAudioAssetSettings(db: Database.Database, projectId: string, assetId: string, input: {
   role?: MediaAudioRole;
   volume?: number;

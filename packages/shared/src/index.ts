@@ -162,6 +162,24 @@ export const RenderMediaDraftSchema = z.object({
   includeLogo: z.boolean().optional()
 });
 
+export const MediaExportPresetSchema = z.enum(["9:16", "16:9", "1:1"]);
+export const MediaExportResolutionSchema = z.enum(["720p", "1080p"]);
+
+export const RenderMediaExportSchema = z.object({
+  preset: MediaExportPresetSchema,
+  resolution: MediaExportResolutionSchema,
+  fps: z.number().int().min(12).max(60),
+  bitrateKbps: z.number().int().min(500).max(50_000),
+  includeCaptions: z.boolean(),
+  includeLogo: z.boolean(),
+  includeDisclaimer: z.boolean(),
+  includeMusic: z.boolean()
+});
+
+export const RenameMediaAssetSchema = z.object({
+  label: z.string().trim().min(1).max(200)
+});
+
 export const GenerateWanSceneSchema = z.object({
   mode: z.enum(["text-to-video", "image-to-video"]),
   approved: z.boolean(),
@@ -249,6 +267,8 @@ export type CreateProjectFromTemplate = z.infer<typeof CreateProjectFromTemplate
 export type ApplyMediaTemplate = z.infer<typeof ApplyMediaTemplateSchema>;
 export type ReorderMediaScenes = z.infer<typeof ReorderMediaScenesSchema>;
 export type RenderMediaDraft = z.infer<typeof RenderMediaDraftSchema>;
+export type RenderMediaExport = z.infer<typeof RenderMediaExportSchema>;
+export type RenameMediaAsset = z.infer<typeof RenameMediaAssetSchema>;
 export type GenerateWanScene = z.infer<typeof GenerateWanSceneSchema>;
 export type RetryWanGeneration = z.infer<typeof RetryWanGenerationSchema>;
 export type FlowJobAction = z.infer<typeof FlowJobActionSchema>;

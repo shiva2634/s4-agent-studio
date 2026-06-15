@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaScene, createBrandKit, createMediaProject, reorderMediaScenes, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaScene, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
-import { cancelRenderJob, renderDraftVideo, validateRenderReadiness, type RenderDraftOptions } from "./media-rendering.js";
+import { addDirectorChatMessage, approveMediaScene, createBrandKit, createMediaProject, deleteProjectAsset, renameMediaAsset, reorderMediaScenes, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaScene, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { cancelRenderJob, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness, validateRenderReadiness, type RenderDraftOptions } from "./media-rendering.js";
 import type { ProcessRunner } from "./media-processing.js";
 
 function dbFixture() {
@@ -176,6 +176,84 @@ describe("media rendering", () => {
       const joined = sceneRender.args.join(" ");
       assert.match(joined, /overlay=W-w-32:32/);
       assert.match(joined, /Prototype footage/);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders final exports with presets, bitrate, toggles, history asset, and audit", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-export-"));
+    const calls: Array<{ command: string; args: string[] }> = [];
+    try {
+      await readyProject(db, storageRoot);
+      const preflight = validateExportReadiness(db, "media-1", { preset: "9:16", resolution: "720p", fps: 24, bitrateKbps: 2500, includeLogo: false });
+      assert.equal(preflight.settings.width, 720);
+      assert.equal(preflight.settings.height, 1280);
+
+      const job = await renderProductionExport(db, "media-1", {
+        jobId: "export-1",
+        outputAssetId: "final-1",
+        now: "export-time",
+        storageRoot,
+        runner: writingRunner(storageRoot, calls),
+        preset: "9:16",
+        resolution: "720p",
+        fps: 24,
+        bitrateKbps: 2500,
+        includeCaptions: false,
+        includeLogo: false,
+        includeDisclaimer: false,
+        includeMusic: false
+      }, audit(db));
+      const output = db.prepare("SELECT source,label,local_path AS localPath,metadata_json AS metadataJson FROM media_assets WHERE id='final-1'").get() as { source: string; label: string; localPath: string; metadataJson: string };
+      const concat = calls.find((call) => call.args.includes("-b:v") && call.args.includes("2500k"));
+      const sceneCall = calls.find((call) => call.args.includes("-s") && call.args.includes("720x1280"));
+
+      assert.equal(job.status, "COMPLETED");
+      assert.equal(output.source, "final-export");
+      assert.equal(output.label, "Final export 9:16 720p");
+      assert.equal(JSON.parse(output.metadataJson).exportSettings.mode, "FINAL_EXPORT");
+      assert.ok(concat);
+      assert.ok(sceneCall);
+      assert.equal(sceneCall.args.join(" ").includes("drawtext=text='Line 1'"), false);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_EXPORT_COMPLETED'").get() as { count: number }).count, 1);
+
+      const renamed = renameMediaAsset(db, "media-1", "final-1", { label: "Launch export", now: "rename" }, audit(db));
+      assert.equal(renamed.label, "Launch export");
+      await deleteProjectAsset(db, "media-1", "final-1", "delete", audit(db), storageRoot);
+      await assert.rejects(() => fs.stat(output.localPath), /ENOENT/);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("retries failed final exports with saved settings", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-export-"));
+    try {
+      await readyProject(db, storageRoot);
+      const failing: ProcessRunner = async (_command, args) => args.includes("-version") ? { stdout: "version", stderr: "", exitCode: 0 } : { stdout: "", stderr: "boom", exitCode: 1 };
+      await assert.rejects(() => renderProductionExport(db, "media-1", {
+        jobId: "export-1",
+        outputAssetId: "final-1",
+        now: "export-time",
+        storageRoot,
+        runner: failing,
+        preset: "16:9",
+        resolution: "1080p",
+        fps: 30,
+        bitrateKbps: 8000,
+        includeCaptions: true,
+        includeLogo: true,
+        includeDisclaimer: true,
+        includeMusic: true
+      }, audit(db)), /FFmpeg export scene render failed/);
+      const retried = await retryProductionExport(db, "media-1", "export-1", { jobId: "export-2", outputAssetId: "final-2", now: "retry", storageRoot, runner: writingRunner(storageRoot) }, audit(db));
+      const request = JSON.parse((db.prepare("SELECT request_json AS requestJson FROM media_render_jobs WHERE id='export-2'").get() as { requestJson: string }).requestJson);
+      assert.equal(retried.status, "COMPLETED");
+      assert.equal(request.mode, "FINAL_EXPORT");
+      assert.equal(request.bitrateKbps, 8000);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }
