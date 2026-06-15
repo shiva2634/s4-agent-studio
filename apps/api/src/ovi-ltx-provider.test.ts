@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { type MediaAuditWriter, MediaStudioError } from "./media-studio.js";
-import { cancelExternalGeneration, externalProviderStatusResponse, generateExternalMedia, retryExternalGeneration, testExternalProviderConnection, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
+import { cancelExternalGeneration, externalProviderStatusResponse, generateExternalMedia, loadOviConfig, retryExternalGeneration, testExternalProviderConnection, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
 import type { ProcessRunner } from "./media-processing.js";
 
 const oviConfig: ExternalMediaConfig = { enabled: true, baseUrl: "http://token:secret@127.0.0.1:8391", apiKey: "secret-token", timeoutMs: 2_000 };
@@ -69,6 +69,42 @@ function failingProviderFetch(): ExternalMediaHttp {
   };
 }
 
+function invalidJsonFetch(): ExternalMediaHttp {
+  return async (input) => {
+    const url = String(input);
+    if (url.endsWith("/jobs")) return new Response("not json", { status: 200 });
+    return jsonResponse({});
+  };
+}
+
+function unsupportedStatusFetch(): ExternalMediaHttp {
+  return async (input) => {
+    const url = String(input);
+    if (url.endsWith("/jobs")) return jsonResponse({ job_id: "remote-1" });
+    if (url.endsWith("/jobs/remote-1")) return jsonResponse({ status: "mystery" });
+    return jsonResponse({});
+  };
+}
+
+function offHostOutputFetch(): ExternalMediaHttp {
+  return async (input) => {
+    const url = String(input);
+    if (url.endsWith("/jobs")) return jsonResponse({ job_id: "remote-1" });
+    if (url.endsWith("/jobs/remote-1")) return jsonResponse({ status: "completed", output: { filename: "generated.mp4", url: "https://example.test/out.mp4" } });
+    return new Response(new Uint8Array(Buffer.from("video")), { status: 200 });
+  };
+}
+
+function abortingFetch(): ExternalMediaHttp {
+  return (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+}
+
 function processingRunner(storageRoot: string): ProcessRunner {
   return async (_command, args) => {
     if (args.includes("-version")) return { stdout: "version", stderr: "", exitCode: 0 };
@@ -97,6 +133,7 @@ describe("Ovi and LTX media providers", () => {
     const result = await testExternalProviderConnection("ovi", oviConfig, mockProviderFetch());
     assert.equal(result.status, "ok");
     assert.equal(JSON.stringify(result).includes("secret"), false);
+    assert.equal(loadOviConfig({ OVI_ENABLED: "true", OVI_TIMEOUT_MS: "not-a-number" }).timeoutMs, 120_000);
   });
 
   it("generates Ovi T2V output, saves it as a scene asset, and runs QC", async () => {
@@ -171,6 +208,68 @@ describe("Ovi and LTX media providers", () => {
     assert.equal(job.status, "FAILED");
     assert.equal(job.resultJson.includes("secret-token"), false);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_OVI_GENERATION_FAILED'").get() as { count: number }).count, 1);
+  });
+
+  it("normalizes invalid provider responses and blocks off-host output URLs", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "invalid-json-job",
+      outputAssetId: "invalid-json-asset",
+      now: "now",
+      approved: true,
+      config: oviConfig,
+      fetchImpl: invalidJsonFetch()
+    }, audit(db)), /Ovi submit response is invalid JSON/);
+
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "unsupported-status-job",
+      outputAssetId: "unsupported-status-asset",
+      now: "now",
+      approved: true,
+      config: oviConfig,
+      fetchImpl: unsupportedStatusFetch()
+    }, audit(db)), /unsupported status mystery/);
+
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "off-host-job",
+      outputAssetId: "off-host-asset",
+      now: "now",
+      approved: true,
+      config: oviConfig,
+      fetchImpl: offHostOutputFetch()
+    }, audit(db)), /output URL must stay on the configured provider host/);
+  });
+
+  it("rejects invalid provider configuration before creating jobs and normalizes abort timeouts", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "invalid-config-job",
+      outputAssetId: "invalid-config-asset",
+      now: "now",
+      approved: true,
+      config: { ...oviConfig, baseUrl: "file:///tmp/provider" },
+      fetchImpl: mockProviderFetch()
+    }, audit(db)), (error: unknown) => error instanceof MediaStudioError && error.statusCode === 400);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_generation_jobs WHERE id='invalid-config-job'").get() as { count: number }).count, 0);
+
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "timeout-job",
+      outputAssetId: "timeout-asset",
+      now: "now",
+      approved: true,
+      config: { ...oviConfig, timeoutMs: 10 },
+      fetchImpl: abortingFetch()
+    }, audit(db)), /Ovi request timed out after 10ms/);
   });
 
   it("cancels and retries external provider generation jobs", async () => {

@@ -10,12 +10,14 @@ export type ExternalMediaTask = "T2V" | "I2V" | "AUDIO_VIDEO";
 export type ExternalMediaHttp = typeof fetch;
 export type ExternalMediaConfig = { enabled: boolean; baseUrl: string; apiKey: string; timeoutMs: number };
 
+const defaultTimeoutMs = 120_000;
+
 export function loadOviConfig(env: NodeJS.ProcessEnv = process.env): ExternalMediaConfig {
-  return { enabled: (env.OVI_ENABLED ?? "false").toLowerCase() === "true", baseUrl: env.OVI_BASE_URL ?? "http://127.0.0.1:8391", apiKey: env.OVI_API_KEY ?? "", timeoutMs: Number(env.OVI_TIMEOUT_MS ?? 120_000) };
+  return { enabled: (env.OVI_ENABLED ?? "false").toLowerCase() === "true", baseUrl: env.OVI_BASE_URL ?? "http://127.0.0.1:8391", apiKey: env.OVI_API_KEY ?? "", timeoutMs: parseTimeout(env.OVI_TIMEOUT_MS) };
 }
 
 export function loadLtxConfig(env: NodeJS.ProcessEnv = process.env): ExternalMediaConfig {
-  return { enabled: (env.LTX_ENABLED ?? "false").toLowerCase() === "true", baseUrl: env.LTX_BASE_URL ?? "http://127.0.0.1:8491", apiKey: env.LTX_API_KEY ?? "", timeoutMs: Number(env.LTX_TIMEOUT_MS ?? 120_000) };
+  return { enabled: (env.LTX_ENABLED ?? "false").toLowerCase() === "true", baseUrl: env.LTX_BASE_URL ?? "http://127.0.0.1:8491", apiKey: env.LTX_API_KEY ?? "", timeoutMs: parseTimeout(env.LTX_TIMEOUT_MS) };
 }
 
 export function externalProviderStatusResponse(config: ExternalMediaConfig) {
@@ -25,7 +27,7 @@ export function externalProviderStatusResponse(config: ExternalMediaConfig) {
 export async function testExternalProviderConnection(providerKey: ExternalMediaProviderKey, config: ExternalMediaConfig, fetchImpl: ExternalMediaHttp = fetch) {
   if (!config.enabled) return { status: "disabled", ...externalProviderStatusResponse(config), lastTestedAt: new Date().toISOString() };
   try {
-    const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/health`, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
+    const response = await fetchWithTimeout(providerKey, `${trimBaseUrl(assertValidBaseUrl(config.baseUrl))}/health`, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`${providerName(providerKey)} health check failed: ${response.status}`);
     return { status: "ok", ...externalProviderStatusResponse(config), lastTestedAt: new Date().toISOString() };
   } catch (error) {
@@ -47,6 +49,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
 }, audit: MediaAuditWriter) {
   if (!input.approved) throw new MediaStudioError(`${providerName(input.providerKey)} generation requires explicit approval`, 403);
   if (!input.config.enabled) throw new MediaStudioError(`${providerName(input.providerKey)} provider is disabled`, 409);
+  assertValidBaseUrl(input.config.baseUrl);
   assertSupportedTask(input.providerKey, input.task);
   const scene = getScene(db, projectId, sceneId);
   const prompt = getSceneProviderPrompt(db, projectId, sceneId);
@@ -91,7 +94,7 @@ export async function cancelExternalGeneration(db: Database.Database, projectId:
   if (job.mediaProjectId !== projectId || job.providerKey !== providerKey) throw new MediaStudioError("Generation job not found", 404);
   const remoteJobId = parseRemoteJobId(job.resultJson);
   if (remoteJobId && !["COMPLETED", "FAILED", "CANCELLED"].includes(job.status) && config.enabled) {
-    await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}/cancel`, { method: "POST", headers: authHeaders(config) }, config.timeoutMs, fetchImpl).catch(() => undefined);
+    await fetchWithTimeout(providerKey, `${trimBaseUrl(assertValidBaseUrl(config.baseUrl))}/jobs/${encodeURIComponent(remoteJobId)}/cancel`, { method: "POST", headers: authHeaders(config) }, config.timeoutMs, fetchImpl).catch(() => undefined);
   }
   updateGenerationJob(db, jobId, "CANCELLED", timestamp, `${providerName(providerKey)} generation cancelled`, remoteJobId ? { remoteJobId } : null);
   audit(`MEDIA_${providerKey.toUpperCase()}_GENERATION_CANCELLED`, `${providerName(providerKey)} generation cancelled`, { projectId, payload: { jobId, remoteJobId } });
@@ -115,6 +118,7 @@ export async function retryExternalGeneration(db: Database.Database, projectId: 
 }
 
 async function submitExternalJob(config: ExternalMediaConfig, input: { providerKey: ExternalMediaProviderKey; task: ExternalMediaTask; prompt: string; scene: SceneRow; image: AssetRow | null; audio: AssetRow | null }, fetchImpl: ExternalMediaHttp) {
+  const baseUrl = assertValidBaseUrl(config.baseUrl);
   const body = JSON.stringify({
     task: input.task,
     prompt: input.prompt,
@@ -124,32 +128,36 @@ async function submitExternalJob(config: ExternalMediaConfig, input: { providerK
       audio: input.audio ? { fileName: input.audio.fileName ?? input.audio.originalName, mimeType: input.audio.mimeType } : null
     }
   });
-  const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders(config) }, body }, config.timeoutMs, fetchImpl);
+  const response = await fetchWithTimeout(input.providerKey, `${trimBaseUrl(baseUrl)}/jobs`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders(config) }, body }, config.timeoutMs, fetchImpl);
   if (!response.ok) throw new Error(`${providerName(input.providerKey)} submit failed: ${response.status}`);
-  const data = await response.json() as { job_id?: string; id?: string };
-  const jobId = data.job_id ?? data.id;
+  const data = await readJsonResponse(response, input.providerKey, "submit") as { job_id?: unknown; id?: unknown };
+  const jobId = typeof data.job_id === "string" ? data.job_id : typeof data.id === "string" ? data.id : "";
   if (!jobId) throw new Error(`${providerName(input.providerKey)} did not return a job id`);
   return jobId;
 }
 
 async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp) {
+  const baseUrl = assertValidBaseUrl(config.baseUrl);
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
-    const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}`, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
+    const response = await fetchWithTimeout(providerKey, `${trimBaseUrl(baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}`, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`${providerName(providerKey)} poll failed: ${response.status}`);
-    const data = await response.json() as PollResponse;
-    const status = (data.status ?? "").toLowerCase();
+    const data = await readJsonResponse(response, providerKey, "poll") as PollResponse;
+    if (typeof data.status !== "string" || !data.status.trim()) throw new Error(`${providerName(providerKey)} poll response is missing status`);
+    const status = data.status.toLowerCase();
     if (["failed", "error"].includes(status)) throw new Error(data.error ?? `${providerName(providerKey)} job failed`);
     if (["cancelled", "canceled"].includes(status)) throw new Error(`${providerName(providerKey)} job was cancelled`);
     if (["completed", "succeeded", "success"].includes(status)) return { filename: data.output?.filename ?? data.filename ?? `${providerKey}-output.mp4`, url: data.output?.url ?? data.output_url };
+    if (!["queued", "pending", "running", "processing", "in_progress"].includes(status)) throw new Error(`${providerName(providerKey)} returned unsupported status ${status}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`${providerName(providerKey)} generation timed out`);
 }
 
 async function downloadExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, output: { filename?: string; url?: string }, fetchImpl: ExternalMediaHttp) {
-  const url = output.url ? new URL(output.url, trimBaseUrl(config.baseUrl)).toString() : `${trimBaseUrl(config.baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}/output`;
-  const response = await fetchWithTimeout(url, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
+  const baseUrl = assertValidBaseUrl(config.baseUrl);
+  const url = output.url ? resolveProviderOutputUrl(baseUrl, output.url, providerKey) : `${trimBaseUrl(baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}/output`;
+  const response = await fetchWithTimeout(providerKey, url, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
   if (!response.ok) throw new Error(`${providerName(providerKey)} output download failed: ${response.status}`);
   return Buffer.from(await response.arrayBuffer());
 }
@@ -218,10 +226,14 @@ function parseRemoteJobId(resultJson: string | null): string | null {
   }
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, fetchImpl: ExternalMediaHttp) {
+async function fetchWithTimeout(providerKey: ExternalMediaProviderKey, url: string, init: RequestInit, timeoutMs: number, fetchImpl: ExternalMediaHttp) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try { return await fetchImpl(url, { ...init, signal: controller.signal }); }
+  catch (error) {
+    if (isAbortError(error)) throw new Error(`${providerName(providerKey)} request timed out after ${timeoutMs}ms`);
+    throw error;
+  }
   finally { clearTimeout(timer); }
 }
 
@@ -250,6 +262,43 @@ function sanitizeSegment(value: string): string {
 
 function trimBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
+}
+
+function assertValidBaseUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("invalid protocol");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    throw new MediaStudioError("Provider base URL must be a valid HTTP(S) URL", 400);
+  }
+}
+
+function resolveProviderOutputUrl(baseUrl: string, outputUrl: string, providerKey: ExternalMediaProviderKey): string {
+  const base = new URL(baseUrl);
+  const resolved = new URL(outputUrl, base);
+  if (resolved.origin !== base.origin) throw new Error(`${providerName(providerKey)} output URL must stay on the configured provider host`);
+  return resolved.toString();
+}
+
+async function readJsonResponse(response: Response, providerKey: ExternalMediaProviderKey, operation: string): Promise<unknown> {
+  try {
+    const parsed = await response.json() as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("response is not an object");
+    return parsed;
+  } catch (error) {
+    if (error instanceof Error && error.message === "response is not an object") throw new Error(`${providerName(providerKey)} ${operation} response is not a JSON object`);
+    throw new Error(`${providerName(providerKey)} ${operation} response is invalid JSON`);
+  }
+}
+
+function parseTimeout(value: string | undefined): number {
+  const parsed = Number(value ?? defaultTimeoutMs);
+  return Number.isFinite(parsed) && parsed >= 1_000 ? parsed : defaultTimeoutMs;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
 }
 
 function safeHostname(value: string) {

@@ -20,7 +20,7 @@ import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, 
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
 import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
-import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders } from "./media-provider-router.js";
+import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders, type MediaProviderTask } from "./media-provider-router.js";
 import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
 import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
 import { cancelExternalGeneration, externalProviderStatusResponse, loadLtxConfig, loadOviConfig, retryExternalGeneration, testExternalProviderConnection } from "./ovi-ltx-provider.js";
@@ -37,10 +37,15 @@ await app.register(multipart, {
   limits: { fileSize: mediaAssetMaxBytes, files: 1 }
 });
 const now = () => new Date().toISOString();
+const mediaProviderTasks = ["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"] as const;
 
 function audit(eventType: string, summary: string, values: { projectId?: string; taskId?: string; agentId?: string; payload?: unknown } = {}) {
   db.prepare(`INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, now());
+}
+
+function isMediaProviderTask(value: string): value is MediaProviderTask {
+  return mediaProviderTasks.includes(value as MediaProviderTask);
 }
 
 app.get("/health", async () => ({ status: "ok", service: "s4-agent-studio-api", time: now() }));
@@ -73,11 +78,13 @@ app.post("/api/media/director/test", async () => {
   return providerStatusResponse(config, health);
 });
 
-app.get("/api/media/provider-router", async (request: any) => {
+app.get("/api/media/provider-router", async (request: any, reply) => {
   const capabilities = getMediaProviderCapabilities(loadComfyConfig(), loadLongCatConfig(), loadOviConfig(), loadLtxConfig());
+  const task = typeof request.query?.task === "string" ? request.query.task : undefined;
+  if (task && !isMediaProviderTask(task)) return reply.status(400).send({ error: "Invalid provider task" });
   return {
     capabilities,
-    decision: request.query?.task ? selectMediaProviders(request.query.task, capabilities) : null
+    decision: task ? selectMediaProviders(task, capabilities) : null
   };
 });
 
