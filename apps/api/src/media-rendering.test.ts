@@ -4,18 +4,20 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaScene, createMediaProject, reorderMediaScenes, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaScene, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { addDirectorChatMessage, approveMediaScene, createBrandKit, createMediaProject, reorderMediaScenes, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaScene, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { cancelRenderJob, renderDraftVideo, validateRenderReadiness, type RenderDraftOptions } from "./media-rendering.js";
 import type { ProcessRunner } from "./media-processing.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
   db.exec(`
-    CREATE TABLE media_projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT,aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','ARCHIVED')),archived_at TEXT,archived_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT,aspect_ratio TEXT NOT NULL DEFAULT '16:9',default_brand_kit_id TEXT,default_presenter_profile_id TEXT,status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','ARCHIVED')),archived_at TEXT,archived_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE media_chat_messages (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,sender TEXT NOT NULL CHECK(sender IN ('user','director')),content TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE media_video_briefs (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL UNIQUE,title TEXT NOT NULL,logline TEXT NOT NULL,audience TEXT NOT NULL,style TEXT NOT NULL,duration_seconds INTEGER NOT NULL,constraints_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'DRAFT',approved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE media_scenes (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,brief_id TEXT NOT NULL,position INTEGER NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,duration_seconds INTEGER NOT NULL,dialogue TEXT NOT NULL DEFAULT '',visual_prompt TEXT NOT NULL DEFAULT '',aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'DRAFT',approved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE media_assets (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,scene_id TEXT,kind TEXT NOT NULL,label TEXT NOT NULL,source TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'PLANNED',file_name TEXT,original_name TEXT,mime_type TEXT,size_bytes INTEGER,checksum_sha256 TEXT,local_path TEXT,inspection_json TEXT,qc_status TEXT NOT NULL DEFAULT 'PENDING',qc_issues_json TEXT NOT NULL DEFAULT '[]',preview_path TEXT,thumbnail_path TEXT,metadata_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_brand_kits (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,name TEXT NOT NULL,colors_json TEXT NOT NULL DEFAULT '[]',fonts_json TEXT NOT NULL DEFAULT '[]',tagline TEXT NOT NULL DEFAULT '',tone TEXT NOT NULL DEFAULT '',disclaimer TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,deleted_at TEXT);
+    CREATE TABLE media_presenter_profiles (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,name TEXT NOT NULL,appearance_prompt TEXT NOT NULL DEFAULT '',voice_accent TEXT NOT NULL DEFAULT '',clothing TEXT NOT NULL DEFAULT '',consistency_rules TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,deleted_at TEXT);
     CREATE TABLE media_generation_jobs (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,provider_key TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'STUBBED',request_json TEXT NOT NULL,result_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE media_render_jobs (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED')),progress INTEGER NOT NULL DEFAULT 0,output_asset_id TEXT,request_json TEXT NOT NULL,log_text TEXT NOT NULL DEFAULT '',error TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,completed_at TEXT);
     CREATE TABLE audit_events (id TEXT PRIMARY KEY,project_id TEXT,event_type TEXT NOT NULL,summary TEXT NOT NULL,payload_json TEXT,created_at TEXT NOT NULL);
@@ -143,6 +145,37 @@ describe("media rendering", () => {
       assert.match(joined, /afade=t=in/);
       assert.match(joined, /amix=inputs=3/);
       assert.match(joined, /-map \[aout\]/);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("applies selected brand logo and disclaimer during draft rendering", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-render-"));
+    const calls: Array<{ command: string; args: string[] }> = [];
+    try {
+      await readyProject(db, storageRoot);
+      const brand = createBrandKit(db, "media-1", { id: "brand-1", name: "S4", colors: [], fonts: [], tagline: "", tone: "", disclaimer: "Prototype footage", now: "brand" }, audit(db));
+      const logo = await uploadLibraryAsset(db, "media-1", {
+        id: "logo-1",
+        ownerType: "brand",
+        ownerId: brand.id,
+        role: "logo",
+        originalName: "logo.png",
+        mimeType: "image/png",
+        bytes: Buffer.from("logo"),
+        now: "logo",
+        storageRoot
+      }, audit(db));
+      selectMediaLibraryDefaults(db, "media-1", { brandKitId: brand.id, now: "defaults" }, audit(db));
+
+      await renderDraftVideo(db, "media-1", renderOptions(storageRoot, writingRunner(storageRoot, calls)), audit(db));
+      const sceneRender = calls.find((call) => call.args.includes(logo.localPath as string));
+      assert.ok(sceneRender);
+      const joined = sceneRender.args.join(" ");
+      assert.match(joined, /overlay=W-w-32:32/);
+      assert.match(joined, /Prototype footage/);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

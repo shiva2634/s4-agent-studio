@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, getSceneProviderPrompt, type MediaAuditWriter } from "./media-studio.js";
 import { generateWanForScene, loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
 import { generateLongCatPresenter, loadLongCatConfig, type LongCatConfig, type LongCatHttp } from "./longcat-provider.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
@@ -355,7 +355,7 @@ function buildFlowPackage(db: Database.Database, projectId: string, sceneId: str
       aspectRatio: scene.aspectRatio,
       durationSeconds: scene.durationSeconds
     },
-    prompt: [scene.visualPrompt, scene.dialogue ? `Dialogue: ${scene.dialogue}` : "", `Aspect ratio: ${scene.aspectRatio}`, `Duration: ${scene.durationSeconds}s`].filter(Boolean).join("\n\n"),
+    prompt: getSceneProviderPrompt(db, projectId, sceneId),
     references
   };
 }

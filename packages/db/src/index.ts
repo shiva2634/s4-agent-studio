@@ -143,6 +143,8 @@ export function initializeDatabase() {
       name TEXT NOT NULL,
       description TEXT,
       aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+      default_brand_kit_id TEXT,
+      default_presenter_profile_id TEXT,
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','ARCHIVED')),
       archived_at TEXT,
       archived_by TEXT,
@@ -215,6 +217,33 @@ export function initializeDatabase() {
       FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE,
       FOREIGN KEY(scene_id) REFERENCES media_scenes(id) ON DELETE SET NULL
     );
+    CREATE TABLE IF NOT EXISTS media_brand_kits (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      colors_json TEXT NOT NULL DEFAULT '[]',
+      fonts_json TEXT NOT NULL DEFAULT '[]',
+      tagline TEXT NOT NULL DEFAULT '',
+      tone TEXT NOT NULL DEFAULT '',
+      disclaimer TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS media_presenter_profiles (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      appearance_prompt TEXT NOT NULL DEFAULT '',
+      voice_accent TEXT NOT NULL DEFAULT '',
+      clothing TEXT NOT NULL DEFAULT '',
+      consistency_rules TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS media_generation_jobs (
       id TEXT PRIMARY KEY,
       media_project_id TEXT NOT NULL,
@@ -283,6 +312,8 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_media_messages_project ON media_chat_messages(media_project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_scenes_project ON media_scenes(media_project_id, position);
     CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(media_project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_media_brand_kits_project ON media_brand_kits(media_project_id, deleted_at, created_at);
+    CREATE INDEX IF NOT EXISTS idx_media_presenter_profiles_project ON media_presenter_profiles(media_project_id, deleted_at, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_jobs_project ON media_generation_jobs(media_project_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_comfy_workflows_project ON media_comfy_workflows(media_project_id, workflow_type, is_active);
     CREATE INDEX IF NOT EXISTS idx_media_processing_jobs_asset ON media_processing_jobs(asset_id, created_at DESC);
@@ -313,6 +344,12 @@ export function initializeDatabase() {
   const mediaProjectColumns = db.prepare("PRAGMA table_info(media_projects)").all() as Array<{ name: string }>;
   if (!mediaProjectColumns.some((column) => column.name === "aspect_ratio")) {
     db.exec("ALTER TABLE media_projects ADD COLUMN aspect_ratio TEXT NOT NULL DEFAULT '16:9'");
+  }
+  if (!mediaProjectColumns.some((column) => column.name === "default_brand_kit_id")) {
+    db.exec("ALTER TABLE media_projects ADD COLUMN default_brand_kit_id TEXT");
+  }
+  if (!mediaProjectColumns.some((column) => column.name === "default_presenter_profile_id")) {
+    db.exec("ALTER TABLE media_projects ADD COLUMN default_presenter_profile_id TEXT");
   }
 
   const mediaSceneColumns = db.prepare("PRAGMA table_info(media_scenes)").all() as Array<{ name: string }>;
@@ -369,6 +406,36 @@ export function initializeDatabase() {
   if (!mediaAssetColumns.some((column) => column.name === "metadata_json")) {
     db.exec("ALTER TABLE media_assets ADD COLUMN metadata_json TEXT");
   }
+
+  db.exec(`CREATE TABLE IF NOT EXISTS media_brand_kits (
+    id TEXT PRIMARY KEY,
+    media_project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    colors_json TEXT NOT NULL DEFAULT '[]',
+    fonts_json TEXT NOT NULL DEFAULT '[]',
+    tagline TEXT NOT NULL DEFAULT '',
+    tone TEXT NOT NULL DEFAULT '',
+    disclaimer TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_brand_kits_project ON media_brand_kits(media_project_id, deleted_at, created_at)");
+  db.exec(`CREATE TABLE IF NOT EXISTS media_presenter_profiles (
+    id TEXT PRIMARY KEY,
+    media_project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    appearance_prompt TEXT NOT NULL DEFAULT '',
+    voice_accent TEXT NOT NULL DEFAULT '',
+    clothing TEXT NOT NULL DEFAULT '',
+    consistency_rules TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_presenter_profiles_project ON media_presenter_profiles(media_project_id, deleted_at, created_at)");
 
   db.exec(`CREATE TABLE IF NOT EXISTS media_comfy_workflows (
     id TEXT PRIMARY KEY,

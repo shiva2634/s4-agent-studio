@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaChatMessageSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -16,7 +16,7 @@ import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./p
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteMediaChatMessage, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceSceneAsset, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateMediaProject, updateMediaScene, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createBrandKit, createMediaProject, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo } from "./media-rendering.js";
 import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
@@ -192,6 +192,79 @@ app.patch("/api/media/projects/:projectId", async (request: any, reply) => {
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to update media project" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/brand-kits", async (request: any, reply) => {
+  const parsed = MediaBrandKitSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid brand kit", details: parsed.error.flatten() });
+  try {
+    return reply.status(201).send({ brandKit: createBrandKit(db, request.params.projectId, { id: nanoid(), ...parsed.data, now: now() }, audit) });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create brand kit" });
+  }
+});
+
+app.put("/api/media/projects/:projectId/brand-kits/:brandKitId", async (request: any, reply) => {
+  const parsed = MediaBrandKitSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid brand kit", details: parsed.error.flatten() });
+  try {
+    return { brandKit: updateBrandKit(db, request.params.projectId, request.params.brandKitId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update brand kit" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/brand-kits/:brandKitId", async (request: any, reply) => {
+  try {
+    return deleteBrandKit(db, request.params.projectId, request.params.brandKitId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete brand kit" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/presenter-profiles", async (request: any, reply) => {
+  const parsed = MediaPresenterProfileSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid presenter profile", details: parsed.error.flatten() });
+  try {
+    return reply.status(201).send({ presenterProfile: createPresenterProfile(db, request.params.projectId, { id: nanoid(), ...parsed.data, now: now() }, audit) });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create presenter profile" });
+  }
+});
+
+app.put("/api/media/projects/:projectId/presenter-profiles/:presenterProfileId", async (request: any, reply) => {
+  const parsed = MediaPresenterProfileSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid presenter profile", details: parsed.error.flatten() });
+  try {
+    return { presenterProfile: updatePresenterProfile(db, request.params.projectId, request.params.presenterProfileId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update presenter profile" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/presenter-profiles/:presenterProfileId", async (request: any, reply) => {
+  try {
+    return deletePresenterProfile(db, request.params.projectId, request.params.presenterProfileId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete presenter profile" });
+  }
+});
+
+app.patch("/api/media/projects/:projectId/library-defaults", async (request: any, reply) => {
+  const parsed = SelectMediaDefaultsSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media library defaults", details: parsed.error.flatten() });
+  try {
+    return { project: selectMediaLibraryDefaults(db, request.params.projectId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to select media library defaults" });
   }
 });
 
@@ -422,6 +495,54 @@ app.post("/api/media/projects/:projectId/assets/upload", async (request: any, re
   }
 });
 
+app.post("/api/media/projects/:projectId/brand-kits/:brandKitId/assets/upload", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Upload requires one image file" });
+    const bytes = await file.toBuffer();
+    const asset = await uploadLibraryAsset(db, request.params.projectId, {
+      id: nanoid(),
+      ownerType: "brand",
+      ownerId: request.params.brandKitId,
+      role: typeof request.query?.role === "string" ? request.query.role : "logo",
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to upload brand asset" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/presenter-profiles/:presenterProfileId/assets/upload", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Upload requires one image file" });
+    const bytes = await file.toBuffer();
+    const asset = await uploadLibraryAsset(db, request.params.projectId, {
+      id: nanoid(),
+      ownerType: "presenter",
+      ownerId: request.params.presenterProfileId,
+      role: typeof request.query?.role === "string" ? request.query.role : "reference",
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return reply.status(201).send({ asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to upload presenter asset" });
+  }
+});
+
 app.patch("/api/media/projects/:projectId/assets/:assetId/audio", async (request: any, reply) => {
   const parsed = UpdateMediaAudioSettingsSchema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.status(400).send({ error: "Invalid audio settings", details: parsed.error.flatten() });
@@ -460,6 +581,35 @@ app.put("/api/media/projects/:projectId/scenes/:sceneId/assets/:assetId", async 
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
     return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to replace media asset" });
+  }
+});
+
+app.put("/api/media/projects/:projectId/library-assets/:assetId", async (request: any, reply) => {
+  try {
+    const file = await request.file();
+    if (!file) return reply.status(400).send({ error: "Replacement requires one image file" });
+    const bytes = await file.toBuffer();
+    const asset = await replaceLibraryAsset(db, request.params.projectId, request.params.assetId, {
+      originalName: file.filename,
+      mimeType: file.mimetype,
+      bytes,
+      now: now()
+    }, audit);
+    const processing = await processMediaAsset(db, request.params.projectId, asset.id, { jobId: nanoid(), now: now() }, audit);
+    return { asset: getMediaProjectBundle(db, request.params.projectId).assets.find((item) => item.id === asset.id) ?? asset, processing };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    if (error instanceof Error && error.message.toLowerCase().includes("too large")) return reply.status(413).send({ error: "Uploaded asset exceeds the size limit" });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to replace library asset" });
+  }
+});
+
+app.delete("/api/media/projects/:projectId/library-assets/:assetId", async (request: any, reply) => {
+  try {
+    return await deleteLibraryAsset(db, request.params.projectId, request.params.assetId, now(), audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to delete library asset" });
   }
 });
 

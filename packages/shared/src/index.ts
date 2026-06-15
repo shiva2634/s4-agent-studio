@@ -97,6 +97,28 @@ export const UpdateMediaAudioSettingsSchema = z.object({
   muted: z.boolean().optional()
 });
 
+export const MediaBrandKitSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  colors: z.array(z.string().trim().min(1).max(80)).max(20),
+  fonts: z.array(z.string().trim().min(1).max(120)).max(20),
+  tagline: z.string().trim().max(500),
+  tone: z.string().trim().max(2_000),
+  disclaimer: z.string().trim().max(1_000)
+});
+
+export const MediaPresenterProfileSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  appearancePrompt: z.string().trim().max(4_000),
+  voiceAccent: z.string().trim().max(500),
+  clothing: z.string().trim().max(1_000),
+  consistencyRules: z.string().trim().max(2_000)
+});
+
+export const SelectMediaDefaultsSchema = z.object({
+  brandKitId: z.string().min(1).nullable().optional(),
+  presenterProfileId: z.string().min(1).nullable().optional()
+});
+
 export const ReorderMediaScenesSchema = z.object({
   sceneIds: z.array(z.string().min(1)).min(1).max(200)
 });
@@ -186,6 +208,9 @@ export type UpdateMediaScene = z.infer<typeof UpdateMediaSceneSchema>;
 export type ImportMediaAsset = z.infer<typeof ImportMediaAssetSchema>;
 export type MediaAudioRole = z.infer<typeof MediaAudioRoleSchema>;
 export type UpdateMediaAudioSettings = z.infer<typeof UpdateMediaAudioSettingsSchema>;
+export type MediaBrandKitInput = z.infer<typeof MediaBrandKitSchema>;
+export type MediaPresenterProfileInput = z.infer<typeof MediaPresenterProfileSchema>;
+export type SelectMediaDefaults = z.infer<typeof SelectMediaDefaultsSchema>;
 export type ReorderMediaScenes = z.infer<typeof ReorderMediaScenesSchema>;
 export type RenderMediaDraft = z.infer<typeof RenderMediaDraftSchema>;
 export type GenerateWanScene = z.infer<typeof GenerateWanSceneSchema>;

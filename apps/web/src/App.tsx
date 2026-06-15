@@ -8,7 +8,7 @@ type Task = { id: string; title: string; status: string; riskLevel: string; proj
 type Proposal = { id: string; taskId: string; filePath: string; operation: string; reason: string; status: string };
 type ProviderStatus = { configured: boolean; provider: string; baseUrlHostname: string; model: string; status: string; lastTestedAt: string | null; sanitizedError: string | null };
 type ExecutionState = { executions: Array<{ id: string; status: string; gitCheckpointJson: string | null; checkResultsJson: string | null }>; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
-type MediaProject = { id: string; name: string; description: string | null; aspectRatio: string; status: "ACTIVE" | "ARCHIVED"; createdAt: string; updatedAt: string };
+type MediaProject = { id: string; name: string; description: string | null; aspectRatio: string; defaultBrandKitId: string | null; defaultPresenterProfileId: string | null; status: "ACTIVE" | "ARCHIVED"; createdAt: string; updatedAt: string };
 type MediaMessage = { id: string; sender: "user" | "director"; content: string; createdAt: string };
 type MediaBrief = { id: string; title: string; logline: string; audience: string; style: string; durationSeconds: number; constraintsJson: string; status: "DRAFT" | "APPROVED"; approvedAt: string | null };
 type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
@@ -21,7 +21,9 @@ type RouterCapability = { key: string; name: string; supports: string[]; enabled
 type MediaProcessingJob = { id: string; assetId: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"; error: string | null; createdAt: string };
 type MediaRenderJob = { id: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"; progress: number; outputAssetId: string | null; error: string | null; logText: string };
 type ComfyWorkflow = { id: string; workflowType: "WAN_T2V" | "WAN_I2V"; name: string; version: number; status: "VALID" | "INVALID"; isActive: 0 | 1; isBuiltin: 0 | 1; workflowJson: string; mappingJson: string; validationJson: string; createdAt: string; updatedAt: string };
-type MediaBundle = { project: MediaProject; messages: MediaMessage[]; brief: MediaBrief | null; scenes: MediaScene[]; assets: MediaAsset[]; generationJobs: MediaGenerationJob[]; processingJobs?: MediaProcessingJob[]; renderJobs?: MediaRenderJob[]; comfyWorkflows?: ComfyWorkflow[]; providers: MediaProvider[] };
+type MediaBrandKit = { id: string; name: string; colorsJson: string; fontsJson: string; tagline: string; tone: string; disclaimer: string };
+type MediaPresenterProfile = { id: string; name: string; appearancePrompt: string; voiceAccent: string; clothing: string; consistencyRules: string };
+type MediaBundle = { project: MediaProject; messages: MediaMessage[]; brief: MediaBrief | null; scenes: MediaScene[]; assets: MediaAsset[]; brandKits: MediaBrandKit[]; presenterProfiles: MediaPresenterProfile[]; generationJobs: MediaGenerationJob[]; processingJobs?: MediaProcessingJob[]; renderJobs?: MediaRenderJob[]; comfyWorkflows?: ComfyWorkflow[]; providers: MediaProvider[] };
 type FfmpegStatus = { available: boolean; ffmpegPath: string; ffprobePath: string; ffmpeg: { available: boolean }; ffprobe: { available: boolean } };
 type ComfyStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
 type LongCatStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
@@ -448,6 +450,69 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     await reloadBundle();
   }
 
+  async function saveBrandKit(brand?: MediaBrandKit) {
+    if (!selectedId) return;
+    const payload = brand ? {
+      name: brand.name,
+      colors: parseJsonList(brand.colorsJson),
+      fonts: parseJsonList(brand.fontsJson),
+      tagline: brand.tagline,
+      tone: brand.tone,
+      disclaimer: brand.disclaimer
+    } : { name: "Brand kit", colors: [], fonts: [], tagline: "", tone: "", disclaimer: "" };
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/brand-kits${brand ? `/${brand.id}` : ""}`, { method: brand ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to save brand kit"); return; }
+    setNotice("Brand kit saved");
+    await reloadBundle();
+  }
+
+  async function savePresenterProfile(profile?: MediaPresenterProfile) {
+    if (!selectedId) return;
+    const payload = profile ? {
+      name: profile.name,
+      appearancePrompt: profile.appearancePrompt,
+      voiceAccent: profile.voiceAccent,
+      clothing: profile.clothing,
+      consistencyRules: profile.consistencyRules
+    } : { name: "Presenter", appearancePrompt: "", voiceAccent: "", clothing: "", consistencyRules: "" };
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/presenter-profiles${profile ? `/${profile.id}` : ""}`, { method: profile ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to save presenter profile"); return; }
+    setNotice("Presenter profile saved");
+    await reloadBundle();
+  }
+
+  async function selectLibraryDefaults(brandKitId: string | null | undefined, presenterProfileId: string | null | undefined) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/library-defaults`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ brandKitId, presenterProfileId }) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to select media defaults"); return; }
+    setNotice("Media defaults updated");
+    await reloadBundle();
+  }
+
+  async function uploadLibraryImage(path: string, file: File | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Only image files can be uploaded to the library"); return; }
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(path, { method: path.includes("/library-assets/") ? "PUT" : "POST", body: form });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to upload library image"); return; }
+    setNotice("Library image uploaded");
+    await reloadBundle();
+  }
+
+  async function deleteLibraryAsset(assetId: string) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/library-assets/${assetId}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to delete library image"); return; }
+    setNotice("Library image deleted");
+    await reloadBundle();
+  }
+
   async function replaceAsset(sceneId: string, assetId: string, file: File | undefined) {
     if (!selectedId || !file) return;
     if (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !file.type.startsWith("audio/")) {
@@ -718,6 +783,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         <h3>Scenes</h3>
         {bundle?.scenes.length ? <div className="scene-list">{bundle.scenes.map((scene,index) => <div key={scene.id} className={`scene-tab ${scene.id===selectedScene?.id?"active":""}`}><button onClick={()=>setSelectedSceneId(scene.id)}><span>{scene.position}. {scene.title}</span><small>{scene.status}</small></button><div className="scene-order"><button onClick={()=>void reorderScenes(scene.id,-1)} disabled={index===0}>Up</button><button onClick={()=>void reorderScenes(scene.id,1)} disabled={index===bundle.scenes.length-1}>Down</button></div></div>)}</div> : <div className="card"><strong>No scenes</strong><p>Scene cards will appear after the first chat.</p></div>}
         {selectedId&&selectedScene&&<SceneEditor projectId={selectedId} scene={selectedScene} assets={bundle?.assets.filter(asset=>asset.sceneId===selectedScene.id) ?? []} onSave={saveScene} onApprove={approveScene} onReject={rejectScene} onCopyPrompt={copyPrompt} onRegenerateScene={regenerateScene} onGenerateWan={generateWan} onGeneratePresenter={generatePresenter} onImportAsset={importAsset} onReplaceAsset={replaceAsset} onDeleteAsset={deleteAsset} onUpdateAudio={updateAudioSettings} onSelectBackgroundMusic={selectBackgroundMusic}/>}
+        {selectedId&&bundle&&<BrandPresenterPanel projectId={selectedId} bundle={bundle} onSaveBrand={saveBrandKit} onSavePresenter={savePresenterProfile} onSelectDefaults={selectLibraryDefaults} onUploadLibraryImage={uploadLibraryImage} onDeleteLibraryAsset={deleteLibraryAsset}/>}
         <h3>Assets</h3>
         {bundle&&<div className="mini"><span>Project music</span><label className="replace-button">Upload<input type="file" accept="audio/*" onChange={event=>void importProjectAudio(event.target.files?.[0])}/></label><button onClick={()=>void selectBackgroundMusic(null)}>Clear music</button></div>}
         {bundle?.assets.length ? bundle.assets.map(asset => <div className="mini" key={asset.id}><span>{asset.label}</span><small>{asset.mimeType ?? asset.status}</small>{asset.kind==="audio"&&<div className="decision wrap"><button onClick={()=>void selectBackgroundMusic(asset.id)}>Use as music</button></div>}</div>) : <div className="mini"><span>No planned assets</span><small>Waiting</small></div>}
@@ -821,6 +887,16 @@ function ComfyWorkflowPanel({workflows,sceneId,onImport,onUpdate,onActivate,onDe
   return <div className="card editor-card workflow-card"><div className="row first-row"><strong>{editing?`Edit v${editing.version}`:"Import workflow"}</strong><button onClick={()=>{setEditing(null);setJsonText("");setMappingText(JSON.stringify(defaultWorkflowMapping,null,2));setPreview("");}}>New</button></div><div className="split-fields"><label>Type<select value={workflowType} onChange={event=>setWorkflowType(event.target.value as "WAN_T2V"|"WAN_I2V")} disabled={Boolean(editing)}><option>WAN_T2V</option><option>WAN_I2V</option></select></label><label>Name<input value={name} onChange={event=>setName(event.target.value)}/></label></div><label>Workflow JSON<textarea value={jsonText} onChange={event=>setJsonText(event.target.value)} placeholder='{"3":{"class_type":"KSampler","inputs":{"seed":1}}}'/></label><label>Mapping JSON<textarea value={mappingText} onChange={event=>setMappingText(event.target.value)}/></label><label className="checkbox-row"><input type="checkbox" checked={activate} onChange={event=>setActivate(event.target.checked)}/> Activate when valid</label>{error&&<p className="error">{error}</p>}<div className="decision wrap"><button onClick={()=>void save()}>{editing?"Save new version":"Import"}</button><button onClick={()=>void previewCurrent()} disabled={!editing}>Preview compiled</button></div>{preview&&<pre>{preview}</pre>}<div className="workflow-list">{workflows.map(workflow => <div className="mini" key={workflow.id}><span>{workflow.name} v{workflow.version}</span><small>{workflow.workflowType} · {workflow.status} · {workflow.isActive?"active":"inactive"}</small><div className="decision wrap"><button onClick={()=>loadWorkflow(workflow)}>Edit</button><button onClick={()=>void previewCurrent(workflow)} disabled={workflow.status!=="VALID"}>Preview</button><button onClick={()=>void onActivate(workflow.id)} disabled={workflow.status!=="VALID" || Boolean(workflow.isActive)}>Activate</button><button onClick={()=>void onDelete(workflow.id)}>Delete</button></div>{parseValidationIssues(workflow.validationJson).map(issue=><small className="error" key={`${workflow.id}-${issue.code}-${issue.message}`}>{issue.code}: {issue.message}</small>)}</div>)}</div></div>;
 }
 
+function BrandPresenterPanel({projectId,bundle,onSaveBrand,onSavePresenter,onSelectDefaults,onUploadLibraryImage,onDeleteLibraryAsset}:{projectId:string;bundle:MediaBundle;onSaveBrand:(brand?:MediaBrandKit)=>Promise<void>;onSavePresenter:(profile?:MediaPresenterProfile)=>Promise<void>;onSelectDefaults:(brandKitId:string|null|undefined,presenterProfileId:string|null|undefined)=>Promise<void>;onUploadLibraryImage:(path:string,file:File|undefined)=>Promise<void>;onDeleteLibraryAsset:(assetId:string)=>Promise<void>}) {
+  const [brandDraft,setBrandDraft]=useState<MediaBrandKit|null>(bundle.brandKits[0] ?? null);
+  const [presenterDraft,setPresenterDraft]=useState<MediaPresenterProfile|null>(bundle.presenterProfiles[0] ?? null);
+  useEffect(()=>setBrandDraft(bundle.brandKits[0] ?? null),[bundle.brandKits]);
+  useEffect(()=>setPresenterDraft(bundle.presenterProfiles[0] ?? null),[bundle.presenterProfiles]);
+  const brandLogo = brandDraft ? bundle.assets.find(asset=>{ const metadata=parseAssetMetadata(asset.metadataJson); return metadata.libraryType==="brand" && metadata.ownerId===brandDraft.id && metadata.role==="logo"; }) : null;
+  const presenterRef = presenterDraft ? bundle.assets.find(asset=>{ const metadata=parseAssetMetadata(asset.metadataJson); return metadata.libraryType==="presenter" && metadata.ownerId===presenterDraft.id; }) : null;
+  return <div className="card editor-card"><div className="row first-row"><strong>Brand & presenter</strong><button onClick={()=>void onSaveBrand()}>New brand</button><button onClick={()=>void onSavePresenter()}>New presenter</button></div><div className="split-fields"><label>Default brand<select value={bundle.project.defaultBrandKitId ?? ""} onChange={event=>void onSelectDefaults(event.target.value || null, undefined)}><option value="">None</option>{bundle.brandKits.map(brand=><option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label><label>Default presenter<select value={bundle.project.defaultPresenterProfileId ?? ""} onChange={event=>void onSelectDefaults(undefined, event.target.value || null)}><option value="">None</option>{bundle.presenterProfiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label></div>{brandDraft&&<div className="mini"><strong>{brandDraft.name}</strong><label>Name<input value={brandDraft.name} onChange={event=>setBrandDraft({...brandDraft,name:event.target.value})}/></label><label>Colours<input value={parseJsonList(brandDraft.colorsJson).join(", ")} onChange={event=>setBrandDraft({...brandDraft,colorsJson:JSON.stringify(event.target.value.split(",").map(item=>item.trim()).filter(Boolean))})}/></label><label>Fonts<input value={parseJsonList(brandDraft.fontsJson).join(", ")} onChange={event=>setBrandDraft({...brandDraft,fontsJson:JSON.stringify(event.target.value.split(",").map(item=>item.trim()).filter(Boolean))})}/></label><label>Tagline<input value={brandDraft.tagline} onChange={event=>setBrandDraft({...brandDraft,tagline:event.target.value})}/></label><label>Tone<textarea value={brandDraft.tone} onChange={event=>setBrandDraft({...brandDraft,tone:event.target.value})}/></label><label>Disclaimer<textarea value={brandDraft.disclaimer} onChange={event=>setBrandDraft({...brandDraft,disclaimer:event.target.value})}/></label><div className="decision wrap"><button onClick={()=>void onSaveBrand(brandDraft)}>Save brand</button><label className="replace-button">Logo<input type="file" accept="image/*" onChange={event=>void onUploadLibraryImage(brandLogo?`${API}/api/media/projects/${projectId}/library-assets/${brandLogo.id}`:`${API}/api/media/projects/${projectId}/brand-kits/${brandDraft.id}/assets/upload?role=logo`,event.target.files?.[0])}/></label>{brandLogo&&<a className="button-link" href={`${API}/api/media/projects/${projectId}/assets/${brandLogo.id}/download`} target="_blank" rel="noreferrer">Preview logo</a>}{brandLogo&&<button onClick={()=>void onDeleteLibraryAsset(brandLogo.id)}>Delete logo</button>}</div></div>}{presenterDraft&&<div className="mini"><strong>{presenterDraft.name}</strong><label>Name<input value={presenterDraft.name} onChange={event=>setPresenterDraft({...presenterDraft,name:event.target.value})}/></label><label>Appearance<textarea value={presenterDraft.appearancePrompt} onChange={event=>setPresenterDraft({...presenterDraft,appearancePrompt:event.target.value})}/></label><label>Voice/accent<input value={presenterDraft.voiceAccent} onChange={event=>setPresenterDraft({...presenterDraft,voiceAccent:event.target.value})}/></label><label>Clothing<input value={presenterDraft.clothing} onChange={event=>setPresenterDraft({...presenterDraft,clothing:event.target.value})}/></label><label>Consistency rules<textarea value={presenterDraft.consistencyRules} onChange={event=>setPresenterDraft({...presenterDraft,consistencyRules:event.target.value})}/></label><div className="decision wrap"><button onClick={()=>void onSavePresenter(presenterDraft)}>Save presenter</button><label className="replace-button">Reference<input type="file" accept="image/*" onChange={event=>void onUploadLibraryImage(presenterRef?`${API}/api/media/projects/${projectId}/library-assets/${presenterRef.id}`:`${API}/api/media/projects/${projectId}/presenter-profiles/${presenterDraft.id}/assets/upload?role=reference`,event.target.files?.[0])}/></label>{presenterRef&&<a className="button-link" href={`${API}/api/media/projects/${projectId}/assets/${presenterRef.id}/download`} target="_blank" rel="noreferrer">Preview reference</a>}{presenterRef&&<button onClick={()=>void onDeleteLibraryAsset(presenterRef.id)}>Delete reference</button>}</div></div>}</div>;
+}
+
 function SceneEditor({projectId,scene,assets,onSave,onApprove,onReject,onCopyPrompt,onRegenerateScene,onGenerateWan,onGeneratePresenter,onImportAsset,onReplaceAsset,onDeleteAsset,onUpdateAudio,onSelectBackgroundMusic}:{projectId:string;scene:MediaScene;assets:MediaAsset[];onSave:(scene:MediaScene)=>Promise<void>;onApprove:(sceneId:string)=>Promise<void>;onReject:(sceneId:string)=>Promise<void>;onCopyPrompt:(sceneId:string)=>Promise<void>;onRegenerateScene:(sceneId:string)=>Promise<void>;onGenerateWan:(sceneId:string,mode:"text-to-video"|"image-to-video")=>Promise<void>;onGeneratePresenter:(sceneId:string)=>Promise<void>;onImportAsset:(sceneId:string,file:File|undefined)=>Promise<void>;onReplaceAsset:(sceneId:string,assetId:string,file:File|undefined)=>Promise<void>;onDeleteAsset:(sceneId:string,assetId:string)=>Promise<void>;onUpdateAudio:(assetId:string,settings:Partial<AudioSettings>)=>Promise<void>;onSelectBackgroundMusic:(assetId:string|null)=>Promise<void>}) {
   const [draft,setDraft]=useState(scene);
   useEffect(()=>setDraft(scene),[scene]);
@@ -883,6 +959,16 @@ function parseAudioSettings(value: string | null): AudioSettings | null {
     };
   } catch {
     return null;
+  }
+}
+
+function parseAssetMetadata(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
   }
 }
 

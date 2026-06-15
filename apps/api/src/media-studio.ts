@@ -10,6 +10,7 @@ export type MediaSender = "user" | "director";
 export type MediaBriefStatus = "DRAFT" | "APPROVED";
 export type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
 export type MediaAudioRole = "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO";
+export type MediaLibraryAssetOwner = "brand" | "presenter";
 
 export type MediaAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
 
@@ -42,6 +43,8 @@ export type MediaProject = {
   name: string;
   description: string | null;
   aspectRatio: string;
+  defaultBrandKitId: string | null;
+  defaultPresenterProfileId: string | null;
   status: MediaProjectStatus;
   createdAt: string;
   updatedAt: string;
@@ -122,6 +125,33 @@ export type MediaGenerationJob = {
   updatedAt: string;
 };
 
+export type MediaBrandKit = {
+  id: string;
+  mediaProjectId: string;
+  name: string;
+  colorsJson: string;
+  fontsJson: string;
+  tagline: string;
+  tone: string;
+  disclaimer: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+};
+
+export type MediaPresenterProfile = {
+  id: string;
+  mediaProjectId: string;
+  name: string;
+  appearancePrompt: string;
+  voiceAccent: string;
+  clothing: string;
+  consistencyRules: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+};
+
 export const mediaProviderRegistry = [
   { key: "google-flow", name: "Google Flow", capabilities: ["storyboard", "video-generation"], status: "stubbed" },
   { key: "wan-2.2", name: "Wan 2.2", capabilities: ["text-to-video", "image-to-video"], status: "stubbed" },
@@ -152,11 +182,13 @@ export type MediaProductionPackage = {
   brief: (Omit<MediaBrief, "constraintsJson"> & { constraints: string[] }) | null;
   scenes: Array<MediaScene & { flowPrompt: string; assets: MediaAsset[] }>;
   assets: MediaAsset[];
+  brandKits: MediaBrandKit[];
+  presenterProfiles: MediaPresenterProfile[];
 };
 
 export function listMediaProjects(db: Database.Database, includeArchived = false): MediaProject[] {
   const where = includeArchived ? "" : "WHERE status='ACTIVE'";
-  return db.prepare(`SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects ${where} ORDER BY created_at DESC`).all() as MediaProject[];
+  return db.prepare(`SELECT id,name,description,aspect_ratio AS aspectRatio,default_brand_kit_id AS defaultBrandKitId,default_presenter_profile_id AS defaultPresenterProfileId,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects ${where} ORDER BY created_at DESC`).all() as MediaProject[];
 }
 
 export function createMediaProject(db: Database.Database, input: { id: string; name: string; description?: string; now: string }, audit: MediaAuditWriter): MediaProject {
@@ -176,8 +208,110 @@ export function updateMediaProject(db: Database.Database, projectId: string, inp
   return getMediaProjectOrThrow(db, projectId);
 }
 
+export function createBrandKit(db: Database.Database, projectId: string, input: {
+  id: string;
+  name: string;
+  colors: string[];
+  fonts: string[];
+  tagline: string;
+  tone: string;
+  disclaimer: string;
+  now: string;
+}, audit: MediaAuditWriter): MediaBrandKit {
+  getActiveMediaProjectOrThrow(db, projectId);
+  db.prepare(`INSERT INTO media_brand_kits (id,media_project_id,name,colors_json,fonts_json,tagline,tone,disclaimer,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, input.name, JSON.stringify(input.colors), JSON.stringify(input.fonts), input.tagline, input.tone, input.disclaimer, input.now, input.now);
+  audit("MEDIA_BRAND_KIT_CREATED", `Brand kit ${input.name} created`, { projectId, payload: { brandKitId: input.id } });
+  return getBrandKitOrThrow(db, projectId, input.id);
+}
+
+export function updateBrandKit(db: Database.Database, projectId: string, brandKitId: string, input: {
+  name: string;
+  colors: string[];
+  fonts: string[];
+  tagline: string;
+  tone: string;
+  disclaimer: string;
+  now: string;
+}, audit: MediaAuditWriter): MediaBrandKit {
+  getActiveMediaProjectOrThrow(db, projectId);
+  getBrandKitOrThrow(db, projectId, brandKitId);
+  db.prepare(`UPDATE media_brand_kits SET name=?,colors_json=?,fonts_json=?,tagline=?,tone=?,disclaimer=?,updated_at=? WHERE id=? AND media_project_id=? AND deleted_at IS NULL`)
+    .run(input.name, JSON.stringify(input.colors), JSON.stringify(input.fonts), input.tagline, input.tone, input.disclaimer, input.now, brandKitId, projectId);
+  audit("MEDIA_BRAND_KIT_UPDATED", `Brand kit ${input.name} updated`, { projectId, payload: { brandKitId } });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getBrandKitOrThrow(db, projectId, brandKitId);
+}
+
+export function deleteBrandKit(db: Database.Database, projectId: string, brandKitId: string, timestamp: string, audit: MediaAuditWriter): { deleted: true } {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const kit = getBrandKitOrThrow(db, projectId, brandKitId);
+  db.prepare("UPDATE media_brand_kits SET deleted_at=?,updated_at=? WHERE id=? AND media_project_id=?").run(timestamp, timestamp, brandKitId, projectId);
+  db.prepare("UPDATE media_projects SET default_brand_kit_id=NULL,updated_at=? WHERE id=? AND default_brand_kit_id=?").run(timestamp, projectId, brandKitId);
+  audit("MEDIA_BRAND_KIT_DELETED", `Brand kit ${kit.name} deleted`, { projectId, payload: { brandKitId } });
+  auditPromptContextChanged(db, projectId, timestamp, audit);
+  return { deleted: true };
+}
+
+export function createPresenterProfile(db: Database.Database, projectId: string, input: {
+  id: string;
+  name: string;
+  appearancePrompt: string;
+  voiceAccent: string;
+  clothing: string;
+  consistencyRules: string;
+  now: string;
+}, audit: MediaAuditWriter): MediaPresenterProfile {
+  getActiveMediaProjectOrThrow(db, projectId);
+  db.prepare(`INSERT INTO media_presenter_profiles (id,media_project_id,name,appearance_prompt,voice_accent,clothing,consistency_rules,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, input.name, input.appearancePrompt, input.voiceAccent, input.clothing, input.consistencyRules, input.now, input.now);
+  audit("MEDIA_PRESENTER_PROFILE_CREATED", `Presenter profile ${input.name} created`, { projectId, payload: { presenterProfileId: input.id } });
+  return getPresenterProfileOrThrow(db, projectId, input.id);
+}
+
+export function updatePresenterProfile(db: Database.Database, projectId: string, presenterProfileId: string, input: {
+  name: string;
+  appearancePrompt: string;
+  voiceAccent: string;
+  clothing: string;
+  consistencyRules: string;
+  now: string;
+}, audit: MediaAuditWriter): MediaPresenterProfile {
+  getActiveMediaProjectOrThrow(db, projectId);
+  getPresenterProfileOrThrow(db, projectId, presenterProfileId);
+  db.prepare(`UPDATE media_presenter_profiles SET name=?,appearance_prompt=?,voice_accent=?,clothing=?,consistency_rules=?,updated_at=? WHERE id=? AND media_project_id=? AND deleted_at IS NULL`)
+    .run(input.name, input.appearancePrompt, input.voiceAccent, input.clothing, input.consistencyRules, input.now, presenterProfileId, projectId);
+  audit("MEDIA_PRESENTER_PROFILE_UPDATED", `Presenter profile ${input.name} updated`, { projectId, payload: { presenterProfileId } });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getPresenterProfileOrThrow(db, projectId, presenterProfileId);
+}
+
+export function deletePresenterProfile(db: Database.Database, projectId: string, presenterProfileId: string, timestamp: string, audit: MediaAuditWriter): { deleted: true } {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const profile = getPresenterProfileOrThrow(db, projectId, presenterProfileId);
+  db.prepare("UPDATE media_presenter_profiles SET deleted_at=?,updated_at=? WHERE id=? AND media_project_id=?").run(timestamp, timestamp, presenterProfileId, projectId);
+  db.prepare("UPDATE media_projects SET default_presenter_profile_id=NULL,updated_at=? WHERE id=? AND default_presenter_profile_id=?").run(timestamp, projectId, presenterProfileId);
+  audit("MEDIA_PRESENTER_PROFILE_DELETED", `Presenter profile ${profile.name} deleted`, { projectId, payload: { presenterProfileId } });
+  auditPromptContextChanged(db, projectId, timestamp, audit);
+  return { deleted: true };
+}
+
+export function selectMediaLibraryDefaults(db: Database.Database, projectId: string, input: { brandKitId?: string | null; presenterProfileId?: string | null; now: string }, audit: MediaAuditWriter): MediaProject {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const existing = getMediaProjectOrThrow(db, projectId);
+  const brandKitId = input.brandKitId === undefined ? existing.defaultBrandKitId : input.brandKitId;
+  const presenterProfileId = input.presenterProfileId === undefined ? existing.defaultPresenterProfileId : input.presenterProfileId;
+  if (brandKitId) getBrandKitOrThrow(db, projectId, brandKitId);
+  if (presenterProfileId) getPresenterProfileOrThrow(db, projectId, presenterProfileId);
+  db.prepare("UPDATE media_projects SET default_brand_kit_id=?,default_presenter_profile_id=?,updated_at=? WHERE id=?")
+    .run(brandKitId ?? null, presenterProfileId ?? null, input.now, projectId);
+  audit("MEDIA_LIBRARY_DEFAULTS_SELECTED", "Media library defaults selected", { projectId, payload: { brandKitId, presenterProfileId } });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getMediaProjectOrThrow(db, projectId);
+}
+
 export function archiveMediaProject(db: Database.Database, projectId: string, timestamp: string, audit: MediaAuditWriter): MediaProject & { alreadyArchived: boolean } {
-  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
+  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,default_brand_kit_id AS defaultBrandKitId,default_presenter_profile_id AS defaultPresenterProfileId,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
   if (!project) throw new MediaStudioError("Media project not found", 404);
   if (project.status === "ARCHIVED") return { ...project, alreadyArchived: true };
   db.prepare("UPDATE media_projects SET status='ARCHIVED',archived_at=?,archived_by=?,updated_at=? WHERE id=?")
@@ -197,6 +331,8 @@ export function getMediaProjectBundle(db: Database.Database, projectId: string) 
     brief: getMediaBrief(db, projectId),
     scenes: listMediaScenes(db, projectId),
     assets: listMediaAssets(db, projectId),
+    brandKits: listBrandKits(db, projectId),
+    presenterProfiles: listPresenterProfiles(db, projectId),
     generationJobs: listGenerationJobs(db, projectId),
     providers: mediaProviderRegistry
   };
@@ -245,7 +381,7 @@ export function updateMediaScene(db: Database.Database, projectId: string, scene
     .run(input.title, input.visualPrompt, input.durationSeconds, input.dialogue, input.visualPrompt, input.aspectRatio, input.status, input.status === "APPROVED" ? (existing.approvedAt ?? input.now) : null, input.now, sceneId, projectId);
   audit("MEDIA_SCENE_UPDATED", `Scene ${input.title} updated`, { projectId, payload: { sceneId, status: input.status } });
   if (promptChanged) {
-    audit("MEDIA_FLOW_PROMPT_UPDATED", `Flow prompt updated for scene ${input.title}`, { projectId, payload: { sceneId, flowPrompt: buildGoogleFlowPrompt({ ...existing, ...input }) } });
+    audit("MEDIA_FLOW_PROMPT_UPDATED", `Flow prompt updated for scene ${input.title}`, { projectId, payload: { sceneId, flowPrompt: buildGoogleFlowPrompt({ ...existing, ...input }, getPromptContext(db, projectId)) } });
   }
   return getMediaSceneOrThrow(db, projectId, sceneId);
 }
@@ -269,7 +405,13 @@ export function rejectMediaScene(db: Database.Database, projectId: string, scene
 export function getSceneFlowPrompt(db: Database.Database, projectId: string, sceneId: string): { sceneId: string; prompt: string } {
   getMediaProjectOrThrow(db, projectId);
   const scene = getMediaSceneOrThrow(db, projectId, sceneId);
-  return { sceneId, prompt: buildGoogleFlowPrompt(scene) };
+  return { sceneId, prompt: buildGoogleFlowPrompt(scene, getPromptContext(db, projectId)) };
+}
+
+export function getSceneProviderPrompt(db: Database.Database, projectId: string, sceneId: string): string {
+  getMediaProjectOrThrow(db, projectId);
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  return buildGoogleFlowPrompt(scene, getPromptContext(db, projectId));
 }
 
 export function reorderMediaScenes(db: Database.Database, projectId: string, sceneIds: string[], timestamp: string, audit: MediaAuditWriter): MediaScene[] {
@@ -368,6 +510,87 @@ export async function uploadProjectAsset(db: Database.Database, projectId: strin
     payload: { assetId: input.id, originalName: input.originalName, mimeType: input.mimeType, sizeBytes: input.bytes.length, checksumSha256: checksum, audioRole: input.audioRole ?? null }
   });
   return getMediaAssetOrThrow(db, projectId, input.id);
+}
+
+export async function uploadLibraryAsset(db: Database.Database, projectId: string, input: {
+  id: string;
+  ownerType: MediaLibraryAssetOwner;
+  ownerId: string;
+  role: string;
+  originalName: string;
+  mimeType: string;
+  bytes: Buffer;
+  now: string;
+  storageRoot?: string;
+}, audit: MediaAuditWriter): Promise<MediaAsset> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  if (input.ownerType === "brand") getBrandKitOrThrow(db, projectId, input.ownerId);
+  else getPresenterProfileOrThrow(db, projectId, input.ownerId);
+  validateAssetUpload(input.originalName, input.mimeType, input.bytes.length);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind || kind !== "image") throw new MediaStudioError("Brand and presenter library assets must be images", 400);
+  const storageRoot = resolveStorageRoot(input.storageRoot);
+  const safeName = safeAssetFileName(input.id, input.originalName, input.mimeType);
+  const localPath = resolveAssetPath(storageRoot, projectId, `${input.ownerType}-${input.ownerId}`, safeName);
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, input.bytes, { flag: "wx" });
+  const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  const metadata = { libraryType: input.ownerType, ownerId: input.ownerId, role: input.role };
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, null, kind, input.originalName, `${input.ownerType}-library`, "UPLOADED", safeName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify(metadata), input.now, input.now);
+  audit(input.ownerType === "brand" ? "MEDIA_BRAND_ASSET_UPLOADED" : "MEDIA_PRESENTER_ASSET_UPLOADED", `${input.ownerType} asset ${input.originalName} uploaded`, {
+    projectId,
+    payload: { assetId: input.id, ownerType: input.ownerType, ownerId: input.ownerId, role: input.role, checksumSha256: checksum }
+  });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getMediaAssetOrThrow(db, projectId, input.id);
+}
+
+export async function replaceLibraryAsset(db: Database.Database, projectId: string, assetId: string, input: {
+  originalName: string;
+  mimeType: string;
+  bytes: Buffer;
+  now: string;
+  storageRoot?: string;
+}, audit: MediaAuditWriter): Promise<MediaAsset> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const existing = getMediaAssetOrThrow(db, projectId, assetId);
+  const metadata = parseMetadata(existing.metadataJson);
+  const ownerType = metadata.libraryType === "brand" || metadata.libraryType === "presenter" ? metadata.libraryType : null;
+  if (!ownerType) throw new MediaStudioError("Asset is not a brand or presenter library asset", 400);
+  validateAssetUpload(input.originalName, input.mimeType, input.bytes.length);
+  const kind = classifyAssetKind(input.mimeType);
+  if (!kind || kind !== "image") throw new MediaStudioError("Brand and presenter library assets must be images", 400);
+  const storageRoot = resolveStorageRoot(input.storageRoot);
+  if (existing.localPath) await removeStoredAssetFile(existing.localPath, storageRoot);
+  if (existing.previewPath) await removeStoredAssetFile(existing.previewPath, storageRoot);
+  if (existing.thumbnailPath) await removeStoredAssetFile(existing.thumbnailPath, storageRoot);
+  const safeName = safeAssetFileName(assetId, input.originalName, input.mimeType);
+  const localPath = resolveAssetPath(storageRoot, projectId, `${ownerType}-${String(metadata.ownerId ?? "library")}`, safeName);
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, input.bytes, { flag: "wx" });
+  const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  db.prepare(`UPDATE media_assets SET label=?,file_name=?,original_name=?,mime_type=?,size_bytes=?,checksum_sha256=?,local_path=?,inspection_json=NULL,qc_status='PENDING',qc_issues_json='[]',preview_path=NULL,thumbnail_path=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
+    .run(input.originalName, safeName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, input.now, assetId, projectId);
+  audit(ownerType === "brand" ? "MEDIA_BRAND_ASSET_REPLACED" : "MEDIA_PRESENTER_ASSET_REPLACED", `${ownerType} asset replaced`, { projectId, payload: { assetId, checksumSha256: checksum } });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export async function deleteLibraryAsset(db: Database.Database, projectId: string, assetId: string, timestamp: string, audit: MediaAuditWriter, storageRoot?: string): Promise<{ deleted: true }> {
+  getActiveMediaProjectOrThrow(db, projectId);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  const metadata = parseMetadata(asset.metadataJson);
+  const ownerType = metadata.libraryType === "brand" || metadata.libraryType === "presenter" ? metadata.libraryType : null;
+  if (!ownerType) throw new MediaStudioError("Asset is not a brand or presenter library asset", 400);
+  const root = resolveStorageRoot(storageRoot);
+  if (asset.localPath) await removeStoredAssetFile(asset.localPath, root);
+  if (asset.previewPath) await removeStoredAssetFile(asset.previewPath, root);
+  if (asset.thumbnailPath) await removeStoredAssetFile(asset.thumbnailPath, root);
+  db.prepare("DELETE FROM media_assets WHERE id=? AND media_project_id=?").run(assetId, projectId);
+  audit(ownerType === "brand" ? "MEDIA_BRAND_ASSET_DELETED" : "MEDIA_PRESENTER_ASSET_DELETED", `${ownerType} asset deleted`, { projectId, payload: { assetId, metadata } });
+  auditPromptContextChanged(db, projectId, timestamp, audit);
+  return { deleted: true };
 }
 
 export function updateAudioAssetSettings(db: Database.Database, projectId: string, assetId: string, input: {
@@ -472,9 +695,10 @@ export function exportMediaProductionPackage(db: Database.Database, projectId: s
   const project = getMediaProjectOrThrow(db, projectId);
   const brief = getMediaBrief(db, projectId);
   const assets = listMediaAssets(db, projectId);
+  const promptContext = getPromptContext(db, projectId);
   const scenes = listMediaScenes(db, projectId).map((scene) => ({
     ...scene,
-    flowPrompt: buildGoogleFlowPrompt(scene),
+    flowPrompt: buildGoogleFlowPrompt(scene, promptContext),
     assets: assets.filter((asset) => asset.sceneId === scene.id)
   }));
   return {
@@ -482,7 +706,9 @@ export function exportMediaProductionPackage(db: Database.Database, projectId: s
     project,
     brief: brief ? { ...brief, constraints: parseConstraints(brief.constraintsJson) } : null,
     scenes,
-    assets
+    assets,
+    brandKits: listBrandKits(db, projectId),
+    presenterProfiles: listPresenterProfiles(db, projectId)
   };
 }
 
@@ -566,7 +792,7 @@ export function deleteMediaChatMessage(db: Database.Database, projectId: string,
 }
 
 function getMediaProjectOrThrow(db: Database.Database, projectId: string): MediaProject {
-  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
+  const project = db.prepare("SELECT id,name,description,aspect_ratio AS aspectRatio,default_brand_kit_id AS defaultBrandKitId,default_presenter_profile_id AS defaultPresenterProfileId,status,created_at AS createdAt,updated_at AS updatedAt FROM media_projects WHERE id=?").get(projectId) as MediaProject | undefined;
   if (!project) throw new MediaStudioError("Media project not found", 404);
   return project;
 }
@@ -590,6 +816,16 @@ function listMediaScenes(db: Database.Database, projectId: string): MediaScene[]
 function listMediaAssets(db: Database.Database, projectId: string): MediaAsset[] {
   return db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
     FROM media_assets WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaAsset[];
+}
+
+function listBrandKits(db: Database.Database, projectId: string): MediaBrandKit[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,name,colors_json AS colorsJson,fonts_json AS fontsJson,tagline,tone,disclaimer,created_at AS createdAt,updated_at AS updatedAt,deleted_at AS deletedAt
+    FROM media_brand_kits WHERE media_project_id=? AND deleted_at IS NULL ORDER BY created_at`).all(projectId) as MediaBrandKit[];
+}
+
+function listPresenterProfiles(db: Database.Database, projectId: string): MediaPresenterProfile[] {
+  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,name,appearance_prompt AS appearancePrompt,voice_accent AS voiceAccent,clothing,consistency_rules AS consistencyRules,created_at AS createdAt,updated_at AS updatedAt,deleted_at AS deletedAt
+    FROM media_presenter_profiles WHERE media_project_id=? AND deleted_at IS NULL ORDER BY created_at`).all(projectId) as MediaPresenterProfile[];
 }
 
 function listGenerationJobs(db: Database.Database, projectId: string): MediaGenerationJob[] {
@@ -819,12 +1055,69 @@ function getMediaAssetOrThrow(db: Database.Database, projectId: string, assetId:
   return asset;
 }
 
-function buildGoogleFlowPrompt(scene: Pick<MediaScene, "title" | "durationSeconds" | "dialogue" | "visualPrompt" | "aspectRatio">): string {
+function getBrandKitOrThrow(db: Database.Database, projectId: string, brandKitId: string): MediaBrandKit {
+  const kit = db.prepare(`SELECT id,media_project_id AS mediaProjectId,name,colors_json AS colorsJson,fonts_json AS fontsJson,tagline,tone,disclaimer,created_at AS createdAt,updated_at AS updatedAt,deleted_at AS deletedAt
+    FROM media_brand_kits WHERE id=? AND media_project_id=? AND deleted_at IS NULL`).get(brandKitId, projectId) as MediaBrandKit | undefined;
+  if (!kit) throw new MediaStudioError("Brand kit not found", 404);
+  return kit;
+}
+
+function getPresenterProfileOrThrow(db: Database.Database, projectId: string, presenterProfileId: string): MediaPresenterProfile {
+  const profile = db.prepare(`SELECT id,media_project_id AS mediaProjectId,name,appearance_prompt AS appearancePrompt,voice_accent AS voiceAccent,clothing,consistency_rules AS consistencyRules,created_at AS createdAt,updated_at AS updatedAt,deleted_at AS deletedAt
+    FROM media_presenter_profiles WHERE id=? AND media_project_id=? AND deleted_at IS NULL`).get(presenterProfileId, projectId) as MediaPresenterProfile | undefined;
+  if (!profile) throw new MediaStudioError("Presenter profile not found", 404);
+  return profile;
+}
+
+type PromptContext = { brand: MediaBrandKit | null; presenter: MediaPresenterProfile | null };
+
+function getPromptContext(db: Database.Database, projectId: string): PromptContext {
+  const project = getMediaProjectOrThrow(db, projectId);
+  return {
+    brand: project.defaultBrandKitId ? getBrandKitOrThrow(db, projectId, project.defaultBrandKitId) : null,
+    presenter: project.defaultPresenterProfileId ? getPresenterProfileOrThrow(db, projectId, project.defaultPresenterProfileId) : null
+  };
+}
+
+function buildPromptContextLines(context?: PromptContext): string[] {
+  const lines: string[] = [];
+  if (context?.brand) {
+    const colors = parseStringList(context.brand.colorsJson);
+    const fonts = parseStringList(context.brand.fontsJson);
+    lines.push("Brand rules:", `Brand: ${context.brand.name}`);
+    if (context.brand.tagline) lines.push(`Tagline: ${context.brand.tagline}`);
+    if (colors.length) lines.push(`Colours: ${colors.join(", ")}`);
+    if (fonts.length) lines.push(`Fonts: ${fonts.join(", ")}`);
+    if (context.brand.tone) lines.push(`Tone: ${context.brand.tone}`);
+    if (context.brand.disclaimer) lines.push(`Disclaimer text to preserve: ${context.brand.disclaimer}`);
+    lines.push("");
+  }
+  if (context?.presenter) {
+    lines.push("Presenter consistency rules:", `Presenter: ${context.presenter.name}`);
+    if (context.presenter.appearancePrompt) lines.push(`Appearance: ${context.presenter.appearancePrompt}`);
+    if (context.presenter.voiceAccent) lines.push(`Voice/accent: ${context.presenter.voiceAccent}`);
+    if (context.presenter.clothing) lines.push(`Clothing: ${context.presenter.clothing}`);
+    if (context.presenter.consistencyRules) lines.push(`Consistency: ${context.presenter.consistencyRules}`);
+    lines.push("");
+  }
+  return lines;
+}
+
+function auditPromptContextChanged(db: Database.Database, projectId: string, timestamp: string, audit: MediaAuditWriter) {
+  const scenes = listMediaScenes(db, projectId);
+  const context = getPromptContext(db, projectId);
+  for (const scene of scenes) {
+    audit("MEDIA_FLOW_PROMPT_UPDATED", `Flow prompt updated for scene ${scene.title}`, { projectId, payload: { sceneId: scene.id, timestamp, flowPrompt: buildGoogleFlowPrompt(scene, context) } });
+  }
+}
+
+function buildGoogleFlowPrompt(scene: Pick<MediaScene, "title" | "durationSeconds" | "dialogue" | "visualPrompt" | "aspectRatio">, context?: PromptContext): string {
   return [
     `Scene: ${scene.title}`,
     `Duration: ${scene.durationSeconds} seconds`,
     `Aspect ratio: ${scene.aspectRatio}`,
     "",
+    ...buildPromptContextLines(context),
     "Visual prompt:",
     scene.visualPrompt.trim(),
     "",
@@ -832,8 +1125,17 @@ function buildGoogleFlowPrompt(scene: Pick<MediaScene, "title" | "durationSecond
     scene.dialogue.trim() || "No spoken dialogue.",
     "",
     "Output guidance:",
-    "Generate a coherent single-scene video clip. Preserve the visual prompt, timing, and dialogue exactly. Do not add logos, watermarks, subtitles, or extra text unless explicitly requested."
+    "Generate a coherent single-scene video clip. Preserve the visual prompt, timing, dialogue, brand rules, and presenter consistency exactly. Do not add extra text unless explicitly requested."
   ].join("\n");
+}
+
+function parseStringList(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function classifyAssetKind(mimeType: string): "image" | "video" | "audio" | null {

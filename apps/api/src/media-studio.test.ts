@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createMediaProject, deleteSceneAsset, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, replaceSceneAsset, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateMediaScene, uploadProjectAsset, uploadSceneAsset, type VideoDirectorProvider } from "./media-studio.js";
+import { addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createBrandKit, createMediaProject, createPresenterProfile, deleteLibraryAsset, deleteSceneAsset, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateBrandKit, updateMediaScene, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset, type VideoDirectorProvider } from "./media-studio.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
@@ -14,6 +14,8 @@ function dbFixture() {
       name TEXT NOT NULL,
       description TEXT,
       aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+      default_brand_kit_id TEXT,
+      default_presenter_profile_id TEXT,
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','ARCHIVED')),
       archived_at TEXT,
       archived_by TEXT,
@@ -79,6 +81,31 @@ function dbFixture() {
       metadata_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE media_brand_kits (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      colors_json TEXT NOT NULL DEFAULT '[]',
+      fonts_json TEXT NOT NULL DEFAULT '[]',
+      tagline TEXT NOT NULL DEFAULT '',
+      tone TEXT NOT NULL DEFAULT '',
+      disclaimer TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+    CREATE TABLE media_presenter_profiles (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      appearance_prompt TEXT NOT NULL DEFAULT '',
+      voice_accent TEXT NOT NULL DEFAULT '',
+      clothing TEXT NOT NULL DEFAULT '',
+      consistency_rules TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
     );
     CREATE TABLE media_generation_jobs (
       id TEXT PRIMARY KEY,
@@ -612,6 +639,88 @@ describe("media studio", () => {
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROJECT_ASSET_UPLOADED'").get() as { count: number }).count, 1);
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_AUDIO_SETTINGS_UPDATED'").get() as { count: number }).count, 1);
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_BACKGROUND_MUSIC_SELECTED'").get() as { count: number }).count, 1);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("manages brand and presenter defaults, assets, and prompt injection", async () => {
+    const db = dbFixture();
+    const storageRoot = await tempStorage();
+    try {
+      createMediaProject(db, { id: "media-1", name: "Library", now: "created" }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Create a short video.", now: "chat-time", createId: idFactory("chat") }, audit(db));
+      const sceneId = bundle.scenes[0]?.id as string;
+      const brand = createBrandKit(db, "media-1", {
+        id: "brand-1",
+        name: "S4",
+        colors: ["#111111", "#00ff99"],
+        fonts: ["Inter"],
+        tagline: "Build locally",
+        tone: "Precise and calm",
+        disclaimer: "Prototype footage",
+        now: "brand-time"
+      }, audit(db));
+      const presenter = createPresenterProfile(db, "media-1", {
+        id: "presenter-1",
+        name: "Host",
+        appearancePrompt: "Warm studio host",
+        voiceAccent: "Indian English",
+        clothing: "Navy blazer",
+        consistencyRules: "Keep the same face and wardrobe",
+        now: "presenter-time"
+      }, audit(db));
+      selectMediaLibraryDefaults(db, "media-1", { brandKitId: brand.id, presenterProfileId: presenter.id, now: "defaults-time" }, audit(db));
+
+      const logo = await uploadLibraryAsset(db, "media-1", {
+        id: "logo-1",
+        ownerType: "brand",
+        ownerId: brand.id,
+        role: "logo",
+        originalName: "logo.png",
+        mimeType: "image/png",
+        bytes: Buffer.from("logo"),
+        now: "logo-time",
+        storageRoot
+      }, audit(db));
+      const reference = await uploadLibraryAsset(db, "media-1", {
+        id: "ref-1",
+        ownerType: "presenter",
+        ownerId: presenter.id,
+        role: "reference",
+        originalName: "host.png",
+        mimeType: "image/png",
+        bytes: Buffer.from("host"),
+        now: "ref-time",
+        storageRoot
+      }, audit(db));
+      const replaced = await replaceLibraryAsset(db, "media-1", logo.id, {
+        originalName: "logo-new.png",
+        mimeType: "image/png",
+        bytes: Buffer.from("new-logo"),
+        now: "replace-logo",
+        storageRoot
+      }, audit(db));
+      await deleteLibraryAsset(db, "media-1", reference.id, "delete-ref", audit(db), storageRoot);
+      const prompt = getSceneFlowPrompt(db, "media-1", sceneId).prompt;
+      const exported = exportMediaProductionPackage(db, "media-1", "export-time");
+
+      assert.match(prompt, /Brand: S4/);
+      assert.match(prompt, /Disclaimer text to preserve: Prototype footage/);
+      assert.match(prompt, /Presenter: Host/);
+      assert.match(prompt, /Voice\/accent: Indian English/);
+      assert.equal(await fs.readFile(replaced.localPath as string, "utf8"), "new-logo");
+      await assert.rejects(() => fs.stat(reference.localPath as string), /ENOENT/);
+      assert.equal(exported.brandKits.length, 1);
+      assert.equal(exported.presenterProfiles.length, 1);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_LIBRARY_DEFAULTS_SELECTED'").get() as { count: number }).count, 1);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_BRAND_ASSET_REPLACED'").get() as { count: number }).count, 1);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PRESENTER_ASSET_DELETED'").get() as { count: number }).count, 1);
+
+      const updatedBrand = updateBrandKit(db, "media-1", brand.id, { name: "S4 Studio", colors: [], fonts: [], tagline: "", tone: "Direct", disclaimer: "Internal", now: "brand-update" }, audit(db));
+      const updatedPresenter = updatePresenterProfile(db, "media-1", presenter.id, { name: "Lead Host", appearancePrompt: "Camera-ready host", voiceAccent: "Neutral", clothing: "Black shirt", consistencyRules: "Match reference", now: "presenter-update" }, audit(db));
+      assert.equal(updatedBrand.name, "S4 Studio");
+      assert.equal(updatedPresenter.name, "Lead Host");
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

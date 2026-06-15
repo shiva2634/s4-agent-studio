@@ -51,7 +51,7 @@ export async function renderDraftVideo(db: Database.Database, projectId: string,
     for (const [index, scene] of plan.scenes.entries()) {
       assertNotCancelled(db, options.jobId);
       const segmentPath = path.join(renderDir, `scene-${String(index + 1).padStart(3, "0")}.mp4`);
-      const args = buildSceneRenderArgs(scene, segmentPath, renderSettings, plan.logo?.localPath ?? null);
+      const args = buildSceneRenderArgs(scene, segmentPath, renderSettings, plan.logo?.localPath ?? null, plan.disclaimer);
       const result = await (options.runner ?? runProcess)(detection.ffmpegPath, args, { timeoutMs: options.timeoutMs ?? 120_000 });
       logs.push(`scene ${index + 1}: ${result.exitCode}\n${result.stderr}`);
       if (result.exitCode !== 0) throw new Error(`FFmpeg scene render failed for ${scene.title}: ${result.stderr}`);
@@ -109,6 +109,7 @@ export function validateRenderReadiness(db: Database.Database, projectId: string
 }
 
 function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: boolean) {
+  const project = getProject(db, projectId);
   const scenes = db.prepare(`SELECT id,position,title,duration_seconds AS durationSeconds,dialogue,aspect_ratio AS aspectRatio,approved_at AS approvedAt
     FROM media_scenes WHERE media_project_id=? ORDER BY position`).all(projectId) as SceneRow[];
   if (!scenes.length) throw new MediaStudioError("Cannot render without scenes", 409);
@@ -126,11 +127,12 @@ function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: 
       .filter((audio) => !audio.settings.muted);
     return { ...scene, asset, audio: sceneAudio, backgroundMusic: backgroundMusic ? { asset: backgroundMusic, settings: parseAudioMetadata(backgroundMusic) } : null };
   });
-  const logo = includeLogo ? assets.find((asset) => asset.sceneId === null && asset.kind === "image" && asset.localPath && /logo/i.test(asset.label)) ?? null : null;
-  return { scenes: scenePlans, logo };
+  const brand = project.defaultBrandKitId ? db.prepare("SELECT disclaimer FROM media_brand_kits WHERE id=? AND media_project_id=? AND deleted_at IS NULL").get(project.defaultBrandKitId, projectId) as { disclaimer: string } | undefined : undefined;
+  const logo = includeLogo ? findBrandLogo(assets, project.defaultBrandKitId) ?? assets.find((asset) => asset.sceneId === null && asset.kind === "image" && asset.localPath && /logo/i.test(asset.label)) ?? null : null;
+  return { scenes: scenePlans, logo, disclaimer: brand?.disclaimer ?? "" };
 }
 
-function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: RenderSettings, logoPath: string | null) {
+function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: RenderSettings, logoPath: string | null, disclaimer = "") {
   const args = ["-y"];
   if (scene.asset.kind === "image") args.push("-loop", "1", "-t", String(scene.durationSeconds));
   args.push("-i", scene.asset.localPath);
@@ -155,6 +157,7 @@ function buildSceneRenderArgs(scene: ScenePlan, outputPath: string, settings: Re
     `fps=${settings.fps}`,
     `drawtext=text='${escapeDrawText(scene.dialogue || "")}':x=(w-text_w)/2:y=h-(text_h*2):fontcolor=white:fontsize=36:box=1:boxcolor=black@0.55:boxborderw=12`
   ];
+  if (disclaimer.trim()) filters.push(`drawtext=text='${escapeDrawText(disclaimer.trim())}':x=32:y=24:fontcolor=white:fontsize=22:box=1:boxcolor=black@0.45:boxborderw=8`);
   const audioFilter = buildAudioFilter(audioInputs, silentInputIndex, scene.durationSeconds);
   if (logoPath || audioFilter) {
     const videoFilter = logoPath ? `[0:v]${filters.join(",")}[base];[base][1:v]overlay=W-w-32:32[v]` : `[0:v]${filters.join(",")}[v]`;
@@ -208,6 +211,25 @@ function parseAudioMetadata(asset: AssetRow): AudioSettings {
     muted: Boolean(parsed.muted),
     backgroundMusic: Boolean(parsed.backgroundMusic)
   };
+}
+
+function findBrandLogo(assets: AssetRow[], brandKitId: string | null): AssetRow | null {
+  if (!brandKitId) return null;
+  return assets.find((asset) => {
+    if (asset.kind !== "image" || !asset.localPath) return false;
+    const metadata = parseMetadata(asset.metadataJson);
+    return metadata.libraryType === "brand" && metadata.ownerId === brandKitId && metadata.role === "logo";
+  }) ?? null;
+}
+
+function parseMetadata(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }
 
 function numberSetting(value: unknown, fallback: number): number {
@@ -276,7 +298,7 @@ type ScenePlan = SceneRow & { asset: AssetRow; audio: Array<{ asset: AssetRow; s
 class RenderCancelledError extends Error {}
 
 function getProject(db: Database.Database, projectId: string) {
-  const project = db.prepare("SELECT id,name,aspect_ratio AS aspectRatio FROM media_projects WHERE id=? AND status='ACTIVE'").get(projectId) as { id: string; name: string; aspectRatio: string } | undefined;
+  const project = db.prepare("SELECT id,name,aspect_ratio AS aspectRatio,default_brand_kit_id AS defaultBrandKitId FROM media_projects WHERE id=? AND status='ACTIVE'").get(projectId) as { id: string; name: string; aspectRatio: string; defaultBrandKitId: string | null } | undefined;
   if (!project) throw new MediaStudioError("Media project not found", 404);
   return project;
 }
