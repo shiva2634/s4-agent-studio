@@ -51,6 +51,8 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   fetchImpl?: LongCatHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
+  shouldCancel?: () => boolean;
+  pollingIntervalMs?: number;
 }, audit: MediaAuditWriter) {
   if (!input.approved) throw new MediaStudioError("LongCat generation requires explicit approval", 403);
   const config = input.config ?? loadLongCatConfig();
@@ -68,9 +70,10 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   try {
     const remoteJobId = await submitLongCatJob(config, { scene, image, audio }, fetchImpl);
     updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted LongCat job ${remoteJobId}`, { remoteJobId }, "submitted");
-    const output = await pollLongCatOutput(config, remoteJobId, fetchImpl, (status, progress) => {
+    const output = await pollLongCatOutput(config, remoteJobId, fetchImpl, input.shouldCancel, input.pollingIntervalMs, (status, progress) => {
       recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: "LongCat generation update", providerStatus: status });
     });
+    if (input.shouldCancel?.()) throw new MediaStudioError("LongCat job was cancelled", 409);
     const bytes = await downloadLongCatOutput(config, remoteJobId, output, fetchImpl);
     const asset = await saveLongCatVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -138,9 +141,10 @@ async function submitLongCatJob(config: LongCatConfig, input: { scene: SceneRow;
   return jobId;
 }
 
-async function pollLongCatOutput(config: LongCatConfig, remoteJobId: string, fetchImpl: LongCatHttp, onStatus?: (status: string, progress?: number) => void) {
+async function pollLongCatOutput(config: LongCatConfig, remoteJobId: string, fetchImpl: LongCatHttp, shouldCancel?: () => boolean, pollingIntervalMs = 50, onStatus?: (status: string, progress?: number) => void) {
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
+    if (shouldCancel?.()) throw new Error("LongCat job was cancelled");
     const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}`, { method: "GET" }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`LongCat poll failed: ${response.status}`);
     const data = await response.json() as LongCatPollResponse;
@@ -151,7 +155,7 @@ async function pollLongCatOutput(config: LongCatConfig, remoteJobId: string, fet
     if (["completed", "succeeded", "success"].includes(status)) {
       return { filename: data.output?.filename ?? data.filename ?? "longcat-output.mp4", url: data.output?.url ?? data.output_url };
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, pollingIntervalMs));
   }
   throw new Error("LongCat generation timed out");
 }
@@ -176,14 +180,20 @@ async function saveLongCatVideoAsset(db: Database.Database, projectId: string, s
 }
 
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: LongCatJobStatus, request: unknown, timestamp: string) {
-  db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  const existing = db.prepare("SELECT id FROM media_generation_jobs WHERE id=?").get(id);
+  if (existing) {
+    db.prepare("UPDATE media_generation_jobs SET provider_key=?,status=?,request_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'").run(providerKey, status, JSON.stringify(request), timestamp, id);
+  } else {
+    db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  }
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
 function updateGenerationJob(db: Database.Database, id: string, status: LongCatJobStatus, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
-  db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?")
+  const update = db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'")
     .run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  if (update.changes === 0) return;
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 

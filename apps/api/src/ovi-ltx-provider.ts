@@ -47,6 +47,8 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   fetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
+  shouldCancel?: () => boolean;
+  pollingIntervalMs?: number;
 }, audit: MediaAuditWriter) {
   if (!input.approved) throw new MediaStudioError(`${providerName(input.providerKey)} generation requires explicit approval`, 403);
   if (!input.config.enabled) throw new MediaStudioError(`${providerName(input.providerKey)} provider is disabled`, 409);
@@ -66,9 +68,10 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   try {
     const remoteJobId = await submitExternalJob(input.config, { providerKey: input.providerKey, task: input.task, prompt, scene, image, audio }, fetchImpl);
     updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ${providerName(input.providerKey)} job ${remoteJobId}`, { remoteJobId }, "submitted");
-    const output = await pollExternalOutput(input.config, input.providerKey, remoteJobId, fetchImpl, (status, progress) => {
+    const output = await pollExternalOutput(input.config, input.providerKey, remoteJobId, fetchImpl, input.shouldCancel, input.pollingIntervalMs, (status, progress) => {
       recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: `${providerName(input.providerKey)} generation update`, providerStatus: status });
     });
+    if (input.shouldCancel?.()) throw new MediaStudioError(`${providerName(input.providerKey)} job was cancelled`, 409);
     const bytes = await downloadExternalOutput(input.config, input.providerKey, remoteJobId, output, fetchImpl);
     const asset = await saveGeneratedVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -140,10 +143,11 @@ async function submitExternalJob(config: ExternalMediaConfig, input: { providerK
   return jobId;
 }
 
-async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp, onStatus?: (status: string, progress?: number) => void) {
+async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp, shouldCancel?: () => boolean, pollingIntervalMs = 50, onStatus?: (status: string, progress?: number) => void) {
   const baseUrl = assertValidBaseUrl(config.baseUrl);
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
+    if (shouldCancel?.()) throw new Error(`${providerName(providerKey)} job was cancelled`);
     const response = await fetchWithTimeout(providerKey, `${trimBaseUrl(baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}`, { method: "GET", headers: authHeaders(config) }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`${providerName(providerKey)} poll failed: ${response.status}`);
     const data = await readJsonResponse(response, providerKey, "poll") as PollResponse;
@@ -154,7 +158,7 @@ async function pollExternalOutput(config: ExternalMediaConfig, providerKey: Exte
     if (["cancelled", "canceled"].includes(status)) throw new Error(`${providerName(providerKey)} job was cancelled`);
     if (["completed", "succeeded", "success"].includes(status)) return { filename: data.output?.filename ?? data.filename ?? `${providerKey}-output.mp4`, url: data.output?.url ?? data.output_url };
     if (!["queued", "pending", "running", "processing", "in_progress"].includes(status)) throw new Error(`${providerName(providerKey)} returned unsupported status ${status}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, pollingIntervalMs));
   }
   throw new Error(`${providerName(providerKey)} generation timed out`);
 }
@@ -199,13 +203,19 @@ function getSceneAsset(db: Database.Database, projectId: string, sceneId: string
 }
 
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: string, request: unknown, timestamp: string) {
-  db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  const existing = db.prepare("SELECT id FROM media_generation_jobs WHERE id=?").get(id);
+  if (existing) {
+    db.prepare("UPDATE media_generation_jobs SET provider_key=?,status=?,request_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'").run(providerKey, status, JSON.stringify(request), timestamp, id);
+  } else {
+    db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  }
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
 function updateGenerationJob(db: Database.Database, id: string, status: string, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
-  db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?").run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  const update = db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'").run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  if (update.changes === 0) return;
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 

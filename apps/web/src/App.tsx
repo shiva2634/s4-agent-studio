@@ -708,7 +708,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const data = await response.json();
     if (!response.ok) { setError(data.error ?? "Unable to route media generation"); return; }
     setBundle(data.bundle);
-    setNotice(data.routing ? `${data.routing.selectedProvider}: ${data.routing.reason}` : "Provider route completed");
+    setNotice(`Generation queued: ${data.job?.status ?? "QUEUED"}`);
+    if (data.job?.id) startGenerationPolling(data.job.id);
   }
 
   async function generatePresenter(sceneId: string) {
@@ -722,7 +723,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const data = await response.json();
     if (!response.ok) { setError(data.error ?? "Unable to route presenter generation"); return; }
     setBundle(data.bundle);
-    setNotice(data.routing ? `${data.routing.selectedProvider}: ${data.routing.reason}` : "Presenter route completed");
+    setNotice(`Presenter generation queued: ${data.job?.status ?? "QUEUED"}`);
+    if (data.job?.id) startGenerationPolling(data.job.id);
   }
 
   async function generateAudioVideo(sceneId: string) {
@@ -736,7 +738,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const data = await response.json();
     if (!response.ok) { setError(data.error ?? "Unable to route audio video generation"); return; }
     setBundle(data.bundle);
-    setNotice(data.routing ? `${data.routing.selectedProvider}: ${data.routing.reason}` : "Audio video route completed");
+    setNotice(`Audio video generation queued: ${data.job?.status ?? "QUEUED"}`);
+    if (data.job?.id) startGenerationPolling(data.job.id);
   }
 
   async function cancelGeneration(jobId: string) {
@@ -755,6 +758,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     if (!response.ok) { setError(data.error ?? "Unable to retry generation"); return; }
     setBundle(data.bundle);
     setNotice("Generation retried");
+    if (data.job?.id) startGenerationPolling(data.job.id);
   }
 
   async function loadGenerationHistory(jobId: string) {
@@ -764,6 +768,23 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     const data = await response.json();
     if (!response.ok) { setError(data.error ?? "Unable to load generation timeline"); return; }
     setGenerationHistory(data.history ?? []);
+  }
+
+  function startGenerationPolling(jobId: string) {
+    setSelectedGenerationJobId(jobId);
+    void pollGenerationJob(jobId);
+  }
+
+  async function pollGenerationJob(jobId: string) {
+    if (!selectedId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/generation-jobs/${jobId}`);
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to poll generation job"); return; }
+    await loadGenerationHistory(jobId);
+    await reloadBundle();
+    if (!["COMPLETED","FAILED","CANCELLED","WAITING_FOR_USER","IMPORTED"].includes(data.job.status)) {
+      window.setTimeout(()=>void pollGenerationJob(jobId), 1500);
+    }
   }
 
   async function markFlowGenerated(jobId: string) {

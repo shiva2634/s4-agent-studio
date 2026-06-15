@@ -169,6 +169,8 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
   fetchImpl?: ComfyHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
+  shouldCancel?: () => boolean;
+  pollingIntervalMs?: number;
 }, audit: MediaAuditWriter) {
   if (!input.approved) throw new MediaStudioError("Wan generation requires explicit approval", 403);
   const config = input.config ?? loadComfyConfig();
@@ -192,9 +194,10 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
   try {
     const promptId = await submitWorkflow(config, compiled.workflow, fetchImpl);
     updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ComfyUI prompt ${promptId}`, { promptId }, "submitted");
-    const output = await pollComfyOutput(config, promptId, fetchImpl, (providerStatus) => {
+    const output = await pollComfyOutput(config, promptId, fetchImpl, input.shouldCancel, input.pollingIntervalMs, (providerStatus) => {
       recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, message: "Waiting for ComfyUI output", providerStatus });
     });
+    if (input.shouldCancel?.()) throw new MediaStudioError("ComfyUI job was cancelled", 409);
     const bytes = await downloadComfyOutput(config, output, fetchImpl);
     const asset = await saveGeneratedVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -259,9 +262,10 @@ async function submitWorkflow(config: ComfyConfig, workflow: Record<string, unkn
   return data.prompt_id;
 }
 
-async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl: ComfyHttp, onStatus?: (providerStatus: string) => void) {
+async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl: ComfyHttp, shouldCancel?: () => boolean, pollingIntervalMs = 50, onStatus?: (providerStatus: string) => void) {
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
+    if (shouldCancel?.()) throw new Error("ComfyUI job was cancelled");
     const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/history/${encodeURIComponent(promptId)}`, { method: "GET" }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`ComfyUI history poll failed: ${response.status}`);
     const data = await response.json() as Record<string, { outputs?: Record<string, { videos?: ComfyOutput[] }> }>;
@@ -269,7 +273,7 @@ async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl:
     const output = Object.values(prompt?.outputs ?? {}).flatMap((node) => node.videos ?? [])[0];
     if (output) return output;
     onStatus?.("running");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, pollingIntervalMs));
   }
   throw new Error("ComfyUI generation timed out");
 }
@@ -297,14 +301,20 @@ async function saveGeneratedVideoAsset(db: Database.Database, projectId: string,
 }
 
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: ComfyJobStatus, request: unknown, timestamp: string) {
-  db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  const existing = db.prepare("SELECT id FROM media_generation_jobs WHERE id=?").get(id);
+  if (existing) {
+    db.prepare("UPDATE media_generation_jobs SET provider_key=?,status=?,request_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'").run(providerKey, status, JSON.stringify(request), timestamp, id);
+  } else {
+    db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  }
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
 function updateGenerationJob(db: Database.Database, id: string, status: ComfyJobStatus, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
-  db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?")
+  const update = db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'")
     .run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  if (update.changes === 0) return;
   recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 

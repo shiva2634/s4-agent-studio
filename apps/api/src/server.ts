@@ -19,12 +19,13 @@ import { ProjectRegistrationError, deregisterProject, listActiveProjects, regist
 import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
-import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
-import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders, type MediaProviderTask } from "./media-provider-router.js";
-import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
+import { activateComfyWorkflow, comfyStatusResponse, deleteComfyWorkflow, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
+import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, selectMediaProviders, type MediaProviderTask } from "./media-provider-router.js";
+import { loadLongCatConfig, longCatStatusResponse, testLongCatConnection } from "./longcat-provider.js";
 import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
-import { cancelExternalGeneration, externalProviderStatusResponse, loadLtxConfig, loadOviConfig, retryExternalGeneration, testExternalProviderConnection } from "./ovi-ltx-provider.js";
+import { externalProviderStatusResponse, loadLtxConfig, loadOviConfig, testExternalProviderConnection } from "./ovi-ltx-provider.js";
 import { listGenerationStatusHistory } from "./media-generation-history.js";
+import { MediaGenerationWorker, getGenerationJob, loadGenerationWorkerConfig } from "./media-generation-worker.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -44,6 +45,8 @@ function audit(eventType: string, summary: string, values: { projectId?: string;
   db.prepare(`INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, now());
 }
+
+const generationWorker = new MediaGenerationWorker(db, audit, loadGenerationWorkerConfig());
 
 function isMediaProviderTask(value: string): value is MediaProviderTask {
   return mediaProviderTasks.includes(value as MediaProviderTask);
@@ -482,19 +485,20 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate/wan", async (r
   const parsed = GenerateWanSceneSchema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.status(400).send({ error: "Invalid Wan generation request", details: parsed.error.flatten() });
   try {
-    const result = await generateWanForScene(db, request.params.projectId, request.params.sceneId, {
-      jobId: nanoid(),
-      outputAssetId: nanoid(),
-      now: now(),
-      mode: parsed.data.mode,
+    const job = generationWorker.enqueueGeneration({
+      projectId: request.params.projectId,
+      sceneId: request.params.sceneId,
+      task: parsed.data.mode === "image-to-video" ? "I2V" : "T2V",
+      providerKey: "wan-2.2",
       approved: parsed.data.approved,
       fps: parsed.data.fps,
-      seed: parsed.data.seed
-    }, audit);
-    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+      seed: parsed.data.seed,
+      now: now()
+    });
+    return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
-    return reply.status(500).send({ error: "Unable to generate Wan media" });
+    return reply.status(500).send({ error: "Unable to queue Wan media generation" });
   }
 });
 
@@ -502,10 +506,9 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
   const parsed = RouteMediaGenerationSchema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.status(400).send({ error: "Invalid provider routing request", details: parsed.error.flatten() });
   try {
-    const result = await routeMediaGeneration(db, request.params.projectId, request.params.sceneId, {
-      jobId: nanoid(),
-      outputAssetId: nanoid(),
-      now: now(),
+    const job = generationWorker.enqueueGeneration({
+      projectId: request.params.projectId,
+      sceneId: request.params.sceneId,
       task: parsed.data.task,
       providerKey: parsed.data.providerKey,
       approved: parsed.data.approved,
@@ -513,14 +516,12 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
       maxAttempts: parsed.data.maxAttempts,
       fps: parsed.data.fps,
       seed: parsed.data.seed,
-      longCatConfig: loadLongCatConfig(),
-      oviConfig: loadOviConfig(),
-      ltxConfig: loadLtxConfig()
-    }, audit);
-    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+      now: now()
+    });
+    return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
-    return reply.status(500).send({ error: "Unable to route media generation" });
+    return reply.status(500).send({ error: "Unable to queue media generation" });
   }
 });
 
@@ -827,13 +828,19 @@ app.post("/api/media/projects/:projectId/generation-jobs/:jobId/cancel", async (
   try {
     const job = db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id=? AND media_project_id=?").get(request.params.jobId, request.params.projectId) as { providerKey: string } | undefined;
     if (job?.providerKey === "google-flow") return { job: cancelFlowJob(db, request.params.projectId, request.params.jobId, now(), audit) };
-    if (job?.providerKey === "longcat-avatar") return { job: await cancelLongCatGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
-    if (job?.providerKey === "ovi") return { job: await cancelExternalGeneration(db, request.params.projectId, request.params.jobId, "ovi", now(), audit, loadOviConfig()) };
-    if (job?.providerKey === "ltx") return { job: await cancelExternalGeneration(db, request.params.projectId, request.params.jobId, "ltx", now(), audit, loadLtxConfig()) };
-    return { job: await cancelComfyGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
+    return { job: generationWorker.cancel(request.params.projectId, request.params.jobId, now()) };
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to cancel generation job" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/generation-jobs/:jobId", async (request: any, reply) => {
+  try {
+    return { job: getGenerationJob(db, request.params.projectId, request.params.jobId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load generation job" });
   }
 });
 
@@ -855,32 +862,8 @@ app.post("/api/media/projects/:projectId/generation-jobs/:jobId/retry", async (r
       const job = retryFlowJob(db, request.params.projectId, request.params.jobId, { jobId: nanoid(), now: now() }, audit);
       return reply.status(201).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
     }
-    if (existing?.providerKey === "longcat-avatar") {
-      const result = await retryLongCatGeneration(db, request.params.projectId, request.params.jobId, {
-        jobId: nanoid(),
-        outputAssetId: nanoid(),
-        now: now(),
-        approved: parsed.data.approved
-      }, audit);
-      return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
-    }
-    if (existing?.providerKey === "ovi" || existing?.providerKey === "ltx") {
-      const result = await retryExternalGeneration(db, request.params.projectId, request.params.jobId, {
-        jobId: nanoid(),
-        outputAssetId: nanoid(),
-        now: now(),
-        approved: parsed.data.approved,
-        config: existing.providerKey === "ovi" ? loadOviConfig() : loadLtxConfig()
-      }, audit);
-      return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
-    }
-    const result = await retryComfyGeneration(db, request.params.projectId, request.params.jobId, {
-      jobId: nanoid(),
-      outputAssetId: nanoid(),
-      now: now(),
-      approved: parsed.data.approved
-    }, audit);
-    return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+    const job = generationWorker.retry(request.params.projectId, request.params.jobId, { jobId: nanoid(), now: now(), approved: parsed.data.approved });
+    return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to retry generation job" });
@@ -1300,4 +1283,5 @@ app.get("/api/audit", async () => ({
 }));
 
 const port = Number(process.env.S4_API_PORT ?? 4310);
+generationWorker.recoverStartup(now());
 await app.listen({ host: "127.0.0.1", port });

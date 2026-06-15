@@ -46,6 +46,8 @@ type RouterAdapter = (input: {
   ltxFetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
+  shouldCancel?: () => boolean;
+  pollingIntervalMs?: number;
   audit: MediaAuditWriter;
 }) => Promise<unknown>;
 
@@ -70,6 +72,8 @@ export type ProviderRouterOptions = {
   ltxFetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
+  shouldCancel?: () => boolean;
+  pollingIntervalMs?: number;
   capabilities?: ProviderCapability[];
   adapters?: Partial<Record<ProviderKey, RouterAdapter>>;
 };
@@ -189,7 +193,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
     }
     const adapter = options.adapters?.[provider.key] ?? defaultAdapter(provider.key);
     try {
-      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, oviConfig: options.oviConfig, oviFetchImpl: options.oviFetchImpl, ltxConfig: options.ltxConfig, ltxFetchImpl: options.ltxFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, audit });
+      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, oviConfig: options.oviConfig, oviFetchImpl: options.oviFetchImpl, ltxConfig: options.ltxConfig, ltxFetchImpl: options.ltxFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, shouldCancel: options.shouldCancel, pollingIntervalMs: options.pollingIntervalMs, audit });
       attempted.push({ providerKey: provider.key, status: "SELECTED", reason: provider.reason });
       persistRouting(db, options.jobId, { selectedProvider: provider.key, reason: provider.reason, attempted });
       return { ...(isRecord(result) ? result : { result }), routing: { selectedProvider: provider.key, reason: provider.reason, attempted } };
@@ -215,7 +219,7 @@ function getProviderCandidates(capabilities: ProviderCapability[], task: MediaPr
 
 function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
   if (providerKey === "wan-2.2") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, fps, seed, config, fetchImpl, storageRoot, processOptions, audit }) => generateWanForScene(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, fps, seed, config, fetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, audit }) => generateWanForScene(db, projectId, sceneId, {
       jobId,
       outputAssetId,
       now,
@@ -226,11 +230,13 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       config,
       fetchImpl,
       storageRoot,
-      processOptions
+      processOptions,
+      shouldCancel,
+      pollingIntervalMs
     }, audit);
   }
   if (providerKey === "longcat-avatar") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, approved, longCatConfig, longCatFetchImpl, storageRoot, processOptions, audit }) => generateLongCatPresenter(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, approved, longCatConfig, longCatFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, audit }) => generateLongCatPresenter(db, projectId, sceneId, {
       jobId,
       outputAssetId,
       now,
@@ -238,11 +244,13 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       config: longCatConfig,
       fetchImpl: longCatFetchImpl,
       storageRoot,
-      processOptions
+      processOptions,
+      shouldCancel,
+      pollingIntervalMs
     }, audit);
   }
   if (providerKey === "ovi") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, oviConfig, oviFetchImpl, storageRoot, processOptions, audit }) => generateExternalMedia(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, oviConfig, oviFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, audit }) => generateExternalMedia(db, projectId, sceneId, {
       providerKey: "ovi",
       task: task === "AUDIO_VIDEO" ? "AUDIO_VIDEO" : "T2V",
       jobId,
@@ -252,11 +260,13 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       config: oviConfig ?? loadOviConfig(),
       fetchImpl: oviFetchImpl,
       storageRoot,
-      processOptions
+      processOptions,
+      shouldCancel,
+      pollingIntervalMs
     }, audit);
   }
   if (providerKey === "ltx") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, ltxConfig, ltxFetchImpl, storageRoot, processOptions, audit }) => generateExternalMedia(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, ltxConfig, ltxFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, audit }) => generateExternalMedia(db, projectId, sceneId, {
       providerKey: "ltx",
       task: task === "I2V" ? "I2V" : "T2V",
       jobId,
@@ -266,7 +276,9 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       config: ltxConfig ?? loadLtxConfig(),
       fetchImpl: ltxFetchImpl,
       storageRoot,
-      processOptions
+      processOptions,
+      shouldCancel,
+      pollingIntervalMs
     }, audit);
   }
   return async () => {
@@ -367,8 +379,16 @@ export async function importFlowGeneratedAsset(db: Database.Database, projectId:
 }
 
 function insertHumanAssistedJob(db: Database.Database, id: string, projectId: string, sceneId: string, provider: ProviderCapability, options: ProviderRouterOptions, reason: string, flowPackage: FlowPackage) {
-  db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, provider.key, "WAITING_FOR_USER", JSON.stringify({ task: options.task, providerKey: provider.key, sceneId }), JSON.stringify({ flowPackage, flowLink: flowLink(), lifecycle: { waitingAt: options.now }, routing: { reason, providerMode: provider.mode } }), options.now, options.now);
+  const requestJson = JSON.stringify({ task: options.task, providerKey: provider.key, sceneId });
+  const resultJson = JSON.stringify({ flowPackage, flowLink: flowLink(), lifecycle: { waitingAt: options.now }, routing: { reason, providerMode: provider.mode } });
+  const existing = db.prepare("SELECT id FROM media_generation_jobs WHERE id=?").get(id);
+  if (existing) {
+    db.prepare("UPDATE media_generation_jobs SET provider_key=?,status='WAITING_FOR_USER',request_json=?,result_json=?,updated_at=? WHERE id=? AND status!='CANCELLED'")
+      .run(provider.key, requestJson, resultJson, options.now, id);
+  } else {
+    db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, provider.key, "WAITING_FOR_USER", requestJson, resultJson, options.now, options.now);
+  }
   recordGenerationStatusHistory(db, { generationJobId: id, status: "WAITING_FOR_USER", createdAt: options.now, message: "Flow package created", providerStatus: provider.key });
 }
 
