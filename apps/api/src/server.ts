@@ -24,6 +24,7 @@ import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCa
 import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
 import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
 import { cancelExternalGeneration, externalProviderStatusResponse, loadLtxConfig, loadOviConfig, retryExternalGeneration, testExternalProviderConnection } from "./ovi-ltx-provider.js";
+import { listGenerationStatusHistory } from "./media-generation-history.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -833,6 +834,15 @@ app.post("/api/media/projects/:projectId/generation-jobs/:jobId/cancel", async (
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to cancel generation job" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/generation-jobs/:jobId/status-history", async (request: any, reply) => {
+  try {
+    return { history: listGenerationStatusHistory(db, request.params.projectId, request.params.jobId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load generation job status history" });
   }
 });
 

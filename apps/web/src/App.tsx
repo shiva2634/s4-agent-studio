@@ -16,6 +16,7 @@ type MediaScene = { id: string; position: number; title: string; description: st
 type MediaAsset = { id: string; sceneId: string | null; kind: string; label: string; source: string; status: string; fileName: string | null; originalName: string | null; mimeType: string | null; sizeBytes: number | null; checksumSha256: string | null; localPath: string | null; inspectionJson: string | null; qcStatus: string; qcIssuesJson: string; previewPath: string | null; thumbnailPath: string | null; metadataJson: string | null };
 type AudioSettings = { audioRole: "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO"; volume: number; trimStartSeconds: number; trimEndSeconds: number | null; fadeInSeconds: number; fadeOutSeconds: number; muted: boolean; backgroundMusic: boolean };
 type MediaGenerationJob = { id: string; providerKey: string; status: string; requestJson: string; resultJson: string | null };
+type MediaGenerationStatusHistory = { id: string; generationJobId: string; status: string; progressPercent: number | null; message: string | null; providerStatus: string | null; createdAt: string };
 type MediaProvider = { key: string; name: string; capabilities: readonly string[]; status: string };
 type RouterCapability = { key: string; name: string; supports: string[]; enabled: boolean; healthy: boolean; priority: number; paid: boolean; mode: string; reason: string };
 type MediaProcessingJob = { id: string; assetId: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"; error: string | null; createdAt: string };
@@ -238,6 +239,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   const [exportSettings,setExportSettings]=useState<ExportSettings>({preset:"16:9",resolution:"1080p",fps:30,bitrateKbps:8000,includeCaptions:true,includeLogo:true,includeDisclaimer:true,includeMusic:true});
   const [error, setError] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState("");
+  const [selectedGenerationJobId, setSelectedGenerationJobId] = useState("");
+  const [generationHistory, setGenerationHistory] = useState<MediaGenerationStatusHistory[]>([]);
   const [notice, setNotice] = useState("");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -754,6 +757,15 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     setNotice("Generation retried");
   }
 
+  async function loadGenerationHistory(jobId: string) {
+    if (!selectedId) return;
+    setSelectedGenerationJobId(jobId);
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/generation-jobs/${jobId}/status-history`);
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to load generation timeline"); return; }
+    setGenerationHistory(data.history ?? []);
+  }
+
   async function markFlowGenerated(jobId: string) {
     if (!selectedId) return;
     const response = await fetch(`${API}/api/media/projects/${selectedId}/generation-jobs/${jobId}/flow-generated`, { method: "POST" });
@@ -908,7 +920,12 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         {bundle&&<div className="mini"><span>Project music</span><label className="replace-button">Upload<input type="file" accept="audio/*" onChange={event=>void importProjectAudio(event.target.files?.[0])}/></label><button onClick={()=>void selectBackgroundMusic(null)}>Clear music</button></div>}
         {bundle?.assets.length ? bundle.assets.map(asset => <div className="mini" key={asset.id}><span>{asset.label}</span><small>{asset.mimeType ?? asset.status}</small>{asset.kind==="audio"&&<div className="decision wrap"><button onClick={()=>void selectBackgroundMusic(asset.id)}>Use as music</button></div>}</div>) : <div className="mini"><span>No planned assets</span><small>Waiting</small></div>}
         <h3>Generation jobs</h3>
-        {bundle?.generationJobs.length ? bundle.generationJobs.map(job => { const routing=parseRouting(job.resultJson); const flow=parseFlowPackage(job.resultJson); return <div className="mini" key={job.id}><span>{job.providerKey}</span><small>{job.status}</small>{routing&&<small>Route: {routing.selectedProvider} · {routing.reason}</small>}{job.providerKey==="google-flow"&&flow&&<small>{flow.scene.aspectRatio} · {flow.scene.durationSeconds}s</small>}{job.providerKey==="google-flow"&&<div className="decision wrap"><button onClick={()=>void copyFlowPrompt(job)}>Copy prompt</button><button onClick={()=>exportFlowPackage(job)}>Export package</button><a className="button-link" href="https://labs.google/fx/tools/flow" target="_blank" rel="noreferrer">Open Flow</a><button onClick={()=>void markFlowGenerated(job.id)} disabled={!["WAITING_FOR_USER","GENERATED"].includes(job.status)}>Generated</button><label className="replace-button">Import<input type="file" accept="image/*,video/*" onChange={event=>void importFlowAsset(job.id,event.target.files?.[0])}/></label><button onClick={()=>void rejectFlow(job.id)} disabled={["IMPORTED","FAILED","CANCELLED"].includes(job.status)}>Reject</button><button onClick={()=>void fallbackFlowToWan(job.id)} disabled={["IMPORTED","CANCELLED"].includes(job.status)}>Fallback Wan</button></div>}{["wan-2.2","longcat-avatar","ovi","ltx"].includes(job.providerKey)&&<div className="decision wrap"><button onClick={()=>void cancelGeneration(job.id)} disabled={["COMPLETED","FAILED","CANCELLED"].includes(job.status)}>Cancel</button><button onClick={()=>void retryGeneration(job.id)} disabled={!["FAILED","CANCELLED"].includes(job.status)}>Retry</button></div>}</div>; }) : <div className="mini"><span>Provider stubs</span><small>Not seeded</small></div>}
+        {bundle?.generationJobs.length ? bundle.generationJobs.map(job => {
+          const routing=parseRouting(job.resultJson);
+          const flow=parseFlowPackage(job.resultJson);
+          const selected=selectedGenerationJobId===job.id;
+          return <div className="mini" key={job.id}><span>{job.providerKey}</span><small>{job.status}</small>{routing&&<small>Route: {routing.selectedProvider} · {routing.reason}</small>}{job.providerKey==="google-flow"&&flow&&<small>{flow.scene.aspectRatio} · {flow.scene.durationSeconds}s</small>}<div className="decision wrap"><button onClick={()=>void loadGenerationHistory(job.id)}>{selected?"Refresh timeline":"Timeline"}</button></div>{selected&&generationHistory.length>0&&<ol className="status-timeline">{generationHistory.map(entry=><li key={entry.id}><small>{entry.status}{entry.progressPercent!==null?` · ${entry.progressPercent}%`:""}{entry.providerStatus?` · ${entry.providerStatus}`:""}</small>{entry.message&&<span>{entry.message}</span>}</li>)}</ol>}{job.providerKey==="google-flow"&&<div className="decision wrap"><button onClick={()=>void copyFlowPrompt(job)}>Copy prompt</button><button onClick={()=>exportFlowPackage(job)}>Export package</button><a className="button-link" href="https://labs.google/fx/tools/flow" target="_blank" rel="noreferrer">Open Flow</a><button onClick={()=>void markFlowGenerated(job.id)} disabled={!["WAITING_FOR_USER","GENERATED"].includes(job.status)}>Generated</button><label className="replace-button">Import<input type="file" accept="image/*,video/*" onChange={event=>void importFlowAsset(job.id,event.target.files?.[0])}/></label><button onClick={()=>void rejectFlow(job.id)} disabled={["IMPORTED","FAILED","CANCELLED"].includes(job.status)}>Reject</button><button onClick={()=>void fallbackFlowToWan(job.id)} disabled={["IMPORTED","CANCELLED"].includes(job.status)}>Fallback Wan</button></div>}{["wan-2.2","longcat-avatar","ovi","ltx"].includes(job.providerKey)&&<div className="decision wrap"><button onClick={()=>void cancelGeneration(job.id)} disabled={["COMPLETED","FAILED","CANCELLED"].includes(job.status)}>Cancel</button><button onClick={()=>void retryGeneration(job.id)} disabled={!["FAILED","CANCELLED"].includes(job.status)}>Retry</button></div>}</div>;
+        }) : <div className="mini"><span>Provider stubs</span><small>Not seeded</small></div>}
       </aside>
     </div>
     {dialog==="create"&&<MediaProjectDialog onClose={()=>setDialog(null)} onCreated={async(project)=>{await refresh();navigate(`/media-studio/${project.id}`);}}/>}

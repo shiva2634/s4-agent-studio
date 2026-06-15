@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { MediaStudioError, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
+import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
 export type LongCatJobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 export type LongCatHttp = typeof fetch;
@@ -66,8 +67,10 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
 
   try {
     const remoteJobId = await submitLongCatJob(config, { scene, image, audio }, fetchImpl);
-    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted LongCat job ${remoteJobId}`, { remoteJobId });
-    const output = await pollLongCatOutput(config, remoteJobId, fetchImpl);
+    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted LongCat job ${remoteJobId}`, { remoteJobId }, "submitted");
+    const output = await pollLongCatOutput(config, remoteJobId, fetchImpl, (status, progress) => {
+      recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: "LongCat generation update", providerStatus: status });
+    });
     const bytes = await downloadLongCatOutput(config, remoteJobId, output, fetchImpl);
     const asset = await saveLongCatVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -113,6 +116,7 @@ export async function retryLongCatGeneration(db: Database.Database, projectId: s
   processOptions?: Partial<MediaProcessingOptions>;
 }, audit: MediaAuditWriter) {
   const previous = getGenerationJob(db, jobId);
+  recordGenerationStatusHistory(db, { generationJobId: jobId, status: "RETRIED", createdAt: input.now, message: `Retry requested as ${input.jobId}` });
   const request = JSON.parse(previous.requestJson) as { sceneId: string };
   return generateLongCatPresenter(db, projectId, request.sceneId, input, audit);
 }
@@ -134,13 +138,14 @@ async function submitLongCatJob(config: LongCatConfig, input: { scene: SceneRow;
   return jobId;
 }
 
-async function pollLongCatOutput(config: LongCatConfig, remoteJobId: string, fetchImpl: LongCatHttp) {
+async function pollLongCatOutput(config: LongCatConfig, remoteJobId: string, fetchImpl: LongCatHttp, onStatus?: (status: string, progress?: number) => void) {
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
     const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs/${encodeURIComponent(remoteJobId)}`, { method: "GET" }, config.timeoutMs, fetchImpl);
     if (!response.ok) throw new Error(`LongCat poll failed: ${response.status}`);
     const data = await response.json() as LongCatPollResponse;
     const status = (data.status ?? "").toLowerCase();
+    onStatus?.(status || "unknown", typeof data.progress === "number" ? data.progress : undefined);
     if (["failed", "error"].includes(status)) throw new Error(data.error ?? "LongCat job failed");
     if (["cancelled", "canceled"].includes(status)) throw new Error("LongCat job was cancelled");
     if (["completed", "succeeded", "success"].includes(status)) {
@@ -173,11 +178,13 @@ async function saveLongCatVideoAsset(db: Database.Database, projectId: string, s
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: LongCatJobStatus, request: unknown, timestamp: string) {
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
-function updateGenerationJob(db: Database.Database, id: string, status: LongCatJobStatus, timestamp: string, logText: string, result: unknown = null) {
+function updateGenerationJob(db: Database.Database, id: string, status: LongCatJobStatus, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
   db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?")
     .run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 
 function getScene(db: Database.Database, projectId: string, sceneId: string): SceneRow {
@@ -264,4 +271,4 @@ type SceneRow = { id: string; title: string; dialogue: string; visualPrompt: str
 type AssetRow = { id: string; fileName: string | null; originalName: string | null; mimeType: string | null; localPath: string };
 type StoredAssetRow = AssetRow & { source: string; status: string; sizeBytes: number | null; checksumSha256: string | null };
 type GenerationJobRow = { id: string; mediaProjectId: string; providerKey: string; status: string; requestJson: string; resultJson: string | null; createdAt: string; updatedAt: string };
-type LongCatPollResponse = { status?: string; error?: string; filename?: string; output_url?: string; output?: { filename?: string; url?: string } };
+type LongCatPollResponse = { status?: string; progress?: number; error?: string; filename?: string; output_url?: string; output?: { filename?: string; url?: string } };

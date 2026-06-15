@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { MediaStudioError, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
+import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
 export type ComfyJobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 
@@ -190,8 +191,10 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
 
   try {
     const promptId = await submitWorkflow(config, compiled.workflow, fetchImpl);
-    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ComfyUI prompt ${promptId}`);
-    const output = await pollComfyOutput(config, promptId, fetchImpl);
+    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ComfyUI prompt ${promptId}`, { promptId }, "submitted");
+    const output = await pollComfyOutput(config, promptId, fetchImpl, (providerStatus) => {
+      recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, message: "Waiting for ComfyUI output", providerStatus });
+    });
     const bytes = await downloadComfyOutput(config, output, fetchImpl);
     const asset = await saveGeneratedVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -228,6 +231,7 @@ export async function cancelComfyGeneration(db: Database.Database, projectId: st
 
 export async function retryComfyGeneration(db: Database.Database, projectId: string, jobId: string, input: { jobId: string; outputAssetId: string; now: string; approved: boolean; config?: ComfyConfig; fetchImpl?: ComfyHttp; storageRoot?: string; processOptions?: Partial<MediaProcessingOptions> }, audit: MediaAuditWriter) {
   const previous = getGenerationJob(db, jobId);
+  recordGenerationStatusHistory(db, { generationJobId: jobId, status: "RETRIED", createdAt: input.now, message: `Retry requested as ${input.jobId}` });
   const request = JSON.parse(previous.requestJson) as { sceneId: string; mode: WanGenerationMode; values?: { fps?: number; seed?: number } };
   return generateWanForScene(db, projectId, request.sceneId, { ...input, mode: request.mode, fps: request.values?.fps, seed: request.values?.seed }, audit);
 }
@@ -255,7 +259,7 @@ async function submitWorkflow(config: ComfyConfig, workflow: Record<string, unkn
   return data.prompt_id;
 }
 
-async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl: ComfyHttp) {
+async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl: ComfyHttp, onStatus?: (providerStatus: string) => void) {
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
     const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/history/${encodeURIComponent(promptId)}`, { method: "GET" }, config.timeoutMs, fetchImpl);
@@ -264,6 +268,7 @@ async function pollComfyOutput(config: ComfyConfig, promptId: string, fetchImpl:
     const prompt = data[promptId];
     const output = Object.values(prompt?.outputs ?? {}).flatMap((node) => node.videos ?? [])[0];
     if (output) return output;
+    onStatus?.("running");
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("ComfyUI generation timed out");
@@ -294,11 +299,13 @@ async function saveGeneratedVideoAsset(db: Database.Database, projectId: string,
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: ComfyJobStatus, request: unknown, timestamp: string) {
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
-function updateGenerationJob(db: Database.Database, id: string, status: ComfyJobStatus, timestamp: string, logText: string, result: unknown = null) {
+function updateGenerationJob(db: Database.Database, id: string, status: ComfyJobStatus, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
   db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?")
     .run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 
 function getGenerationJob(db: Database.Database, id: string) {

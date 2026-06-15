@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sanitizeProviderError } from "./ai-provider.js";
 import type { VideoDirectorPlan, VideoDirectorProviderResult, VideoDirectorScene } from "./media-director-provider.js";
+import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
 export type MediaProjectStatus = "ACTIVE" | "ARCHIVED";
 export type MediaSender = "user" | "director";
@@ -1062,16 +1063,26 @@ function replaceBrief(db: Database.Database, projectId: string, draft: BriefDraf
     db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?)`).run(createId(), projectId, sceneId, "reference", scene.assetLabel, "chat-derived", "PLANNED", timestamp, timestamp);
   }
-  db.prepare("DELETE FROM media_generation_jobs WHERE media_project_id=?").run(projectId);
+  clearGenerationJobs(db, projectId);
   seedProviderJobs(db, projectId, timestamp, createId, { briefId, title: draft.title });
   return getMediaBrief(db, projectId) as MediaBrief;
 }
 
 function seedProviderJobs(db: Database.Database, projectId: string, timestamp: string, createId: IdFactory, request: Record<string, unknown> = {}) {
   for (const provider of mediaProviderRegistry) {
+    const jobId = createId();
     db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(createId(), projectId, provider.key, "STUBBED", JSON.stringify({ providerKey: provider.key, mode: "not-implemented", ...request }), null, timestamp, timestamp);
+      VALUES (?,?,?,?,?,?,?,?)`).run(jobId, projectId, provider.key, "STUBBED", JSON.stringify({ providerKey: provider.key, mode: "not-implemented", ...request }), null, timestamp, timestamp);
+    recordGenerationStatusHistory(db, { generationJobId: jobId, status: "STUBBED", createdAt: timestamp, message: "Provider stub created", providerStatus: provider.key });
   }
+}
+
+function clearGenerationJobs(db: Database.Database, projectId: string) {
+  const historyTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='media_generation_status_history'").get();
+  if (historyTable) {
+    db.prepare("DELETE FROM media_generation_status_history WHERE generation_job_id IN (SELECT id FROM media_generation_jobs WHERE media_project_id=?)").run(projectId);
+  }
+  db.prepare("DELETE FROM media_generation_jobs WHERE media_project_id=?").run(projectId);
 }
 
 async function generatePlanWithFallback(project: MediaProject, userIdea: string, messages: string[], existingContext: unknown, provider: VideoDirectorProvider | null) {
@@ -1192,6 +1203,7 @@ function replaceSceneFromDirector(db: Database.Database, projectId: string, scen
 function insertDirectorGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: string, request: unknown, result: unknown, timestamp: string) {
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), JSON.stringify(result), timestamp, timestamp);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Director generation job created", providerStatus: providerKey });
 }
 
 function generateDeterministicBrief(projectName: string, messages: string[]): BriefDraft {

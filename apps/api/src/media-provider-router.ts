@@ -7,6 +7,7 @@ import { generateWanForScene, loadComfyConfig, type ComfyConfig, type ComfyHttp 
 import { generateLongCatPresenter, loadLongCatConfig, type LongCatConfig, type LongCatHttp } from "./longcat-provider.js";
 import { generateExternalMedia, loadLtxConfig, loadOviConfig, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
+import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
 export type MediaProviderTask = "T2V" | "I2V" | "PRESENTER" | "AUDIO_VIDEO";
 export type ProviderKey = "google-flow" | "wan-2.2" | "longcat-avatar" | "ovi" | "ltx";
@@ -156,6 +157,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
   const candidates = getProviderCandidates(capabilities, options.task, options.providerKey);
   const maxAttempts = options.maxAttempts ?? 2;
   const attempted: Array<{ providerKey: ProviderKey; status: "SKIPPED" | "FAILED" | "SELECTED" | "HUMAN_ASSISTED"; reason: string }> = [];
+  recordGenerationStatusHistory(db, { generationJobId: options.jobId, status: "ROUTING", createdAt: options.now, message: `Selecting media provider for ${options.task}` });
   audit("MEDIA_PROVIDER_ROUTE_SELECTION_STARTED", `Selecting media provider for ${options.task}`, { projectId, payload: { sceneId, task: options.task, providerKey: options.providerKey, maxAttempts } });
 
   let attempts = 0;
@@ -175,6 +177,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
       throw new MediaStudioError(`${provider.name} requires paid-provider approval`, 403);
     }
     attempts += 1;
+    recordGenerationStatusHistory(db, { generationJobId: options.jobId, status: "PROVIDER_SELECTED", createdAt: options.now, message: `${provider.name} selected for ${options.task}`, providerStatus: provider.key });
     audit("MEDIA_PROVIDER_ROUTE_SELECTED", `${provider.name} selected for ${options.task}`, { projectId, payload: { sceneId, providerKey: provider.key, task: options.task, reason: provider.reason, attempt: attempts } });
     if (provider.mode === "HUMAN_ASSISTED") {
       const flowPackage = buildFlowPackage(db, projectId, sceneId, options.task, options.now);
@@ -193,6 +196,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Provider attempt failed";
       attempted.push({ providerKey: provider.key, status: "FAILED", reason });
+      recordGenerationStatusHistory(db, { generationJobId: options.jobId, status: "FAILED", createdAt: options.now, message: reason, providerStatus: provider.key });
       audit("MEDIA_PROVIDER_ROUTE_FALLBACK", `${provider.name} failed; trying fallback`, { projectId, payload: { sceneId, providerKey: provider.key, task: options.task, reason } });
     }
   }
@@ -303,11 +307,13 @@ export function rejectFlowJob(db: Database.Database, projectId: string, jobId: s
 
 export function retryFlowJob(db: Database.Database, projectId: string, jobId: string, input: { jobId: string; now: string }, audit: MediaAuditWriter) {
   const previous = getFlowJob(db, projectId, jobId);
+  recordGenerationStatusHistory(db, { generationJobId: jobId, status: "RETRIED", createdAt: input.now, message: `Retry requested as ${input.jobId}`, providerStatus: "google-flow" });
   const request = JSON.parse(previous.requestJson) as { sceneId: string; task: MediaProviderTask };
   const flowPackage = buildFlowPackage(db, projectId, request.sceneId, request.task, input.now);
   const provider = getMediaProviderCapabilities().find((item) => item.key === "google-flow") as ProviderCapability;
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(input.jobId, projectId, "google-flow", "WAITING_FOR_USER", JSON.stringify({ task: request.task, providerKey: "google-flow", sceneId: request.sceneId, retryOf: jobId }), JSON.stringify({ flowPackage, flowLink: flowLink(), lifecycle: { waitingAt: input.now }, routing: { selectedProvider: "google-flow", reason: provider.reason } }), input.now, input.now);
+  recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "WAITING_FOR_USER", createdAt: input.now, message: "Flow retry package created", providerStatus: "google-flow" });
   audit("MEDIA_FLOW_JOB_RETRIED", "Flow job retried", { projectId, payload: { previousJobId: jobId, jobId: input.jobId, sceneId: request.sceneId } });
   return getGenerationJob(db, input.jobId);
 }
@@ -363,6 +369,7 @@ export async function importFlowGeneratedAsset(db: Database.Database, projectId:
 function insertHumanAssistedJob(db: Database.Database, id: string, projectId: string, sceneId: string, provider: ProviderCapability, options: ProviderRouterOptions, reason: string, flowPackage: FlowPackage) {
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, provider.key, "WAITING_FOR_USER", JSON.stringify({ task: options.task, providerKey: provider.key, sceneId }), JSON.stringify({ flowPackage, flowLink: flowLink(), lifecycle: { waitingAt: options.now }, routing: { reason, providerMode: provider.mode } }), options.now, options.now);
+  recordGenerationStatusHistory(db, { generationJobId: id, status: "WAITING_FOR_USER", createdAt: options.now, message: "Flow package created", providerStatus: provider.key });
 }
 
 function getGenerationJob(db: Database.Database, id: string) {
@@ -440,6 +447,7 @@ function updateFlowJobResult(db: Database.Database, jobId: string, status: strin
   const result = job.resultJson ? JSON.parse(job.resultJson) as Record<string, unknown> : {};
   const lifecycle = isRecord(result.lifecycle) ? result.lifecycle : {};
   db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?").run(status, JSON.stringify({ ...result, lifecycle: { ...lifecycle, ...lifecyclePatch } }), timestamp, jobId);
+  recordGenerationStatusHistory(db, { generationJobId: jobId, status, createdAt: timestamp, message: status === "FAILED" ? "Flow job failed or rejected" : `Flow job ${status.toLowerCase()}`, providerStatus: "google-flow" });
 }
 
 function getScene(db: Database.Database, projectId: string, sceneId: string) {

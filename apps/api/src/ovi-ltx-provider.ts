@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { MediaStudioError, getSceneProviderPrompt, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
+import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
 export type ExternalMediaProviderKey = "ovi" | "ltx";
 export type ExternalMediaTask = "T2V" | "I2V" | "AUDIO_VIDEO";
@@ -64,8 +65,10 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
 
   try {
     const remoteJobId = await submitExternalJob(input.config, { providerKey: input.providerKey, task: input.task, prompt, scene, image, audio }, fetchImpl);
-    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ${providerName(input.providerKey)} job ${remoteJobId}`, { remoteJobId });
-    const output = await pollExternalOutput(input.config, input.providerKey, remoteJobId, fetchImpl);
+    updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ${providerName(input.providerKey)} job ${remoteJobId}`, { remoteJobId }, "submitted");
+    const output = await pollExternalOutput(input.config, input.providerKey, remoteJobId, fetchImpl, (status, progress) => {
+      recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: `${providerName(input.providerKey)} generation update`, providerStatus: status });
+    });
     const bytes = await downloadExternalOutput(input.config, input.providerKey, remoteJobId, output, fetchImpl);
     const asset = await saveGeneratedVideoAsset(db, projectId, sceneId, {
       id: input.outputAssetId,
@@ -113,6 +116,7 @@ export async function retryExternalGeneration(db: Database.Database, projectId: 
 }, audit: MediaAuditWriter) {
   const previous = getGenerationJob(db, jobId);
   if (previous.providerKey !== "ovi" && previous.providerKey !== "ltx") throw new MediaStudioError("Generation job is not Ovi or LTX", 400);
+  recordGenerationStatusHistory(db, { generationJobId: jobId, status: "RETRIED", createdAt: input.now, message: `Retry requested as ${input.jobId}` });
   const request = JSON.parse(previous.requestJson) as { sceneId: string; task: ExternalMediaTask };
   return generateExternalMedia(db, projectId, request.sceneId, { ...input, providerKey: previous.providerKey, task: request.task }, audit);
 }
@@ -136,7 +140,7 @@ async function submitExternalJob(config: ExternalMediaConfig, input: { providerK
   return jobId;
 }
 
-async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp) {
+async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp, onStatus?: (status: string, progress?: number) => void) {
   const baseUrl = assertValidBaseUrl(config.baseUrl);
   const deadline = Date.now() + config.timeoutMs;
   while (Date.now() <= deadline) {
@@ -145,6 +149,7 @@ async function pollExternalOutput(config: ExternalMediaConfig, providerKey: Exte
     const data = await readJsonResponse(response, providerKey, "poll") as PollResponse;
     if (typeof data.status !== "string" || !data.status.trim()) throw new Error(`${providerName(providerKey)} poll response is missing status`);
     const status = data.status.toLowerCase();
+    onStatus?.(status, typeof data.progress === "number" ? data.progress : undefined);
     if (["failed", "error"].includes(status)) throw new Error(data.error ?? `${providerName(providerKey)} job failed`);
     if (["cancelled", "canceled"].includes(status)) throw new Error(`${providerName(providerKey)} job was cancelled`);
     if (["completed", "succeeded", "success"].includes(status)) return { filename: data.output?.filename ?? data.filename ?? `${providerKey}-output.mp4`, url: data.output?.url ?? data.output_url };
@@ -196,10 +201,12 @@ function getSceneAsset(db: Database.Database, projectId: string, sceneId: string
 function insertGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: string, request: unknown, timestamp: string) {
   db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, providerKey, status, JSON.stringify(request), null, timestamp, timestamp);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: "Generation job created", providerStatus: providerKey });
 }
 
-function updateGenerationJob(db: Database.Database, id: string, status: string, timestamp: string, logText: string, result: unknown = null) {
+function updateGenerationJob(db: Database.Database, id: string, status: string, timestamp: string, logText: string, result: unknown = null, providerStatus?: string) {
   db.prepare("UPDATE media_generation_jobs SET status=?,result_json=?,updated_at=? WHERE id=?").run(status, JSON.stringify({ log: sanitizeLog(logText), result }), timestamp, id);
+  recordGenerationStatusHistory(db, { generationJobId: id, status, createdAt: timestamp, message: sanitizeLog(logText), providerStatus });
 }
 
 function getGenerationJob(db: Database.Database, id: string): GenerationJobRow {
@@ -317,4 +324,4 @@ type SceneRow = { id: string; title: string; dialogue: string; visualPrompt: str
 type AssetRow = { id: string; fileName: string | null; originalName: string | null; mimeType: string | null; localPath: string };
 type StoredAssetRow = AssetRow & { source: string; status: string; sizeBytes: number | null; checksumSha256: string | null };
 type GenerationJobRow = { id: string; mediaProjectId: string; providerKey: ExternalMediaProviderKey; status: string; requestJson: string; resultJson: string | null; createdAt: string; updatedAt: string };
-type PollResponse = { status?: string; error?: string; filename?: string; output_url?: string; output?: { filename?: string; url?: string } };
+type PollResponse = { status?: string; progress?: number; error?: string; filename?: string; output_url?: string; output?: { filename?: string; url?: string } };

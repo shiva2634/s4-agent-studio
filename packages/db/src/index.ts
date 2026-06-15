@@ -272,6 +272,15 @@ export function initializeDatabase() {
       updated_at TEXT NOT NULL,
       FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS media_generation_status_history (
+      id TEXT PRIMARY KEY,
+      generation_job_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress_percent INTEGER,
+      message TEXT,
+      provider_status TEXT,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS media_comfy_workflows (
       id TEXT PRIMARY KEY,
       media_project_id TEXT NOT NULL,
@@ -333,6 +342,7 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_media_presenter_profiles_project ON media_presenter_profiles(media_project_id, deleted_at, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_templates_type ON media_project_templates(template_type, archived_at, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_jobs_project ON media_generation_jobs(media_project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_media_generation_status_history_job ON media_generation_status_history(generation_job_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_comfy_workflows_project ON media_comfy_workflows(media_project_id, workflow_type, is_active);
     CREATE INDEX IF NOT EXISTS idx_media_processing_jobs_asset ON media_processing_jobs(asset_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_render_jobs_project ON media_render_jobs(media_project_id, created_at DESC);
@@ -473,6 +483,17 @@ export function initializeDatabase() {
     updated_at TEXT NOT NULL
   )`);
   db.exec("CREATE INDEX IF NOT EXISTS idx_media_templates_type ON media_project_templates(template_type, archived_at, created_at)");
+
+  db.exec(`CREATE TABLE IF NOT EXISTS media_generation_status_history (
+    id TEXT PRIMARY KEY,
+    generation_job_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    progress_percent INTEGER,
+    message TEXT,
+    provider_status TEXT,
+    created_at TEXT NOT NULL
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_generation_status_history_job ON media_generation_status_history(generation_job_id, created_at)");
 
   db.exec(`CREATE TABLE IF NOT EXISTS media_comfy_workflows (
     id TEXT PRIMARY KEY,

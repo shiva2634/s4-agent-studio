@@ -201,6 +201,15 @@ export const FlowFallbackWanSchema = z.object({
 
 export const MediaProviderTaskSchema = z.enum(["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"]);
 export const MediaProviderKeySchema = z.enum(["google-flow", "wan-2.2", "longcat-avatar", "ovi", "ltx"]);
+export const MediaGenerationStatusHistorySchema = z.object({
+  id: z.string(),
+  generationJobId: z.string(),
+  status: z.string(),
+  progressPercent: z.number().int().min(0).max(100).nullable(),
+  message: z.string().nullable(),
+  providerStatus: z.string().nullable(),
+  createdAt: z.string()
+});
 
 export const RouteMediaGenerationSchema = z.object({
   task: MediaProviderTaskSchema,
@@ -277,6 +286,7 @@ export type FlowJobAction = z.infer<typeof FlowJobActionSchema>;
 export type FlowFallbackWan = z.infer<typeof FlowFallbackWanSchema>;
 export type MediaProviderTask = z.infer<typeof MediaProviderTaskSchema>;
 export type RouteMediaGeneration = z.infer<typeof RouteMediaGenerationSchema>;
+export type MediaGenerationStatusHistory = z.infer<typeof MediaGenerationStatusHistorySchema>;
 export type ComfyWorkflowType = z.infer<typeof ComfyWorkflowTypeSchema>;
 export type ComfyWorkflowMapping = z.infer<typeof ComfyWorkflowMappingSchema>;
 export type ImportComfyWorkflow = z.infer<typeof ImportComfyWorkflowSchema>;
