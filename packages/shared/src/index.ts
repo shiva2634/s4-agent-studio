@@ -119,6 +119,38 @@ export const SelectMediaDefaultsSchema = z.object({
   presenterProfileId: z.string().min(1).nullable().optional()
 });
 
+export const MediaTemplateTypeSchema = z.enum(["PROMO", "PRESENTER", "EXPLAINER", "INVESTOR_PITCH", "REEL", "YOUTUBE"]);
+export const MediaTemplateSceneSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  durationSeconds: z.number().int().min(1).max(24 * 60 * 60),
+  prompt: z.string().trim().min(1).max(20_000),
+  dialogue: z.string().max(10_000).optional(),
+  assetLabel: z.string().trim().min(1).max(200).optional()
+});
+
+export const MediaTemplateSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  templateType: MediaTemplateTypeSchema,
+  description: z.string().trim().max(2_000),
+  defaultDurationSeconds: z.number().int().min(1).max(24 * 60 * 60),
+  aspectRatio: MediaAspectRatioSchema,
+  sceneStructure: z.array(MediaTemplateSceneSchema).min(1).max(50),
+  promptRules: z.string().trim().max(10_000),
+  captionStyle: z.record(z.string(), z.unknown()),
+  audioSettings: z.record(z.string(), z.unknown()),
+  brandRules: z.record(z.string(), z.unknown())
+});
+
+export const CreateProjectFromTemplateSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  description: z.string().trim().max(2_000).optional()
+});
+
+export const ApplyMediaTemplateSchema = z.object({
+  approved: z.boolean(),
+  replaceAssets: z.boolean().optional()
+});
+
 export const ReorderMediaScenesSchema = z.object({
   sceneIds: z.array(z.string().min(1)).min(1).max(200)
 });
@@ -211,6 +243,10 @@ export type UpdateMediaAudioSettings = z.infer<typeof UpdateMediaAudioSettingsSc
 export type MediaBrandKitInput = z.infer<typeof MediaBrandKitSchema>;
 export type MediaPresenterProfileInput = z.infer<typeof MediaPresenterProfileSchema>;
 export type SelectMediaDefaults = z.infer<typeof SelectMediaDefaultsSchema>;
+export type MediaTemplateType = z.infer<typeof MediaTemplateTypeSchema>;
+export type MediaTemplateInput = z.infer<typeof MediaTemplateSchema>;
+export type CreateProjectFromTemplate = z.infer<typeof CreateProjectFromTemplateSchema>;
+export type ApplyMediaTemplate = z.infer<typeof ApplyMediaTemplateSchema>;
 export type ReorderMediaScenes = z.infer<typeof ReorderMediaScenesSchema>;
 export type RenderMediaDraft = z.infer<typeof RenderMediaDraftSchema>;
 export type GenerateWanScene = z.infer<typeof GenerateWanSceneSchema>;

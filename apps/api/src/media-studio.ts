@@ -11,6 +11,7 @@ export type MediaBriefStatus = "DRAFT" | "APPROVED";
 export type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READY" | "REJECTED";
 export type MediaAudioRole = "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO";
 export type MediaLibraryAssetOwner = "brand" | "presenter";
+export type MediaTemplateType = "PROMO" | "PRESENTER" | "EXPLAINER" | "INVESTOR_PITCH" | "REEL" | "YOUTUBE";
 
 export type MediaAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
 
@@ -152,6 +153,39 @@ export type MediaPresenterProfile = {
   deletedAt: string | null;
 };
 
+export type MediaProjectTemplate = {
+  id: string;
+  name: string;
+  templateType: MediaTemplateType;
+  description: string;
+  defaultDurationSeconds: number;
+  aspectRatio: string;
+  sceneStructureJson: string;
+  promptRules: string;
+  captionStyleJson: string;
+  audioSettingsJson: string;
+  brandRulesJson: string;
+  isBuiltin: 0 | 1;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaTemplateInput = {
+  name: string;
+  templateType: MediaTemplateType;
+  description: string;
+  defaultDurationSeconds: number;
+  aspectRatio: string;
+  sceneStructure: TemplateScene[];
+  promptRules: string;
+  captionStyle: Record<string, unknown>;
+  audioSettings: Record<string, unknown>;
+  brandRules: Record<string, unknown>;
+};
+
+type TemplateScene = { title: string; durationSeconds: number; prompt: string; dialogue?: string; assetLabel?: string };
+
 export const mediaProviderRegistry = [
   { key: "google-flow", name: "Google Flow", capabilities: ["storyboard", "video-generation"], status: "stubbed" },
   { key: "wan-2.2", name: "Wan 2.2", capabilities: ["text-to-video", "image-to-video"], status: "stubbed" },
@@ -206,6 +240,76 @@ export function updateMediaProject(db: Database.Database, projectId: string, inp
     .run(input.name ?? existing.name, input.description ?? existing.description, input.now, projectId);
   audit("MEDIA_PROJECT_UPDATED", `Media project ${input.name ?? existing.name} updated`, { projectId, payload: { name: input.name, description: input.description } });
   return getMediaProjectOrThrow(db, projectId);
+}
+
+export function listMediaTemplates(db: Database.Database, includeArchived = false): MediaProjectTemplate[] {
+  const where = includeArchived ? "" : "WHERE archived_at IS NULL";
+  return db.prepare(`SELECT id,name,template_type AS templateType,description,default_duration_seconds AS defaultDurationSeconds,aspect_ratio AS aspectRatio,scene_structure_json AS sceneStructureJson,prompt_rules AS promptRules,caption_style_json AS captionStyleJson,audio_settings_json AS audioSettingsJson,brand_rules_json AS brandRulesJson,is_builtin AS isBuiltin,archived_at AS archivedAt,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_project_templates ${where} ORDER BY is_builtin DESC, created_at`).all() as MediaProjectTemplate[];
+}
+
+export function createMediaTemplate(db: Database.Database, input: MediaTemplateInput & { id: string; now: string }, audit: MediaAuditWriter): MediaProjectTemplate {
+  db.prepare(`INSERT INTO media_project_templates (id,name,template_type,description,default_duration_seconds,aspect_ratio,scene_structure_json,prompt_rules,caption_style_json,audio_settings_json,brand_rules_json,is_builtin,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, input.name, input.templateType, input.description, input.defaultDurationSeconds, input.aspectRatio, JSON.stringify(input.sceneStructure), input.promptRules, JSON.stringify(input.captionStyle), JSON.stringify(input.audioSettings), JSON.stringify(input.brandRules), 0, input.now, input.now);
+  audit("MEDIA_TEMPLATE_CREATED", `Template ${input.name} created`, { payload: { templateId: input.id, templateType: input.templateType } });
+  return getMediaTemplateOrThrow(db, input.id);
+}
+
+export function updateMediaTemplate(db: Database.Database, templateId: string, input: MediaTemplateInput & { now: string }, audit: MediaAuditWriter): MediaProjectTemplate {
+  const existing = getMediaTemplateOrThrow(db, templateId);
+  if (existing.archivedAt) throw new MediaStudioError("Archived templates cannot be edited", 409);
+  db.prepare(`UPDATE media_project_templates SET name=?,template_type=?,description=?,default_duration_seconds=?,aspect_ratio=?,scene_structure_json=?,prompt_rules=?,caption_style_json=?,audio_settings_json=?,brand_rules_json=?,updated_at=? WHERE id=?`)
+    .run(input.name, input.templateType, input.description, input.defaultDurationSeconds, input.aspectRatio, JSON.stringify(input.sceneStructure), input.promptRules, JSON.stringify(input.captionStyle), JSON.stringify(input.audioSettings), JSON.stringify(input.brandRules), input.now, templateId);
+  audit("MEDIA_TEMPLATE_UPDATED", `Template ${input.name} updated`, { payload: { templateId, templateType: input.templateType } });
+  return getMediaTemplateOrThrow(db, templateId);
+}
+
+export function duplicateMediaTemplate(db: Database.Database, templateId: string, input: { id: string; now: string; name?: string }, audit: MediaAuditWriter): MediaProjectTemplate {
+  const existing = getMediaTemplateOrThrow(db, templateId);
+  const name = input.name ?? `${existing.name} Copy`;
+  db.prepare(`INSERT INTO media_project_templates (id,name,template_type,description,default_duration_seconds,aspect_ratio,scene_structure_json,prompt_rules,caption_style_json,audio_settings_json,brand_rules_json,is_builtin,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, name, existing.templateType, existing.description, existing.defaultDurationSeconds, existing.aspectRatio, existing.sceneStructureJson, existing.promptRules, existing.captionStyleJson, existing.audioSettingsJson, existing.brandRulesJson, 0, input.now, input.now);
+  audit("MEDIA_TEMPLATE_DUPLICATED", `Template ${existing.name} duplicated`, { payload: { sourceTemplateId: templateId, templateId: input.id } });
+  return getMediaTemplateOrThrow(db, input.id);
+}
+
+export function archiveMediaTemplate(db: Database.Database, templateId: string, timestamp: string, audit: MediaAuditWriter): MediaProjectTemplate {
+  const existing = getMediaTemplateOrThrow(db, templateId);
+  if (existing.archivedAt) return existing;
+  db.prepare("UPDATE media_project_templates SET archived_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, templateId);
+  audit("MEDIA_TEMPLATE_ARCHIVED", `Template ${existing.name} archived`, { payload: { templateId } });
+  return getMediaTemplateOrThrow(db, templateId);
+}
+
+export function previewMediaTemplate(db: Database.Database, templateId: string) {
+  const template = getMediaTemplateOrThrow(db, templateId);
+  return {
+    template,
+    structure: parseTemplateScenes(template.sceneStructureJson),
+    captionStyle: parseMetadata(template.captionStyleJson),
+    audioSettings: parseMetadata(template.audioSettingsJson),
+    brandRules: parseMetadata(template.brandRulesJson)
+  };
+}
+
+export function createMediaProjectFromTemplate(db: Database.Database, templateId: string, input: { id: string; name: string; description?: string; now: string }, audit: MediaAuditWriter): MediaProject {
+  const template = getMediaTemplateOrThrow(db, templateId);
+  if (template.archivedAt) throw new MediaStudioError("Archived templates cannot create projects", 409);
+  const project = createMediaProject(db, { id: input.id, name: input.name, description: input.description ?? template.description, now: input.now }, audit);
+  applyTemplateStructure(db, project.id, template, { now: input.now, replaceAssets: true, createId: createDeterministicIdFactory(`${input.id}-template`) });
+  audit("MEDIA_PROJECT_CREATED_FROM_TEMPLATE", `Media project ${input.name} created from ${template.name}`, { projectId: project.id, payload: { templateId } });
+  return getMediaProjectOrThrow(db, project.id);
+}
+
+export function applyMediaTemplateToProject(db: Database.Database, projectId: string, templateId: string, input: { approved: boolean; replaceAssets?: boolean; now: string; createId: IdFactory }, audit: MediaAuditWriter) {
+  if (!input.approved) throw new MediaStudioError("Applying a media template requires approval", 403);
+  getActiveMediaProjectOrThrow(db, projectId);
+  const template = getMediaTemplateOrThrow(db, templateId);
+  if (template.archivedAt) throw new MediaStudioError("Archived templates cannot be applied", 409);
+  const result = applyTemplateStructure(db, projectId, template, { now: input.now, replaceAssets: Boolean(input.replaceAssets), createId: input.createId });
+  audit("MEDIA_TEMPLATE_APPLIED", `Template ${template.name} applied`, { projectId, payload: { templateId, replaceAssets: Boolean(input.replaceAssets), sceneCount: result.scenes.length } });
+  auditPromptContextChanged(db, projectId, input.now, audit);
+  return getMediaProjectBundle(db, projectId);
 }
 
 export function createBrandKit(db: Database.Database, projectId: string, input: {
@@ -826,6 +930,91 @@ function listBrandKits(db: Database.Database, projectId: string): MediaBrandKit[
 function listPresenterProfiles(db: Database.Database, projectId: string): MediaPresenterProfile[] {
   return db.prepare(`SELECT id,media_project_id AS mediaProjectId,name,appearance_prompt AS appearancePrompt,voice_accent AS voiceAccent,clothing,consistency_rules AS consistencyRules,created_at AS createdAt,updated_at AS updatedAt,deleted_at AS deletedAt
     FROM media_presenter_profiles WHERE media_project_id=? AND deleted_at IS NULL ORDER BY created_at`).all(projectId) as MediaPresenterProfile[];
+}
+
+function getMediaTemplateOrThrow(db: Database.Database, templateId: string): MediaProjectTemplate {
+  const template = db.prepare(`SELECT id,name,template_type AS templateType,description,default_duration_seconds AS defaultDurationSeconds,aspect_ratio AS aspectRatio,scene_structure_json AS sceneStructureJson,prompt_rules AS promptRules,caption_style_json AS captionStyleJson,audio_settings_json AS audioSettingsJson,brand_rules_json AS brandRulesJson,is_builtin AS isBuiltin,archived_at AS archivedAt,created_at AS createdAt,updated_at AS updatedAt
+    FROM media_project_templates WHERE id=?`).get(templateId) as MediaProjectTemplate | undefined;
+  if (!template) throw new MediaStudioError("Media template not found", 404);
+  return template;
+}
+
+function applyTemplateStructure(db: Database.Database, projectId: string, template: MediaProjectTemplate, options: { now: string; replaceAssets: boolean; createId: IdFactory }) {
+  const scenes = parseTemplateScenes(template.sceneStructureJson);
+  if (!scenes.length) throw new MediaStudioError("Template must contain at least one scene", 400);
+  db.prepare("UPDATE media_projects SET aspect_ratio=?,updated_at=? WHERE id=?").run(template.aspectRatio, options.now, projectId);
+  const briefId = ensureTemplateBrief(db, projectId, template, scenes, options);
+  const existingScenes = listMediaScenes(db, projectId);
+  for (const [index, templateScene] of scenes.entries()) {
+    const existing = existingScenes[index];
+    if (existing) {
+      if (options.replaceAssets) db.prepare("DELETE FROM media_assets WHERE scene_id=? AND media_project_id=?").run(existing.id, projectId);
+      db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
+        .run(templateScene.title, templateScene.prompt, templateScene.durationSeconds, templateScene.dialogue ?? "", buildTemplateVisualPrompt(template, templateScene), template.aspectRatio, options.now, existing.id, projectId);
+      if (options.replaceAssets) insertTemplateReferenceAsset(db, projectId, existing.id, templateScene, options);
+    } else {
+      const sceneId = options.createId();
+      db.prepare(`INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, templateScene.title, templateScene.prompt, templateScene.durationSeconds, templateScene.dialogue ?? "", buildTemplateVisualPrompt(template, templateScene), template.aspectRatio, "DRAFT", options.now, options.now);
+      insertTemplateReferenceAsset(db, projectId, sceneId, templateScene, options);
+    }
+  }
+  const extraScenes = existingScenes.slice(scenes.length);
+  for (const scene of extraScenes) {
+    if (options.replaceAssets) db.prepare("DELETE FROM media_assets WHERE scene_id=? AND media_project_id=?").run(scene.id, projectId);
+    else db.prepare("UPDATE media_assets SET scene_id=NULL,updated_at=? WHERE scene_id=? AND media_project_id=?").run(options.now, scene.id, projectId);
+    db.prepare("DELETE FROM media_scenes WHERE id=? AND media_project_id=?").run(scene.id, projectId);
+  }
+  return { brief: getMediaBrief(db, projectId), scenes: listMediaScenes(db, projectId) };
+}
+
+function ensureTemplateBrief(db: Database.Database, projectId: string, template: MediaProjectTemplate, scenes: TemplateScene[], options: { now: string; createId: IdFactory }) {
+  const existing = getMediaBrief(db, projectId);
+  const briefId = existing?.id ?? options.createId();
+  const constraints = [
+    `Template: ${template.name}`,
+    `Type: ${template.templateType}`,
+    template.promptRules,
+    `Caption style: ${template.captionStyleJson}`,
+    `Audio settings: ${template.audioSettingsJson}`,
+    `Brand/disclaimer rules: ${template.brandRulesJson}`
+  ].filter(Boolean);
+  if (existing) {
+    db.prepare(`UPDATE media_video_briefs SET title=?,logline=?,audience=?,style=?,duration_seconds=?,constraints_json=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
+      .run(template.name, template.description || `${template.templateType} template`, "Template-defined audience", template.templateType, template.defaultDurationSeconds, JSON.stringify(constraints), options.now, briefId, projectId);
+  } else {
+    db.prepare(`INSERT INTO media_video_briefs (id,media_project_id,title,logline,audience,style,duration_seconds,constraints_json,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(briefId, projectId, template.name, template.description || `${template.templateType} template`, "Template-defined audience", template.templateType, template.defaultDurationSeconds, JSON.stringify(constraints), "DRAFT", options.now, options.now);
+  }
+  return briefId;
+}
+
+function insertTemplateReferenceAsset(db: Database.Database, projectId: string, sceneId: string, scene: TemplateScene, options: { now: string; createId: IdFactory }) {
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,metadata_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(options.createId(), projectId, sceneId, "reference", scene.assetLabel ?? `${scene.title} reference`, "template-derived", "PLANNED", JSON.stringify({ templateSceneTitle: scene.title }), options.now, options.now);
+}
+
+function buildTemplateVisualPrompt(template: MediaProjectTemplate, scene: TemplateScene) {
+  return [scene.prompt, template.promptRules ? `Template prompt rules: ${template.promptRules}` : ""].filter(Boolean).join("\n\n");
+}
+
+function parseTemplateScenes(value: string): TemplateScene[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is TemplateScene => {
+      if (typeof item !== "object" || item === null) return false;
+      const scene = item as Record<string, unknown>;
+      return typeof scene.title === "string" && typeof scene.prompt === "string" && typeof scene.durationSeconds === "number";
+    });
+  } catch {
+    return [];
+  }
+}
+
+function createDeterministicIdFactory(prefix: string): IdFactory {
+  let counter = 0;
+  return () => `${prefix}-${++counter}`;
 }
 
 function listGenerationJobs(db: Database.Database, projectId: string): MediaGenerationJob[] {

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createBrandKit, createMediaProject, createPresenterProfile, deleteLibraryAsset, deleteSceneAsset, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateBrandKit, updateMediaScene, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset, type VideoDirectorProvider } from "./media-studio.js";
+import { addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteLibraryAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateMediaBrief, updateBrandKit, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset, type VideoDirectorProvider } from "./media-studio.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
@@ -106,6 +106,23 @@ function dbFixture() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       deleted_at TEXT
+    );
+    CREATE TABLE media_project_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      template_type TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      default_duration_seconds INTEGER NOT NULL,
+      aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+      scene_structure_json TEXT NOT NULL,
+      prompt_rules TEXT NOT NULL DEFAULT '',
+      caption_style_json TEXT NOT NULL DEFAULT '{}',
+      audio_settings_json TEXT NOT NULL DEFAULT '{}',
+      brand_rules_json TEXT NOT NULL DEFAULT '{}',
+      is_builtin INTEGER NOT NULL DEFAULT 0,
+      archived_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
     CREATE TABLE media_generation_jobs (
       id TEXT PRIMARY KEY,
@@ -721,6 +738,95 @@ describe("media studio", () => {
       const updatedPresenter = updatePresenterProfile(db, "media-1", presenter.id, { name: "Lead Host", appearancePrompt: "Camera-ready host", voiceAccent: "Neutral", clothing: "Black shirt", consistencyRules: "Match reference", now: "presenter-update" }, audit(db));
       assert.equal(updatedBrand.name, "S4 Studio");
       assert.equal(updatedPresenter.name, "Lead Host");
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("creates, edits, duplicates, previews, and archives media templates", () => {
+    const db = dbFixture();
+    const template = createMediaTemplate(db, {
+      id: "template-1",
+      name: "Promo",
+      templateType: "PROMO",
+      description: "Short promo",
+      defaultDurationSeconds: 20,
+      aspectRatio: "16:9",
+      sceneStructure: [{ title: "Hook", durationSeconds: 5, prompt: "Open strong", dialogue: "Start here", assetLabel: "Hook ref" }],
+      promptRules: "Use crisp visual language",
+      captionStyle: { placement: "bottom" },
+      audioSettings: { musicVolume: 0.25 },
+      brandRules: { requireLogo: true },
+      now: "template-time"
+    }, audit(db));
+    const updated = updateMediaTemplate(db, "template-1", {
+      name: "Promo Updated",
+      templateType: "REEL",
+      description: "Short reel",
+      defaultDurationSeconds: 18,
+      aspectRatio: "9:16",
+      sceneStructure: [{ title: "Beat", durationSeconds: 6, prompt: "Vertical beat" }],
+      promptRules: "Move quickly",
+      captionStyle: { placement: "center" },
+      audioSettings: { musicVolume: 0.2 },
+      brandRules: { disclaimerMode: "optional" },
+      now: "update-time"
+    }, audit(db));
+    const copy = duplicateMediaTemplate(db, "template-1", { id: "template-2", now: "copy-time" }, audit(db));
+    const preview = previewMediaTemplate(db, "template-1");
+    const archived = archiveMediaTemplate(db, "template-2", "archive-time", audit(db));
+
+    assert.equal(template.name, "Promo");
+    assert.equal(updated.templateType, "REEL");
+    assert.equal(copy.name, "Promo Updated Copy");
+    assert.equal(preview.structure[0]?.title, "Beat");
+    assert.equal(preview.captionStyle.placement, "center");
+    assert.equal(archived.archivedAt, "archive-time");
+    assert.equal(listMediaTemplates(db).some((item) => item.id === "template-2"), false);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_TEMPLATE_DUPLICATED'").get() as { count: number }).count, 1);
+  });
+
+  it("creates projects from templates and applies templates only with approval while preserving assets", async () => {
+    const db = dbFixture();
+    const storageRoot = await tempStorage();
+    try {
+      const template = createMediaTemplate(db, {
+        id: "template-1",
+        name: "Explainer",
+        templateType: "EXPLAINER",
+        description: "Explain the idea",
+        defaultDurationSeconds: 30,
+        aspectRatio: "16:9",
+        sceneStructure: [
+          { title: "Intro", durationSeconds: 10, prompt: "Introduce the topic", dialogue: "Here is the setup", assetLabel: "Intro ref" },
+          { title: "Detail", durationSeconds: 20, prompt: "Explain the mechanics", dialogue: "Here is the detail", assetLabel: "Detail ref" }
+        ],
+        promptRules: "Keep it neutral",
+        captionStyle: { placement: "lower-third" },
+        audioSettings: { narrationVolume: 1 },
+        brandRules: { requireDisclaimer: true },
+        now: "template-time"
+      }, audit(db));
+
+      const created = createMediaProjectFromTemplate(db, template.id, { id: "media-template", name: "From Template", now: "created" }, audit(db));
+      assert.equal(created.aspectRatio, "16:9");
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_scenes WHERE media_project_id='media-template'").get() as { count: number }).count, 2);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROJECT_CREATED_FROM_TEMPLATE'").get() as { count: number }).count, 1);
+
+      createMediaProject(db, { id: "media-1", name: "Existing", now: "project" }, audit(db));
+      const bundle = await addDirectorChatMessage(db, { projectId: "media-1", message: "Make a video", now: "chat", createId: idFactory("chat") }, audit(db));
+      const firstScene = bundle.scenes[0]?.id as string;
+      const asset = await uploadSceneAsset(db, "media-1", firstScene, { id: "asset-keep", originalName: "keep.png", mimeType: "image/png", bytes: Buffer.from("keep"), now: "asset", storageRoot }, audit(db));
+
+      assert.throws(() => applyMediaTemplateToProject(db, "media-1", template.id, { approved: false, now: "apply", createId: idFactory("apply") }, audit(db)), /requires approval/);
+      const applied = applyMediaTemplateToProject(db, "media-1", template.id, { approved: true, replaceAssets: false, now: "apply", createId: idFactory("apply") }, audit(db));
+      const keptAsset = db.prepare("SELECT scene_id AS sceneId FROM media_assets WHERE id='asset-keep'").get() as { sceneId: string | null };
+      assert.equal(applied.scenes.length, 2);
+      assert.equal(keptAsset.sceneId, firstScene);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_TEMPLATE_APPLIED'").get() as { count: number }).count, 1);
+
+      applyMediaTemplateToProject(db, "media-1", template.id, { approved: true, replaceAssets: true, now: "replace", createId: idFactory("replace") }, audit(db));
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_assets WHERE id='asset-keep'").get() as { count: number }).count, 0);
     } finally {
       await fs.rm(storageRoot, { recursive: true, force: true });
     }

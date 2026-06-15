@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenderMediaDraftSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -16,7 +16,7 @@ import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./p
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, approveMediaBrief, approveMediaScene, archiveMediaProject, createBrandKit, createMediaProject, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteSceneAsset, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, mediaAssetMaxBytes, mediaProviderRegistry, rejectMediaScene, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectMediaScene, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo } from "./media-rendering.js";
 import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, deleteComfyWorkflow, generateWanForScene, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, retryComfyGeneration, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
@@ -101,6 +101,59 @@ app.get("/api/media/projects", async (request: any) => ({
   projects: listMediaProjects(db, request.query?.includeArchived === "true")
 }));
 
+app.get("/api/media/templates", async (request: any) => ({
+  templates: listMediaTemplates(db, request.query?.includeArchived === "true")
+}));
+
+app.post("/api/media/templates", async (request: any, reply) => {
+  const parsed = MediaTemplateSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media template", details: parsed.error.flatten() });
+  try {
+    return reply.status(201).send({ template: createMediaTemplate(db, { id: nanoid(), ...parsed.data, now: now() }, audit) });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create media template" });
+  }
+});
+
+app.put("/api/media/templates/:templateId", async (request: any, reply) => {
+  const parsed = MediaTemplateSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid media template", details: parsed.error.flatten() });
+  try {
+    return { template: updateMediaTemplate(db, request.params.templateId, { ...parsed.data, now: now() }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to update media template" });
+  }
+});
+
+app.post("/api/media/templates/:templateId/duplicate", async (request: any, reply) => {
+  try {
+    return reply.status(201).send({ template: duplicateMediaTemplate(db, request.params.templateId, { id: nanoid(), now: now(), name: typeof request.body?.name === "string" ? request.body.name : undefined }, audit) });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to duplicate media template" });
+  }
+});
+
+app.delete("/api/media/templates/:templateId", async (request: any, reply) => {
+  try {
+    return { template: archiveMediaTemplate(db, request.params.templateId, now(), audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to archive media template" });
+  }
+});
+
+app.get("/api/media/templates/:templateId/preview", async (request: any, reply) => {
+  try {
+    return previewMediaTemplate(db, request.params.templateId);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to preview media template" });
+  }
+});
+
 app.post("/api/media/projects", async (request, reply) => {
   const parsed = CreateMediaProjectSchema.safeParse(request.body);
   if (!parsed.success) return reply.status(400).send({ error: "Invalid media project", details: parsed.error.flatten() });
@@ -110,6 +163,18 @@ app.post("/api/media/projects", async (request, reply) => {
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to create media project" });
+  }
+});
+
+app.post("/api/media/templates/:templateId/projects", async (request: any, reply) => {
+  const parsed = CreateProjectFromTemplateSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid template project", details: parsed.error.flatten() });
+  try {
+    const project = createMediaProjectFromTemplate(db, request.params.templateId, { id: nanoid(), ...parsed.data, now: now() }, audit);
+    return reply.status(201).send({ project });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create media project from template" });
   }
 });
 
@@ -192,6 +257,17 @@ app.patch("/api/media/projects/:projectId", async (request: any, reply) => {
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to update media project" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/templates/:templateId/apply", async (request: any, reply) => {
+  const parsed = ApplyMediaTemplateSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid template application", details: parsed.error.flatten() });
+  try {
+    return applyMediaTemplateToProject(db, request.params.projectId, request.params.templateId, { ...parsed.data, now: now(), createId: nanoid }, audit);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to apply media template" });
   }
 });
 
