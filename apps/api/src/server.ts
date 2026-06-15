@@ -23,6 +23,7 @@ import { activateComfyWorkflow, cancelComfyGeneration, comfyStatusResponse, dele
 import { cancelFlowJob, fallbackFlowJobToWan, getFlowPackage, getMediaProviderCapabilities, importFlowGeneratedAsset, markFlowGenerated, rejectFlowJob, retryFlowJob, routeMediaGeneration, selectMediaProviders } from "./media-provider-router.js";
 import { cancelLongCatGeneration, loadLongCatConfig, longCatStatusResponse, retryLongCatGeneration, testLongCatConnection } from "./longcat-provider.js";
 import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
+import { cancelExternalGeneration, externalProviderStatusResponse, loadLtxConfig, loadOviConfig, retryExternalGeneration, testExternalProviderConnection } from "./ovi-ltx-provider.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -73,7 +74,7 @@ app.post("/api/media/director/test", async () => {
 });
 
 app.get("/api/media/provider-router", async (request: any) => {
-  const capabilities = getMediaProviderCapabilities(loadComfyConfig(), loadLongCatConfig());
+  const capabilities = getMediaProviderCapabilities(loadComfyConfig(), loadLongCatConfig(), loadOviConfig(), loadLtxConfig());
   return {
     capabilities,
     decision: request.query?.task ? selectMediaProviders(request.query.task, capabilities) : null
@@ -89,6 +90,14 @@ app.post("/api/media/comfyui/test", async () => testComfyConnection(loadComfyCon
 app.get("/api/media/longcat/status", async () => longCatStatusResponse(loadLongCatConfig()));
 
 app.post("/api/media/longcat/test", async () => testLongCatConnection(loadLongCatConfig()));
+
+app.get("/api/media/ovi/status", async () => externalProviderStatusResponse(loadOviConfig()));
+
+app.post("/api/media/ovi/test", async () => testExternalProviderConnection("ovi", loadOviConfig()));
+
+app.get("/api/media/ltx/status", async () => externalProviderStatusResponse(loadLtxConfig()));
+
+app.post("/api/media/ltx/test", async () => testExternalProviderConnection("ltx", loadLtxConfig()));
 
 app.get("/api/media/comfyui/workflows", async () => ({
   templates: {
@@ -495,7 +504,9 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
       maxAttempts: parsed.data.maxAttempts,
       fps: parsed.data.fps,
       seed: parsed.data.seed,
-      longCatConfig: loadLongCatConfig()
+      longCatConfig: loadLongCatConfig(),
+      oviConfig: loadOviConfig(),
+      ltxConfig: loadLtxConfig()
     }, audit);
     return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
   } catch (error) {
@@ -808,6 +819,8 @@ app.post("/api/media/projects/:projectId/generation-jobs/:jobId/cancel", async (
     const job = db.prepare("SELECT provider_key AS providerKey FROM media_generation_jobs WHERE id=? AND media_project_id=?").get(request.params.jobId, request.params.projectId) as { providerKey: string } | undefined;
     if (job?.providerKey === "google-flow") return { job: cancelFlowJob(db, request.params.projectId, request.params.jobId, now(), audit) };
     if (job?.providerKey === "longcat-avatar") return { job: await cancelLongCatGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
+    if (job?.providerKey === "ovi") return { job: await cancelExternalGeneration(db, request.params.projectId, request.params.jobId, "ovi", now(), audit, loadOviConfig()) };
+    if (job?.providerKey === "ltx") return { job: await cancelExternalGeneration(db, request.params.projectId, request.params.jobId, "ltx", now(), audit, loadLtxConfig()) };
     return { job: await cancelComfyGeneration(db, request.params.projectId, request.params.jobId, now(), audit) };
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
@@ -830,6 +843,16 @@ app.post("/api/media/projects/:projectId/generation-jobs/:jobId/retry", async (r
         outputAssetId: nanoid(),
         now: now(),
         approved: parsed.data.approved
+      }, audit);
+      return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
+    }
+    if (existing?.providerKey === "ovi" || existing?.providerKey === "ltx") {
+      const result = await retryExternalGeneration(db, request.params.projectId, request.params.jobId, {
+        jobId: nanoid(),
+        outputAssetId: nanoid(),
+        now: now(),
+        approved: parsed.data.approved,
+        config: existing.providerKey === "ovi" ? loadOviConfig() : loadLtxConfig()
       }, audit);
       return reply.status(201).send({ ...result, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
     }

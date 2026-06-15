@@ -5,11 +5,12 @@ import path from "node:path";
 import { MediaStudioError, getSceneProviderPrompt, type MediaAuditWriter } from "./media-studio.js";
 import { generateWanForScene, loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
 import { generateLongCatPresenter, loadLongCatConfig, type LongCatConfig, type LongCatHttp } from "./longcat-provider.js";
+import { generateExternalMedia, loadLtxConfig, loadOviConfig, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
 
 export type MediaProviderTask = "T2V" | "I2V" | "PRESENTER" | "AUDIO_VIDEO";
 export type ProviderKey = "google-flow" | "wan-2.2" | "longcat-avatar" | "ovi" | "ltx";
-export type ProviderExecutionMode = "COMFYUI" | "LONGCAT" | "HUMAN_ASSISTED" | "DISABLED";
+export type ProviderExecutionMode = "COMFYUI" | "LONGCAT" | "HTTP" | "HUMAN_ASSISTED" | "DISABLED";
 
 export type ProviderCapability = {
   key: ProviderKey;
@@ -38,6 +39,10 @@ type RouterAdapter = (input: {
   fetchImpl?: ComfyHttp;
   longCatConfig?: LongCatConfig;
   longCatFetchImpl?: LongCatHttp;
+  oviConfig?: ExternalMediaConfig;
+  oviFetchImpl?: ExternalMediaHttp;
+  ltxConfig?: ExternalMediaConfig;
+  ltxFetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
   audit: MediaAuditWriter;
@@ -57,13 +62,17 @@ export type ProviderRouterOptions = {
   fetchImpl?: ComfyHttp;
   longCatConfig?: LongCatConfig;
   longCatFetchImpl?: LongCatHttp;
+  oviConfig?: ExternalMediaConfig;
+  oviFetchImpl?: ExternalMediaHttp;
+  ltxConfig?: ExternalMediaConfig;
+  ltxFetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
   processOptions?: Partial<MediaProcessingOptions>;
   capabilities?: ProviderCapability[];
   adapters?: Partial<Record<ProviderKey, RouterAdapter>>;
 };
 
-export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConfig(), longCatConfig: LongCatConfig = loadLongCatConfig()): ProviderCapability[] {
+export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConfig(), longCatConfig: LongCatConfig = loadLongCatConfig(), oviConfig: ExternalMediaConfig = loadOviConfig(), ltxConfig: ExternalMediaConfig = loadLtxConfig()): ProviderCapability[] {
   return [
     {
       key: "wan-2.2",
@@ -101,24 +110,24 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
     {
       key: "ovi",
       name: "Ovi",
-      supports: ["T2V"],
-      enabled: false,
-      healthy: false,
-      priority: 70,
-      paid: true,
-      mode: "DISABLED",
-      reason: "Ovi adapter is disabled"
+      supports: ["AUDIO_VIDEO", "T2V"],
+      enabled: oviConfig.enabled,
+      healthy: oviConfig.enabled,
+      priority: 30,
+      paid: false,
+      mode: oviConfig.enabled ? "HTTP" : "DISABLED",
+      reason: oviConfig.enabled ? "Ovi adapter is enabled" : "Ovi adapter is disabled"
     },
     {
       key: "ltx",
       name: "LTX",
-      supports: ["T2V", "I2V", "AUDIO_VIDEO"],
-      enabled: false,
-      healthy: false,
-      priority: 80,
+      supports: ["T2V", "I2V"],
+      enabled: ltxConfig.enabled,
+      healthy: ltxConfig.enabled,
+      priority: 40,
       paid: true,
-      mode: "DISABLED",
-      reason: "LTX adapter is disabled"
+      mode: ltxConfig.enabled ? "HTTP" : "DISABLED",
+      reason: ltxConfig.enabled ? "LTX adapter is enabled; paid-provider approval required" : "LTX adapter is disabled"
     }
   ];
 }
@@ -142,7 +151,7 @@ export function selectMediaProviders(task: MediaProviderTask, capabilities: Prov
 
 export async function routeMediaGeneration(db: Database.Database, projectId: string, sceneId: string, options: ProviderRouterOptions, audit: MediaAuditWriter) {
   if (!options.approved) throw new MediaStudioError("Media provider routing requires explicit approval", 403);
-  const capabilities = options.capabilities ?? getMediaProviderCapabilities(options.config, options.longCatConfig);
+  const capabilities = options.capabilities ?? getMediaProviderCapabilities(options.config, options.longCatConfig, options.oviConfig, options.ltxConfig);
   const candidates = capabilities.filter((provider) => provider.supports.includes(options.task)).sort((a, b) => a.priority - b.priority);
   const maxAttempts = options.maxAttempts ?? 2;
   const attempted: Array<{ providerKey: ProviderKey; status: "SKIPPED" | "FAILED" | "SELECTED" | "HUMAN_ASSISTED"; reason: string }> = [];
@@ -176,7 +185,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
     }
     const adapter = options.adapters?.[provider.key] ?? defaultAdapter(provider.key);
     try {
-      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, audit });
+      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, oviConfig: options.oviConfig, oviFetchImpl: options.oviFetchImpl, ltxConfig: options.ltxConfig, ltxFetchImpl: options.ltxFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, audit });
       attempted.push({ providerKey: provider.key, status: "SELECTED", reason: provider.reason });
       persistRouting(db, options.jobId, { selectedProvider: provider.key, reason: provider.reason, attempted });
       return { ...(isRecord(result) ? result : { result }), routing: { selectedProvider: provider.key, reason: provider.reason, attempted } };
@@ -214,6 +223,34 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       approved,
       config: longCatConfig,
       fetchImpl: longCatFetchImpl,
+      storageRoot,
+      processOptions
+    }, audit);
+  }
+  if (providerKey === "ovi") {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, oviConfig, oviFetchImpl, storageRoot, processOptions, audit }) => generateExternalMedia(db, projectId, sceneId, {
+      providerKey: "ovi",
+      task: task === "AUDIO_VIDEO" ? "AUDIO_VIDEO" : "T2V",
+      jobId,
+      outputAssetId,
+      now,
+      approved,
+      config: oviConfig ?? loadOviConfig(),
+      fetchImpl: oviFetchImpl,
+      storageRoot,
+      processOptions
+    }, audit);
+  }
+  if (providerKey === "ltx") {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, ltxConfig, ltxFetchImpl, storageRoot, processOptions, audit }) => generateExternalMedia(db, projectId, sceneId, {
+      providerKey: "ltx",
+      task: task === "I2V" ? "I2V" : "T2V",
+      jobId,
+      outputAssetId,
+      now,
+      approved,
+      config: ltxConfig ?? loadLtxConfig(),
+      fetchImpl: ltxFetchImpl,
       storageRoot,
       processOptions
     }, audit);

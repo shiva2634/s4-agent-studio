@@ -33,7 +33,12 @@ const audit = (db: Database.Database): MediaAuditWriter => (eventType, summary, 
 };
 
 function capabilities(overrides: Partial<Record<string, Partial<ProviderCapability>>> = {}): ProviderCapability[] {
-  return getMediaProviderCapabilities({ enabled: true, baseUrl: "http://127.0.0.1:8188", timeoutMs: 1_000 }, { enabled: false, baseUrl: "http://127.0.0.1:8291", timeoutMs: 1_000 }).map((provider) => ({
+  return getMediaProviderCapabilities(
+    { enabled: true, baseUrl: "http://127.0.0.1:8188", timeoutMs: 1_000 },
+    { enabled: false, baseUrl: "http://127.0.0.1:8291", timeoutMs: 1_000 },
+    { enabled: false, baseUrl: "http://127.0.0.1:8391", apiKey: "", timeoutMs: 1_000 },
+    { enabled: false, baseUrl: "http://127.0.0.1:8491", apiKey: "", timeoutMs: 1_000 }
+  ).map((provider) => ({
     ...provider,
     ...(overrides[provider.key] ?? {})
   }));
@@ -51,6 +56,9 @@ describe("media provider router", () => {
 
     const presenter = selectMediaProviders("PRESENTER", capabilities({ "longcat-avatar": { enabled: true, healthy: true } }));
     assert.equal(presenter.selected?.key, "longcat-avatar");
+
+    const audioVideo = selectMediaProviders("AUDIO_VIDEO", capabilities({ "ovi": { enabled: true, healthy: true } }));
+    assert.equal(audioVideo.selected?.key, "ovi");
   });
 
   it("routes Wan attempts through the selected adapter and persists routing reason", async () => {
@@ -113,6 +121,41 @@ describe("media provider router", () => {
     }, audit(db)), (error: unknown) => error instanceof MediaStudioError && error.statusCode === 403);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_generation_jobs").get() as { count: number }).count, 0);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_PROVIDER_ROUTE_PAID_APPROVAL_REQUIRED'").get() as { count: number }).count, 1);
+  });
+
+  it("routes AUDIO_VIDEO through Ovi when enabled", async () => {
+    const db = dbFixture();
+    const result = await routeMediaGeneration(db, "media-1", "scene-1", {
+      jobId: "ovi-route",
+      outputAssetId: "ovi-asset",
+      now: "now",
+      task: "AUDIO_VIDEO",
+      approved: true,
+      capabilities: capabilities({ "ovi": { enabled: true, healthy: true } }),
+      adapters: {
+        "ovi": async ({ db, projectId, jobId, now }) => {
+          db.prepare("INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+            .run(jobId, projectId, "ovi", "COMPLETED", "{}", "{}", now, now);
+          return { job: { id: jobId, status: "COMPLETED" } };
+        }
+      }
+    }, audit(db));
+
+    assert.equal(result.routing.selectedProvider, "ovi");
+    assert.equal((db.prepare("SELECT provider_key AS providerKey,status FROM media_generation_jobs WHERE id='ovi-route'").get() as { providerKey: string; status: string }).providerKey, "ovi");
+  });
+
+  it("requires paid-provider approval before LTX fallback can run", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => routeMediaGeneration(db, "media-1", "scene-1", {
+      jobId: "ltx-paid",
+      outputAssetId: "ltx-asset",
+      now: "now",
+      task: "I2V",
+      approved: true,
+      maxAttempts: 3,
+      capabilities: capabilities({ "google-flow": { enabled: false, healthy: false }, "wan-2.2": { enabled: false, healthy: false }, "ltx": { enabled: true, healthy: true } })
+    }, audit(db)), (error: unknown) => error instanceof MediaStudioError && error.statusCode === 403 && /LTX/.test(error.message));
   });
 
   it("audits exhaustion when disabled or unhealthy providers cannot complete", async () => {

@@ -1,0 +1,228 @@
+import assert from "node:assert/strict";
+import Database from "better-sqlite3";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { describe, it } from "node:test";
+import { type MediaAuditWriter, MediaStudioError } from "./media-studio.js";
+import { cancelExternalGeneration, externalProviderStatusResponse, generateExternalMedia, retryExternalGeneration, testExternalProviderConnection, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
+import type { ProcessRunner } from "./media-processing.js";
+
+const oviConfig: ExternalMediaConfig = { enabled: true, baseUrl: "http://token:secret@127.0.0.1:8391", apiKey: "secret-token", timeoutMs: 2_000 };
+const ltxConfig: ExternalMediaConfig = { enabled: true, baseUrl: "http://127.0.0.1:8491", apiKey: "secret-token", timeoutMs: 2_000 };
+
+function dbFixture() {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE media_projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT,aspect_ratio TEXT NOT NULL DEFAULT '16:9',default_brand_kit_id TEXT,default_presenter_profile_id TEXT,status TEXT NOT NULL DEFAULT 'ACTIVE',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_scenes (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,brief_id TEXT NOT NULL,position INTEGER NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,duration_seconds INTEGER NOT NULL,dialogue TEXT NOT NULL DEFAULT '',visual_prompt TEXT NOT NULL DEFAULT '',aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'DRAFT',approved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_assets (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,scene_id TEXT,kind TEXT NOT NULL,label TEXT NOT NULL,source TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'PLANNED',file_name TEXT,original_name TEXT,mime_type TEXT,size_bytes INTEGER,checksum_sha256 TEXT,local_path TEXT,inspection_json TEXT,qc_status TEXT NOT NULL DEFAULT 'PENDING',qc_issues_json TEXT NOT NULL DEFAULT '[]',preview_path TEXT,thumbnail_path TEXT,metadata_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_brand_kits (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,name TEXT NOT NULL,colors_json TEXT NOT NULL DEFAULT '[]',fonts_json TEXT NOT NULL DEFAULT '[]',tagline TEXT NOT NULL DEFAULT '',tone TEXT NOT NULL DEFAULT '',disclaimer TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,deleted_at TEXT);
+    CREATE TABLE media_presenter_profiles (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,name TEXT NOT NULL,appearance_prompt TEXT NOT NULL DEFAULT '',voice_accent TEXT NOT NULL DEFAULT '',clothing TEXT NOT NULL DEFAULT '',consistency_rules TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,deleted_at TEXT);
+    CREATE TABLE media_generation_jobs (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,provider_key TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'STUBBED',request_json TEXT NOT NULL,result_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE media_processing_jobs (id TEXT PRIMARY KEY,media_project_id TEXT NOT NULL,asset_id TEXT NOT NULL,status TEXT NOT NULL,operation TEXT NOT NULL,log_text TEXT NOT NULL DEFAULT '',error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,completed_at TEXT);
+    CREATE TABLE audit_events (id TEXT PRIMARY KEY,project_id TEXT,event_type TEXT NOT NULL,summary TEXT NOT NULL,payload_json TEXT,created_at TEXT NOT NULL);
+  `);
+  db.prepare("INSERT INTO media_projects (id,name,description,aspect_ratio,status,created_at,updated_at) VALUES ('media-1','External','', '16:9','ACTIVE','now','now')").run();
+  db.prepare("INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,approved_at,created_at,updated_at) VALUES ('scene-1','media-1','brief-1',1,'Opening','Desc',5,'Hello world','A launch trailer','16:9','APPROVED','approved','now','now')").run();
+  return db;
+}
+
+async function seedSceneInput(db: Database.Database, storageRoot: string, kind: "image" | "audio") {
+  const sceneRoot = path.join(storageRoot, "media-1", "scene-1");
+  await fs.mkdir(sceneRoot, { recursive: true });
+  const fileName = kind === "image" ? "input.png" : "voice.wav";
+  const localPath = path.join(sceneRoot, fileName);
+  await fs.writeFile(localPath, kind);
+  db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(`${kind}-1`, "media-1", "scene-1", kind, kind, "local-upload", "UPLOADED", fileName, fileName, kind === "image" ? "image/png" : "audio/wav", kind.length, `${kind}-checksum`, localPath, "now", "now");
+}
+
+const audit = (db: Database.Database): MediaAuditWriter => (eventType, summary, values = {}) => {
+  db.prepare("INSERT INTO audit_events (id,project_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?)")
+    .run(crypto.randomUUID(), values.projectId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, "now");
+};
+
+function jsonResponse(value: unknown, status = 200) {
+  return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+}
+
+function mockProviderFetch(calls: string[] = []): ExternalMediaHttp {
+  return async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/health")) return jsonResponse({ ok: true });
+    if (url.endsWith("/jobs")) return jsonResponse({ job_id: "remote-1" });
+    if (url.endsWith("/jobs/remote-1")) return jsonResponse({ status: "completed", output: { filename: "generated.mp4", url: "/jobs/remote-1/output" } });
+    if (url.endsWith("/jobs/remote-1/output")) return new Response(new Uint8Array(Buffer.from("video")), { status: 200 });
+    if (url.endsWith("/jobs/remote-1/cancel")) return jsonResponse({ cancelled: true });
+    return new Response("not found", { status: 404 });
+  };
+}
+
+function failingProviderFetch(): ExternalMediaHttp {
+  return async (input) => {
+    const url = String(input);
+    if (url.endsWith("/jobs")) return jsonResponse({ job_id: "remote-1" });
+    if (url.endsWith("/jobs/remote-1")) return jsonResponse({ status: "failed", error: "Bearer secret-token failed" });
+    return jsonResponse({});
+  };
+}
+
+function processingRunner(storageRoot: string): ProcessRunner {
+  return async (_command, args) => {
+    if (args.includes("-version")) return { stdout: "version", stderr: "", exitCode: 0 };
+    if (args.includes("-show_streams")) {
+      return {
+        stdout: JSON.stringify({
+          streams: [{ codec_type: "video", codec_name: "h264", width: 1920, height: 1080, avg_frame_rate: "24/1" }, { codec_type: "audio", codec_name: "aac" }],
+          format: { duration: "5.0" }
+        }),
+        stderr: "",
+        exitCode: 0
+      };
+    }
+    const output = args[args.length - 1];
+    if (typeof output === "string" && path.resolve(output).startsWith(path.resolve(storageRoot))) {
+      await fs.mkdir(path.dirname(output), { recursive: true });
+      await fs.writeFile(output, "derivative");
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  };
+}
+
+describe("Ovi and LTX media providers", () => {
+  it("returns sanitized status and health test results", async () => {
+    assert.deepEqual(externalProviderStatusResponse(oviConfig), { enabled: true, baseUrlHostname: "127.0.0.1", timeoutMs: 2_000 });
+    const result = await testExternalProviderConnection("ovi", oviConfig, mockProviderFetch());
+    assert.equal(result.status, "ok");
+    assert.equal(JSON.stringify(result).includes("secret"), false);
+  });
+
+  it("generates Ovi T2V output, saves it as a scene asset, and runs QC", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-ovi-"));
+    const calls: string[] = [];
+    try {
+      const result = await generateExternalMedia(db, "media-1", "scene-1", {
+        providerKey: "ovi",
+        task: "T2V",
+        jobId: "ovi-job",
+        outputAssetId: "ovi-asset",
+        now: "now",
+        approved: true,
+        config: oviConfig,
+        fetchImpl: mockProviderFetch(calls),
+        storageRoot,
+        processOptions: { runner: processingRunner(storageRoot) }
+      }, audit(db));
+
+      assert.equal(result.job.status, "COMPLETED");
+      assert.equal((result.asset as { source: string }).source, "ovi");
+      assert.equal((db.prepare("SELECT status FROM media_scenes WHERE id='scene-1'").get() as { status: string }).status, "ASSET_READY");
+      assert.equal((db.prepare("SELECT status FROM media_processing_jobs WHERE asset_id='ovi-asset'").get() as { status: string }).status, "COMPLETED");
+      assert.equal(calls.some((url) => url.endsWith("/jobs")), true);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_OVI_GENERATION_COMPLETED'").get() as { count: number }).count, 1);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses scene image assets for LTX I2V generation", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-ltx-"));
+    try {
+      await seedSceneInput(db, storageRoot, "image");
+      const result = await generateExternalMedia(db, "media-1", "scene-1", {
+        providerKey: "ltx",
+        task: "I2V",
+        jobId: "ltx-job",
+        outputAssetId: "ltx-asset",
+        now: "now",
+        approved: true,
+        config: ltxConfig,
+        fetchImpl: mockProviderFetch(),
+        storageRoot,
+        processOptions: { runner: processingRunner(storageRoot) }
+      }, audit(db));
+
+      assert.equal(result.job.status, "COMPLETED");
+      assert.equal((result.asset as { source: string }).source, "ltx");
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_LTX_GENERATION_COMPLETED'").get() as { count: number }).count, 1);
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("marks provider jobs failed and redacts provider error logs", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ovi",
+      task: "T2V",
+      jobId: "failed-job",
+      outputAssetId: "failed-asset",
+      now: "now",
+      approved: true,
+      config: oviConfig,
+      fetchImpl: failingProviderFetch()
+    }, audit(db)), /Bearer \[redacted\]/);
+
+    const job = db.prepare("SELECT status,result_json AS resultJson FROM media_generation_jobs WHERE id='failed-job'").get() as { status: string; resultJson: string };
+    assert.equal(job.status, "FAILED");
+    assert.equal(job.resultJson.includes("secret-token"), false);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='MEDIA_OVI_GENERATION_FAILED'").get() as { count: number }).count, 1);
+  });
+
+  it("cancels and retries external provider generation jobs", async () => {
+    const db = dbFixture();
+    const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "s4-ovi-"));
+    const calls: string[] = [];
+    try {
+      db.prepare("INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at) VALUES ('old-job','media-1','ovi','RUNNING',?,?, 'now','now')")
+        .run(JSON.stringify({ sceneId: "scene-1", task: "T2V" }), JSON.stringify({ result: { remoteJobId: "remote-1" } }));
+      const cancelled = await cancelExternalGeneration(db, "media-1", "old-job", "ovi", "cancel", audit(db), oviConfig, mockProviderFetch(calls));
+      assert.equal(cancelled.status, "CANCELLED");
+      assert.equal(calls.some((url) => url.endsWith("/jobs/remote-1/cancel")), true);
+
+      const retried = await retryExternalGeneration(db, "media-1", "old-job", {
+        jobId: "retry-job",
+        outputAssetId: "retry-asset",
+        now: "retry",
+        approved: true,
+        config: oviConfig,
+        fetchImpl: mockProviderFetch(),
+        storageRoot,
+        processOptions: { runner: processingRunner(storageRoot) }
+      }, audit(db));
+      assert.equal(retried.job.status, "COMPLETED");
+    } finally {
+      await fs.rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("requires approval and required input assets before creating generation output", async () => {
+    const db = dbFixture();
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ltx",
+      task: "I2V",
+      jobId: "blocked-job",
+      outputAssetId: "blocked-asset",
+      now: "now",
+      approved: false,
+      config: ltxConfig,
+      fetchImpl: mockProviderFetch()
+    }, audit(db)), (error: unknown) => error instanceof MediaStudioError && error.statusCode === 403);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM media_generation_jobs").get() as { count: number }).count, 0);
+
+    await assert.rejects(() => generateExternalMedia(db, "media-1", "scene-1", {
+      providerKey: "ltx",
+      task: "I2V",
+      jobId: "missing-input-job",
+      outputAssetId: "missing-input-asset",
+      now: "now",
+      approved: true,
+      config: ltxConfig,
+      fetchImpl: mockProviderFetch()
+    }, audit(db)), /image asset is required/);
+  });
+});
