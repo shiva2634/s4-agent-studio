@@ -65,6 +65,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<"project" | "agent" | "deregister" | null>(null);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
@@ -108,6 +109,13 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const pending = useMemo(() => approvals.filter(a => a.status === "PENDING"), [approvals]);
   const activeTask = tasks.find(t => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(t.status));
   const selectedProject = projects.find(project => project.id === projectId);
+
+  async function refreshAndReselectProject() {
+    await refresh();
+    setConversationId(undefined);
+    setProposals([]);
+    setExecution(undefined);
+  }
 
   async function sendMessage() {
     const value = input.trim(); if (!value || !projectId || busy) return;
@@ -172,7 +180,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       <aside className="sidebar">
         <button className="primary" onClick={()=>setDialog("project")}>+ Register project</button>
         <h3>Projects</h3>
-        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{setProjectId(e.target.value);setConversationId(undefined);setProposals([]);setExecution(undefined);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="secondary" onClick={()=>setDialog("deregister")} disabled={!selectedProject}>Project settings</button></div> : <p className="muted">No projects registered.</p>}
+        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{setProjectId(e.target.value);setConversationId(undefined);setProposals([]);setExecution(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
         {notice&&<p className="success">{notice}</p>}
         <h3>Agents</h3>{agents.map(a=><button key={a.id} className={`nav ${a.id==="developer"?"active":""}`}><span>{a.name}</span><small>{a.status}</small></button>)}
         <button className="secondary" onClick={()=>setDialog("agent")}>+ Create agent</button>
@@ -193,7 +201,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         <h3>Recent tasks</h3>{tasks.slice(0,4).map(t=><div className="mini" key={t.id}><span>{t.title}</span><small>{t.status}</small></div>)}
       </aside>
     </div>
-    {dialog==="project"&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="agent"&&<AgentDialog projectId={projectId} onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="deregister"&&selectedProject&&<DeregisterProjectDialog project={selectedProject} onClose={()=>setDialog(null)} onDone={async()=>{setNotice(`${selectedProject.name} was de-registered. The project folder was not deleted.`);await refresh();}}/>}
+    {dialog==="project"&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="agent"&&<AgentDialog projectId={projectId} onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="deregister"&&selectedProject&&<DeregisterProjectDialog project={selectedProject} onClose={()=>setDialog(null)} onDone={async()=>{setNotice(`${selectedProject.name} was de-registered. The project folder was not deleted.`);await refreshAndReselectProject();}}/>}
   </main>;
 }
 
@@ -218,7 +226,7 @@ function DeregisterProjectDialog({project,onClose,onDone}:{project:Project;onClo
     if(!r.ok){setError(d.error??"Unable to de-register project");setBusy(false);return;}
     await onDone(); onClose();
   }
-  return <div className="overlay"><div className="dialog"><h2>De-register project</h2><p>This removes the project from S4 Agent Studio's active project list. It is not a file deletion action.</p><div className="confirm-box"><strong>{project.name}</strong><small>{project.rootPath}</small></div><p>S4 records for this project may be hidden from normal active-project views, while historical tasks, approvals, and audit records are kept.</p><p><strong>The actual project folder and files will not be deleted.</strong></p>{error&&<p className="error">{error}</p>}<div className="dialog-actions"><button onClick={onClose} disabled={busy}>Cancel</button><button className="danger" onClick={()=>void deregister()} disabled={busy}>{busy?"De-registering...":"De-register Project"}</button></div></div></div>
+  return <div className="overlay"><div className="dialog"><h2>De-register Project</h2><p>This removes the project from App Studio's active project list. It is not a file deletion action.</p><div className="confirm-box"><strong>{project.name}</strong><small>{project.rootPath}</small></div><p>The repository folder and files will not be deleted.</p>{error&&<p className="error">{error}</p>}<div className="dialog-actions"><button onClick={onClose} disabled={busy}>Cancel</button><button className="danger" onClick={()=>void deregister()} disabled={busy}>{busy?"De-registering...":"De-register Project"}</button></div></div></div>
 }
 
 function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void}) {
