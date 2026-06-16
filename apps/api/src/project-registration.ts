@@ -33,7 +33,7 @@ export function listActiveProjects(db: Database.Database): ProjectRow[] {
 }
 
 export function listManageableProjects(db: Database.Database): ProjectRow[] {
-  return db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE status IN ('ACTIVE','PAUSED') ORDER BY created_at DESC").all() as ProjectRow[];
+  return db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE status IN ('ACTIVE','PAUSED','ARCHIVED') ORDER BY created_at DESC").all() as ProjectRow[];
 }
 
 export function registerOrReactivateProject(db: Database.Database, input: { id: string; name: string; rootPath: string; now: string }, audit: ProjectAuditWriter) {

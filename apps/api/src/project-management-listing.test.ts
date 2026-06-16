@@ -22,18 +22,19 @@ describe("project listing behavior", () => {
   it("exposes active projects for selection and active-plus-paused projects for management", async () => {
     const activeAt = "2026-06-16T00:00:00.000Z";
     const pausedAt = "2026-06-16T00:01:00.000Z";
+    const archivedAt = "2026-06-16T00:02:00.000Z";
     db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)").run("project-active", "Active", path.join(workspaceRoot, "active"), "ACTIVE", activeAt, activeAt);
     db.prepare("INSERT INTO projects (id,name,root_path,status,paused_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("project-paused", "Paused", path.join(workspaceRoot, "paused"), "PAUSED", pausedAt, pausedAt, pausedAt);
-    db.prepare("INSERT INTO projects (id,name,root_path,status,archived_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("project-archived", "Archived", path.join(workspaceRoot, "archived"), "ARCHIVED", activeAt, activeAt, activeAt);
-    db.prepare("INSERT INTO projects (id,name,root_path,status,deregistered_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("project-deregistered", "Deregistered", path.join(workspaceRoot, "deregistered"), "DEREGISTERED", activeAt, activeAt, activeAt);
+    db.prepare("INSERT INTO projects (id,name,root_path,status,archived_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("project-archived", "Archived", path.join(workspaceRoot, "archived"), "ARCHIVED", archivedAt, archivedAt, archivedAt);
+    db.prepare("INSERT INTO projects (id,name,root_path,status,deregistered_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("project-deregistered", "Deregistered", path.join(workspaceRoot, "deregistered"), "DEREGISTERED", archivedAt, archivedAt, archivedAt);
 
     const response = await app.inject({ method: "GET", url: "/api/bootstrap" });
     assert.equal(response.statusCode, 200);
     const body = response.json() as { projects: Array<{ id: string; status: string }>; manageableProjects: Array<{ id: string; status: string }> };
 
     assert.deepEqual(body.projects.map((project) => project.id), ["project-active"]);
-    assert.deepEqual(body.manageableProjects.map((project) => project.id), ["project-paused", "project-active"]);
-    assert.equal(body.manageableProjects.some((project) => project.id === "project-archived"), false);
+    assert.deepEqual(body.manageableProjects.map((project) => project.id), ["project-archived", "project-paused", "project-active"]);
+    assert.equal(body.manageableProjects.some((project) => project.id === "project-archived"), true);
     assert.equal(body.manageableProjects.some((project) => project.id === "project-deregistered"), false);
   });
 });
