@@ -83,3 +83,30 @@ export function deregisterProject(db: Database.Database, projectId: string, time
   });
   return { id: project.id, name: project.name, rootPath: project.rootPath, status: "DEREGISTERED" as const, alreadyDeregistered: false };
 }
+
+export function pauseProject(db: Database.Database, projectId: string, timestamp: string, audit: ProjectAuditWriter) {
+  const project = db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE id=?").get(projectId) as ProjectRow | undefined;
+  if (!project) throw new ProjectRegistrationError("Project not found", 404);
+  if (project.status === "PAUSED") {
+    return { id: project.id, name: project.name, rootPath: project.rootPath, status: "PAUSED" as const, alreadyPaused: true };
+  }
+  if (project.status !== "ACTIVE") {
+    throw new ProjectRegistrationError("Project cannot be paused", 409);
+  }
+
+  db.prepare("UPDATE projects SET status='PAUSED',paused_at=?,updated_at=? WHERE id=?")
+    .run(timestamp, timestamp, project.id);
+  audit("PROJECT_PAUSED", `Project ${project.name} paused`, {
+    projectId: project.id,
+    payload: {
+      projectId: project.id,
+      projectName: project.name,
+      normalizedRootPath: project.rootPath,
+      previousStatus: project.status,
+      newStatus: "PAUSED",
+      timestamp,
+      action: "PROJECT_PAUSED"
+    }
+  });
+  return { id: project.id, name: project.name, rootPath: project.rootPath, status: "PAUSED" as const, alreadyPaused: false };
+}
