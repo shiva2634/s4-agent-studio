@@ -9,6 +9,7 @@ type Task = { id: string; title: string; status: string; riskLevel: string; proj
 type Proposal = { id: string; taskId: string; filePath: string; operation: string; reason: string; status: string };
 type ProviderStatus = { configured: boolean; provider: string; baseUrlHostname: string; model: string; status: string; lastTestedAt: string | null; sanitizedError: string | null };
 type ExecutionState = { executions: Array<{ id: string; status: string; gitCheckpointJson: string | null; checkResultsJson: string | null }>; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
+type AuditEvent = { id: string; eventType: string; summary: string; projectId: string | null; taskId: string | null; createdAt: string };
 type MediaProject = { id: string; name: string; description: string | null; aspectRatio: string; defaultBrandKitId: string | null; defaultPresenterProfileId: string | null; status: "ACTIVE" | "ARCHIVED"; createdAt: string; updatedAt: string };
 type MediaMessage = { id: string; sender: "user" | "director"; content: string; createdAt: string };
 type MediaBrief = { id: string; title: string; logline: string; audience: string; style: string; durationSeconds: number; constraintsJson: string; status: "DRAFT" | "APPROVED"; approvedAt: string | null };
@@ -64,6 +65,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [diffs, setDiffs] = useState<Record<string, string>>({});
   const [providerStatus, setProviderStatus] = useState<ProviderStatus>();
   const [execution, setExecution] = useState<ExecutionState>();
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -74,14 +76,16 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
-    const [boot, approvalData, taskData, providerData] = await Promise.all([
+    const [boot, approvalData, taskData, providerData, auditData] = await Promise.all([
       fetch(`${API}/api/bootstrap`).then(r => r.json()),
       fetch(`${API}/api/approvals`).then(r => r.json()),
       fetch(`${API}/api/tasks`).then(r => r.json()),
-      fetch(`${API}/api/providers/status`).then(r => r.json())
+      fetch(`${API}/api/providers/status`).then(r => r.json()),
+      fetch(`${API}/api/audit`).then(r => r.json())
     ]);
     setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
+    setAuditEvents(auditData.events);
     if (boot.projects.length === 0) {
       if (projectId) {
         setProjectId("");
@@ -204,9 +208,10 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       <aside className="activity">
         <h3>Current task</h3>{activeTask?<div className="card"><strong>{activeTask.title}</strong><div className="row"><span className={`risk ${activeTask.riskLevel}`}>{activeTask.riskLevel}</span><span>{activeTask.status.replaceAll("_"," ")}</span></div><p>{activeTask.projectName}</p></div>:<div className="card"><strong>No active task</strong><p>Your plan and execution status will appear here.</p></div>}
         <h3>Change proposals</h3>{proposals.length?proposals.map(p=><div className="card proposal" key={p.id}><strong>{p.filePath}</strong><div className="row"><span>{p.operation}</span><span>{p.status}</span></div><p>{p.reason}</p><button onClick={()=>void loadDiff(p.id)}>Diff preview</button>{diffs[p.id]&&<pre>{diffs[p.id]}</pre>}<div className="decision"><button onClick={()=>void decideProposal(p.id,"approve")} disabled={p.status!=="PENDING"}>Approve</button><button onClick={()=>void decideProposal(p.id,"reject")} disabled={p.status!=="PENDING"}>Reject</button></div></div>):<div className="card"><strong>No proposals</strong><p>Mutation requests will appear here for review before any file changes.</p></div>}
-        {activeTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{execution?.executions[0]&&<div className="row"><span>Status</span><span>{execution.executions[0].status}</span></div>}{execution?.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}<div className="decision"><button onClick={()=>void runChecks(activeTask.id)}>Run checks</button><button onClick={()=>void rollback(activeTask.id)}>Rollback</button></div></div>}
+        {activeTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{execution?.executions[0]&&<><div className="row"><span>Status</span><span>{execution.executions[0].status}</span></div><pre>{execution.executions[0].checkResultsJson ?? "No check results yet."}</pre></>}{execution?.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}<div className="decision"><button onClick={()=>void runChecks(activeTask.id)}>Run checks</button><button onClick={()=>void rollback(activeTask.id)}>Rollback</button></div></div>}
         {activeTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(activeTask.id)}>Apply approved changes</button>}
         <h3>Pending approvals</h3>{pending.length?pending.slice(0,5).map(a=><div className="card approval" key={a.id}><strong>{a.summary}</strong><div className="row"><span className={`risk ${a.riskLevel}`}>{a.riskLevel}</span><span>{a.projectName}</span></div><div className="decision"><button onClick={()=>void decide(a.id,"APPROVED")}>Approve</button><button onClick={()=>void decide(a.id,"REJECTED")}>Reject</button></div></div>):<div className="card"><strong>No pending approvals</strong><p>Sensitive actions wait for your decision.</p></div>}
+        <h3>Audit events</h3>{auditEvents.length?auditEvents.slice(0,6).map(event=><div className="mini" key={event.id}><span>{event.eventType}</span><small>{event.summary}</small></div>):<div className="card"><strong>No audit events</strong><p>Lifecycle and execution events will appear here.</p></div>}
         <h3>Recent tasks</h3>{tasks.slice(0,4).map(t=><div className="mini" key={t.id}><span>{t.title}</span><small>{t.status}</small></div>)}
       </aside>
     </div>
