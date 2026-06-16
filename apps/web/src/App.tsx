@@ -28,6 +28,7 @@ type ComfyWorkflow = { id: string; workflowType: "WAN_T2V" | "WAN_I2V"; name: st
 type MediaBrandKit = { id: string; name: string; colorsJson: string; fontsJson: string; tagline: string; tone: string; disclaimer: string };
 type MediaPresenterProfile = { id: string; name: string; appearancePrompt: string; voiceAccent: string; clothing: string; consistencyRules: string };
 type MediaBundle = { project: MediaProject; messages: MediaMessage[]; brief: MediaBrief | null; scenes: MediaScene[]; assets: MediaAsset[]; brandKits: MediaBrandKit[]; presenterProfiles: MediaPresenterProfile[]; generationJobs: MediaGenerationJob[]; processingJobs?: MediaProcessingJob[]; renderJobs?: MediaRenderJob[]; comfyWorkflows?: ComfyWorkflow[]; providers: MediaProvider[] };
+type ManagedProject = { id: string; name: string; rootPath: string; status: "ACTIVE" | "PAUSED" };
 type MediaTemplate = { id: string; name: string; templateType: "PROMO"|"PRESENTER"|"EXPLAINER"|"INVESTOR_PITCH"|"REEL"|"YOUTUBE"; description: string; defaultDurationSeconds: number; aspectRatio: string; sceneStructureJson: string; promptRules: string; captionStyleJson: string; audioSettingsJson: string; brandRulesJson: string; isBuiltin: 0|1; archivedAt: string | null };
 type FfmpegStatus = { available: boolean; ffmpegPath: string; ffprobePath: string; ffmpeg: { available: boolean }; ffprobe: { available: boolean } };
 type ComfyStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
@@ -51,6 +52,7 @@ export function App() {
 
 function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [manageableProjects, setManageableProjects] = useState<ManagedProject[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [projectId, setProjectId] = useState("");
   const [conversationId, setConversationId] = useState<string>();
@@ -65,6 +67,8 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<"project" | "agent" | "deregister" | null>(null);
+  const [projectLifecycleDialog, setProjectLifecycleDialog] = useState<"pause" | "resume" | "archive" | "deregister" | null>(null);
+  const [projectLifecycleTargetId, setProjectLifecycleTargetId] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -75,7 +79,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       fetch(`${API}/api/tasks`).then(r => r.json()),
       fetch(`${API}/api/providers/status`).then(r => r.json())
     ]);
-    setProjects(boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
+    setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
     if (boot.projects.length === 0) {
       if (projectId) {
@@ -109,6 +113,8 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const pending = useMemo(() => approvals.filter(a => a.status === "PENDING"), [approvals]);
   const activeTask = tasks.find(t => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(t.status));
   const selectedProject = projects.find(project => project.id === projectId);
+  const lifecycleTarget = manageableProjects.find(project => project.id === projectLifecycleTargetId) ?? selectedProject ?? null;
+  const lifecycleAffectsSelectedProject = Boolean(lifecycleTarget && selectedProject && lifecycleTarget.id === selectedProject.id);
 
   async function refreshAndReselectProject() {
     await refresh();
@@ -180,7 +186,9 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       <aside className="sidebar">
         <button className="primary" onClick={()=>setDialog("project")}>+ Register project</button>
         <h3>Projects</h3>
-        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{setProjectId(e.target.value);setConversationId(undefined);setProposals([]);setExecution(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
+        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{setProjectId(e.target.value);setConversationId(undefined);setProposals([]);setExecution(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog(selectedProject.status==="PAUSED"?"resume":"pause");setProjectMenuOpen(false);}}>{selectedProject.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("archive");setProjectMenuOpen(false);}}>Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
+        <h3>Project management</h3>
+        {manageableProjects.length ? manageableProjects.map(project => <div key={project.id} className="mini"><span>{project.name}</span><small>{project.status}</small><div className="decision wrap"><button onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog(project.status==="PAUSED"?"resume":"pause");}}>{project.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog("archive");}} >Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog("deregister");}}>De-register Project</button></div></div>) : <p className="muted">No manageable projects.</p>}
         {notice&&<p className="success">{notice}</p>}
         <h3>Agents</h3>{agents.map(a=><button key={a.id} className={`nav ${a.id==="developer"?"active":""}`}><span>{a.name}</span><small>{a.status}</small></button>)}
         <button className="secondary" onClick={()=>setDialog("agent")}>+ Create agent</button>
@@ -201,7 +209,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         <h3>Recent tasks</h3>{tasks.slice(0,4).map(t=><div className="mini" key={t.id}><span>{t.title}</span><small>{t.status}</small></div>)}
       </aside>
     </div>
-    {dialog==="project"&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="agent"&&<AgentDialog projectId={projectId} onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="deregister"&&selectedProject&&<DeregisterProjectDialog project={selectedProject} onClose={()=>setDialog(null)} onDone={async()=>{setNotice(`${selectedProject.name} was de-registered. The project folder was not deleted.`);await refreshAndReselectProject();}}/>}
+    {dialog==="project"&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="agent"&&<AgentDialog projectId={projectId} onClose={()=>setDialog(null)} onCreated={refresh}/>} {projectLifecycleDialog&&lifecycleTarget&&<ProjectLifecycleDialog project={lifecycleTarget} action={projectLifecycleDialog} onClose={()=>{setProjectLifecycleDialog(null);setProjectLifecycleTargetId(null);}} onDone={async(message)=>{setNotice(message);if(projectLifecycleDialog==="resume"){await refresh();return;}if(lifecycleAffectsSelectedProject){await refreshAndReselectProject();return;}await refresh();}}/>}
   </main>;
 }
 
@@ -216,17 +224,56 @@ function AgentDialog({projectId,onClose,onCreated}:{projectId:string;onClose:()=
   return <div className="overlay"><div className="dialog"><h2>Create specialist agent</h2><p>Describe what it should do. S4 creates its technical instructions and safety rules.</p><label>Agent name<input value={name} onChange={e=>setName(e.target.value)} placeholder="SEO Agent"/></label><label>What should it do?<textarea value={purpose} onChange={e=>setPurpose(e.target.value)} placeholder="Audit my websites, research keywords, and prepare recommended changes."/></label>{error&&<p className="error">{error}</p>}<div className="dialog-actions"><button onClick={onClose}>Cancel</button><button className="primary" onClick={()=>void save()}>Create draft</button></div></div></div>
 }
 
-function DeregisterProjectDialog({project,onClose,onDone}:{project:Project;onClose:()=>void;onDone:()=>Promise<void>}){
-  const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
-  async function deregister(){
-    if(busy) return;
-    setBusy(true); setError("");
-    const r=await fetch(`${API}/api/projects/${project.id}`,{method:"DELETE"});
-    const d=await r.json().catch(()=>({}));
-    if(!r.ok){setError(d.error??"Unable to de-register project");setBusy(false);return;}
-    await onDone(); onClose();
+function ProjectLifecycleDialog({project,action,onClose,onDone}:{project:Project;action:"pause"|"resume"|"archive"|"deregister";onClose:()=>void;onDone:(message:string)=>Promise<void>}) {
+  const [error,setError]=useState("");
+  const [busy,setBusy]=useState(false);
+  const copy = {
+    pause: {
+      title: "Pause Project",
+      description: "Pause the project to keep it available for later while removing it from the active list.",
+      confirm: "Pause Project",
+      endpoint: `/api/projects/${project.id}/pause`,
+      success: `${project.name} was paused.`
+    },
+    resume: {
+      title: "Resume Project",
+      description: "Resume the project so it can appear in the active list again.",
+      confirm: "Resume Project",
+      endpoint: `/api/projects/${project.id}/resume`,
+      success: `${project.name} was resumed.`
+    },
+    archive: {
+      title: "Archive Project",
+      description: "Archive the project to hide it from the active list while preserving project history.",
+      confirm: "Archive Project",
+      endpoint: `/api/projects/${project.id}/archive`,
+      success: `${project.name} was archived.`,
+      warning: "The repository folder and files will not be deleted."
+    },
+    deregister: {
+      title: "De-register Project",
+      description: "This removes the project from App Studio's active project list. It is not a file deletion action.",
+      confirm: "De-register Project",
+      endpoint: `/api/projects/${project.id}`,
+      success: `${project.name} was de-registered.`,
+      warning: "The repository folder and files will not be deleted."
+    }
+  }[action];
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    const response = await fetch(`${API}${copy.endpoint}`, { method: action === "deregister" ? "DELETE" : "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(data.error ?? `Unable to ${action} project`);
+      setBusy(false);
+      return;
+    }
+    await onDone(copy.success);
+    onClose();
   }
-  return <div className="overlay"><div className="dialog"><h2>De-register Project</h2><p>This removes the project from App Studio's active project list. It is not a file deletion action.</p><div className="confirm-box"><strong>{project.name}</strong><small>{project.rootPath}</small></div><p>The repository folder and files will not be deleted.</p>{error&&<p className="error">{error}</p>}<div className="dialog-actions"><button onClick={onClose} disabled={busy}>Cancel</button><button className="danger" onClick={()=>void deregister()} disabled={busy}>{busy?"De-registering...":"De-register Project"}</button></div></div></div>
+  return <div className="overlay"><div className="dialog"><h2>{copy.title}</h2><p>{copy.description}</p><div className="confirm-box"><strong>{project.name}</strong><small>{project.rootPath}</small></div>{copy.warning&&<p>{copy.warning}</p>}{error&&<p className="error">{error}</p>}<div className="dialog-actions"><button onClick={onClose} disabled={busy}>Cancel</button><button className={action==="deregister"||action==="archive"?"danger":"primary"} onClick={()=>void run()} disabled={busy}>{busy?`${copy.confirm}...`:copy.confirm}</button></div></div></div>;
 }
 
 function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void}) {

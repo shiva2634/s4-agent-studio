@@ -15,7 +15,7 @@ import { loadProviderConfig, providerStatusResponse, sanitizeProviderError, vali
 import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./provider-factory.js";
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
-import { ProjectRegistrationError, archiveProject, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
+import { ProjectRegistrationError, archiveProject, deregisterProject, listActiveProjects, listManageableProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
 import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getPromptVersion, getSceneFlowPrompt, getSceneVersion, importSceneAsset, listMediaProjects, listMediaTemplates, listPromptVersions, listSceneVersions, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, restoreSceneVersion, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
@@ -67,6 +67,7 @@ app.post("/api/providers/test", async (_request, reply) => {
 app.get("/api/bootstrap", async () => ({
   product: "App Studio",
   projects: listActiveProjects(db),
+  manageableProjects: listManageableProjects(db),
   agents: db.prepare("SELECT id,name,role,purpose,status,project_id AS projectId FROM agents ORDER BY created_at").all(),
   pendingApprovals: db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status='PENDING'").get()
 }));
