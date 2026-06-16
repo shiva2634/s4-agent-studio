@@ -8,7 +8,10 @@ type Approval = { id: string; summary: string; riskLevel: string; status: string
 type Task = { id: string; title: string; status: string; riskLevel: string; projectName: string };
 type Proposal = { id: string; taskId: string; filePath: string; operation: string; reason: string; status: string };
 type ProviderStatus = { configured: boolean; provider: string; baseUrlHostname: string; model: string; status: string; lastTestedAt: string | null; sanitizedError: string | null };
-type ExecutionState = { executions: Array<{ id: string; status: string; gitCheckpointJson: string | null; checkResultsJson: string | null }>; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
+type GitCheckpoint = { available: boolean; branch: string | null; head: string | null; checkpointRef: string | null; dirty: boolean; warning: string | null };
+type CheckResult = { action: string; script: string; skipped: boolean; ok: boolean; exitCode: number | null; output: string };
+type ExecutionRecord = { id: string; status: string; gitCheckpointJson: string | null; checkResultsJson: string | null; createdAt: string; updatedAt: string; gitCheckpoint: GitCheckpoint | null; rollbackAvailable: boolean; rollbackStatus: "AVAILABLE" | "UNAVAILABLE" | "ROLLED_BACK" };
+type ExecutionState = { executions: ExecutionRecord[]; checkpointExecution: ExecutionRecord | null; latestExecution: ExecutionRecord | null; rollbackAvailable: boolean; rollbackStatus: "AVAILABLE" | "UNAVAILABLE" | "ROLLED_BACK"; recoveryOutcome: string | null; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
 type AuditEvent = { id: string; eventType: string; summary: string; projectId: string | null; taskId: string | null; createdAt: string };
 type MediaProject = { id: string; name: string; description: string | null; aspectRatio: string; defaultBrandKitId: string | null; defaultPresenterProfileId: string | null; status: "ACTIVE" | "ARCHIVED"; createdAt: string; updatedAt: string };
 type MediaMessage = { id: string; sender: "user" | "director"; content: string; createdAt: string };
@@ -36,6 +39,16 @@ type FfmpegStatus = { available: boolean; ffmpegPath: string; ffprobePath: strin
 type ComfyStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
 type LongCatStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
 const API = "http://127.0.0.1:4310";
+
+function parseJsonArray<T>(value: string | null): T[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [];
+  }
+}
 
 export function App() {
   const [path, setPath] = useState(window.location.pathname);
@@ -185,6 +198,12 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     setProviderStatus(data);
   }
 
+  const checkpointExecution = execution?.checkpointExecution ?? execution?.executions.find((entry) => entry.gitCheckpoint);
+  const latestExecution = execution?.latestExecution ?? execution?.executions[0];
+  const rollbackAvailable = execution?.rollbackAvailable ?? Boolean(checkpointExecution?.rollbackAvailable);
+  const rollbackStatus = execution?.rollbackStatus ?? (latestExecution?.status === "ROLLED_BACK" ? "ROLLED_BACK" : rollbackAvailable ? "AVAILABLE" : "UNAVAILABLE");
+  const checkResults = parseJsonArray<CheckResult>(latestExecution?.checkResultsJson ?? null);
+
   return <main className="app-shell">
     <header className="topbar"><div><h1>App Studio</h1><p>Shrinika Automation Studio</p></div><div className="top-actions"><button className="top-link" onClick={()=>navigate("/media-studio")}>Media Studio</button><span className="status-dot"/> Local API connected<select defaultValue="guided"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div></header>
     <div className="workspace-grid">
@@ -208,7 +227,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       <aside className="activity">
         <h3>Current task</h3>{activeTask?<div className="card"><strong>{activeTask.title}</strong><div className="row"><span className={`risk ${activeTask.riskLevel}`}>{activeTask.riskLevel}</span><span>{activeTask.status.replaceAll("_"," ")}</span></div><p>{activeTask.projectName}</p></div>:<div className="card"><strong>No active task</strong><p>Your plan and execution status will appear here.</p></div>}
         <h3>Change proposals</h3>{proposals.length?proposals.map(p=><div className="card proposal" key={p.id}><strong>{p.filePath}</strong><div className="row"><span>{p.operation}</span><span>{p.status}</span></div><p>{p.reason}</p><button onClick={()=>void loadDiff(p.id)}>Diff preview</button>{diffs[p.id]&&<pre>{diffs[p.id]}</pre>}<div className="decision"><button onClick={()=>void decideProposal(p.id,"approve")} disabled={p.status!=="PENDING"}>Approve</button><button onClick={()=>void decideProposal(p.id,"reject")} disabled={p.status!=="PENDING"}>Reject</button></div></div>):<div className="card"><strong>No proposals</strong><p>Mutation requests will appear here for review before any file changes.</p></div>}
-        {activeTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{execution?.executions[0]&&<><div className="row"><span>Status</span><span>{execution.executions[0].status}</span></div><pre>{execution.executions[0].checkResultsJson ?? "No check results yet."}</pre></>}{execution?.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}<div className="decision"><button onClick={()=>void runChecks(activeTask.id)}>Run checks</button><button onClick={()=>void rollback(activeTask.id)}>Rollback</button></div></div>}
+        {activeTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{checkpointExecution&&<div className="execution-grid"><div className="execution-field"><span>Rollback status</span><strong>{rollbackStatus}</strong></div><div className="execution-field"><span>Rollback available</span><strong>{rollbackAvailable ? "Yes" : "No"}</strong></div><div className="execution-field"><span>Branch</span><strong>{checkpointExecution.gitCheckpoint?.branch ?? "Unknown"}</strong></div><div className="execution-field"><span>Checkpoint commit</span><strong>{checkpointExecution.gitCheckpoint?.head ?? "Unavailable"}</strong></div><div className="execution-field"><span>Checkpoint ref</span><strong>{checkpointExecution.gitCheckpoint?.checkpointRef ?? "Unavailable"}</strong></div><div className="execution-field"><span>Repository state</span><strong>{checkpointExecution.gitCheckpoint?.dirty ? "Dirty" : "Clean"}</strong></div><div className="execution-field"><span>Checkpoint created</span><strong>{checkpointExecution.createdAt}</strong></div>{checkpointExecution.gitCheckpoint?.warning&&<div className="execution-field wide"><span>Recovery note</span><strong>{checkpointExecution.gitCheckpoint.warning}</strong></div>}</div>}{latestExecution&&<div className="execution-summary"><div className="row"><span>Status</span><span>{latestExecution.status}</span></div><div className="row"><span>Recovery outcome</span><span>{execution?.recoveryOutcome ?? "No recovery required"}</span></div></div>}{checkResults.length>0&&<div className="check-results">{checkResults.map((result)=><article key={`${result.action}-${result.script}`} className={`check-result ${result.ok ? "ok" : "fail"}`}><div className="row"><strong>{result.action}</strong><span>{result.ok ? "Passed" : "Failed"}</span></div><small>Script: {result.script}</small><small>{result.skipped ? "Skipped" : `Exit code: ${result.exitCode ?? "n/a"}`}</small><pre>{result.output || "No output captured."}</pre></article>)}</div>}{checkResults.length===0&&<div className="muted">No check results yet.</div>}{execution?.appliedFiles.length ? <div className="files-changed">{execution.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}</div> : <div className="muted">No files have been applied yet.</div>}<div className="decision"><button onClick={()=>void runChecks(activeTask.id)}>Run checks</button><button onClick={()=>void rollback(activeTask.id)} disabled={!rollbackAvailable}>Rollback</button></div></div>}
         {activeTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(activeTask.id)}>Apply approved changes</button>}
         <h3>Pending approvals</h3>{pending.length?pending.slice(0,5).map(a=><div className="card approval" key={a.id}><strong>{a.summary}</strong><div className="row"><span className={`risk ${a.riskLevel}`}>{a.riskLevel}</span><span>{a.projectName}</span></div><div className="decision"><button onClick={()=>void decide(a.id,"APPROVED")}>Approve</button><button onClick={()=>void decide(a.id,"REJECTED")}>Reject</button></div></div>):<div className="card"><strong>No pending approvals</strong><p>Sensitive actions wait for your decision.</p></div>}
         <h3>Audit events</h3>{auditEvents.length?auditEvents.slice(0,6).map(event=><div className="mini" key={event.id}><span>{event.eventType}</span><small>{event.summary}</small></div>):<div className="card"><strong>No audit events</strong><p>Lifecycle and execution events will appear here.</p></div>}

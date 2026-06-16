@@ -64,19 +64,20 @@ async function gitInit(root: string) {
   await execFileAsync("git", ["config", "user.name", "S4"], { cwd: root, windowsHide: true });
 }
 
-async function createTestProject(label = "project") {
+async function createTestProject(label = "project", overrides: Partial<{ typecheck: string; test: string; build: string; lint: string }> = {}) {
   const root = path.join(workspaceRoot, label);
   await fs.mkdir(root, { recursive: true });
   await fs.mkdir(path.join(root, "src"), { recursive: true });
   await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+  const scripts = {
+    typecheck: overrides.typecheck ?? "node scripts/pass.cjs",
+    test: overrides.test ?? "node scripts/pass.cjs",
+    build: overrides.build ?? "node scripts/pass.cjs",
+    lint: overrides.lint ?? "node scripts/pass.cjs"
+  };
   await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
     name: "workflow-project",
-    scripts: {
-      typecheck: "node scripts/pass.cjs",
-      test: "node scripts/pass.cjs",
-      build: "node scripts/pass.cjs",
-      lint: "node scripts/pass.cjs"
-    }
+    scripts
   }, null, 2));
   await fs.writeFile(path.join(root, "scripts", "pass.cjs"), "process.exit(0);\n");
   await fs.writeFile(path.join(root, "existing.ts"), "export const value = 'before';\n");
@@ -108,6 +109,8 @@ describe("developer agent workflow", () => {
     const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Workflow Project", rootPath: root } });
     assert.equal(register.statusCode, 201);
     const project = register.json() as { id: string };
+    await fs.writeFile(path.join(root, "unrelated.ts"), "export const keepMe = true;\n");
+    await fs.writeFile(path.join(root, "unrelated.ts"), "export const keepMe = false;\n");
 
     const tree = await app.inject({ method: "GET", url: `/api/projects/${project.id}/tree?path=.` });
     assert.equal(tree.statusCode, 200);
@@ -168,10 +171,28 @@ describe("developer agent workflow", () => {
     assert.ok(checksBody.checkResults.every((result) => result.ok));
 
     const execution = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/execution` });
-    const executionBody = execution.json() as { executions: Array<{ status: string; checkResultsJson: string | null }>; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
+    const executionBody = execution.json() as {
+      executions: Array<{ status: string; checkResultsJson: string | null; gitCheckpoint: { available: boolean; branch: string | null; head: string | null; checkpointRef: string | null; dirty: boolean; warning: string | null } | null; rollbackAvailable: boolean; rollbackStatus: string; createdAt: string }>;
+      checkpointExecution: { status: string; gitCheckpoint: { available: boolean; branch: string | null; head: string | null; checkpointRef: string | null; dirty: boolean; warning: string | null } | null; rollbackAvailable: boolean; rollbackStatus: string; createdAt: string } | null;
+      latestExecution: { status: string; checkResultsJson: string | null; rollbackAvailable: boolean; rollbackStatus: string } | null;
+      rollbackAvailable: boolean;
+      rollbackStatus: string;
+      recoveryOutcome: string | null;
+      appliedFiles: Array<{ filePath: string; operation: string; result: string }>;
+    };
     assert.equal(executionBody.executions[0]?.status, "CHECKS_PASSED");
     assert.ok(executionBody.executions[0]?.checkResultsJson);
+    assert.equal(executionBody.checkpointExecution?.gitCheckpoint?.available, true);
+    assert.match(executionBody.checkpointExecution?.gitCheckpoint?.branch ?? "", /.+/);
+    assert.match(executionBody.checkpointExecution?.gitCheckpoint?.head ?? "", /^[0-9a-f]{40}$/);
+    assert.equal(executionBody.checkpointExecution?.gitCheckpoint?.dirty, true);
+    assert.equal(executionBody.checkpointExecution?.rollbackAvailable, true);
+    assert.equal(executionBody.rollbackAvailable, true);
+    assert.equal(executionBody.rollbackStatus, "AVAILABLE");
+    assert.equal(executionBody.recoveryOutcome, null);
     assert.deepEqual(executionBody.appliedFiles.map((file) => file.filePath), ["created.ts", "existing.ts"]);
+    assert.match(executionBody.checkpointExecution?.createdAt ?? "", /T/);
+    assert.match(await fs.readFile(path.join(root, "unrelated.ts"), "utf8"), /false/);
 
     const audit = await app.inject({ method: "GET", url: "/api/audit" });
     const auditEvents = (audit.json() as { events: Array<{ eventType: string; summary: string }> }).events;
@@ -184,10 +205,67 @@ describe("developer agent workflow", () => {
     const rollbackBody = rollback.json() as { status: string; rolledBack: number };
     assert.equal(rollbackBody.status, "ROLLED_BACK");
     assert.equal(rollbackBody.rolledBack, 2);
+    const afterRollback = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/execution` });
+    const afterRollbackBody = afterRollback.json() as {
+      checkpointExecution: { rollbackAvailable: boolean; rollbackStatus: string } | null;
+      latestExecution: { status: string; rollbackAvailable: boolean; rollbackStatus: string } | null;
+      rollbackAvailable: boolean;
+      rollbackStatus: string;
+      recoveryOutcome: string | null;
+    };
+    assert.equal(afterRollbackBody.checkpointExecution?.rollbackAvailable, false);
+    assert.equal(afterRollbackBody.latestExecution?.status, "ROLLED_BACK");
+    assert.equal(afterRollbackBody.latestExecution?.rollbackStatus, "ROLLED_BACK");
+    assert.equal(afterRollbackBody.rollbackAvailable, false);
+    assert.equal(afterRollbackBody.rollbackStatus, "ROLLED_BACK");
+    assert.equal(afterRollbackBody.recoveryOutcome, "CHECKPOINT_RESTORED");
     assert.match(await fs.readFile(path.join(root, "existing.ts"), "utf8"), /before/);
     await assert.rejects(() => fs.readFile(path.join(root, "created.ts"), "utf8"));
     const rollbackAudit = await app.inject({ method: "GET", url: "/api/audit" });
     assert.ok((rollbackAudit.json() as { events: Array<{ eventType: string }> }).events.some((event) => event.eventType === "TASK_ROLLED_BACK"));
+  });
+
+  it("surfaces recovery data when checks fail and preserves unrelated git changes", async () => {
+    const root = await createTestProject("project-failing", { test: "node -e \"process.exit(1)\"" });
+    await fs.writeFile(path.join(root, "unrelated.ts"), "export const keepMe = true;\n");
+    const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Failing Project", rootPath: root } });
+    assert.equal(register.statusCode, 201);
+    const project = register.json() as { id: string };
+    await fs.writeFile(path.join(root, "unrelated.ts"), "export const keepMe = false;\n");
+
+    const chat = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      payload: { projectId: project.id, message: "Add a dashboard panel and keep the repo changes recoverable." }
+    });
+    assert.equal(chat.statusCode, 200);
+    const chatBody = chat.json() as { taskId: string; approvalId: string | null };
+
+    const approval = await app.inject({ method: "POST", url: `/api/approvals/${chatBody.approvalId}/decision`, payload: { decision: "APPROVED" } });
+    assert.equal(approval.statusCode, 200);
+
+    const proposalsResponse = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/proposals` });
+    const proposals = (proposalsResponse.json() as { proposals: Array<{ id: string }> }).proposals;
+    for (const proposal of proposals) {
+      const approved = await app.inject({ method: "POST", url: `/api/proposals/${proposal.id}/approve`, payload: {} });
+      assert.equal(approved.statusCode, 200);
+    }
+
+    const apply = await app.inject({ method: "POST", url: `/api/tasks/${chatBody.taskId}/apply` });
+    assert.equal(apply.statusCode, 200);
+    const applyBody = apply.json() as { status: string };
+    assert.equal(applyBody.status, "FAILED_VALIDATION");
+
+    const execution = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/execution` });
+    const executionBody = execution.json() as {
+      checkpointExecution: { rollbackAvailable: boolean; rollbackStatus: string } | null;
+      latestExecution: { status: string; rollbackAvailable: boolean; rollbackStatus: string; checkResultsJson: string | null } | null;
+    };
+    assert.equal(executionBody.checkpointExecution?.rollbackAvailable, true);
+    assert.equal(executionBody.latestExecution?.status, "FAILED_VALIDATION");
+    assert.equal(executionBody.latestExecution?.rollbackStatus, "AVAILABLE");
+    assert.ok(executionBody.latestExecution?.checkResultsJson);
+    assert.match(await fs.readFile(path.join(root, "unrelated.ts"), "utf8"), /false/);
   });
 
   it("blocks development actions for paused, archived, and de-registered projects", async () => {

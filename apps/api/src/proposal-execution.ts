@@ -22,6 +22,34 @@ type ProposalRow = {
 };
 
 type TaskRow = { id: string; projectId: string; rootPath: string; status: string };
+type GitCheckpoint = {
+  available: boolean;
+  branch: string | null;
+  head: string | null;
+  checkpointRef: string | null;
+  dirty: boolean;
+  warning: string | null;
+};
+
+type TaskExecutionRow = {
+  id: string;
+  status: string;
+  gitCheckpointJson: string | null;
+  safetySummaryJson: string | null;
+  checkResultsJson: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function parseGitCheckpoint(value: string | null): GitCheckpoint | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as GitCheckpoint;
+  } catch {
+    return null;
+  }
+}
 
 async function readTextIfExists(filePath: string) {
   try {
@@ -143,8 +171,31 @@ export async function runTaskChecks(db: Database.Database, taskId: string, now: 
 }
 
 export function getTaskExecution(db: Database.Database, taskId: string) {
+  const executions = db.prepare("SELECT id,status,git_checkpoint_json AS gitCheckpointJson,safety_summary_json AS safetySummaryJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC").all(taskId) as TaskExecutionRow[];
+  const normalizedExecutions = executions.map((execution) => {
+    const gitCheckpoint = parseGitCheckpoint(execution.gitCheckpointJson);
+    const rollbackAvailable = Boolean(gitCheckpoint?.available) && execution.status !== "ROLLED_BACK";
+    return {
+      ...execution,
+      gitCheckpoint,
+      rollbackAvailable,
+      rollbackStatus: execution.status === "ROLLED_BACK" ? "ROLLED_BACK" : rollbackAvailable ? "AVAILABLE" : "UNAVAILABLE"
+    };
+  });
+  const checkpointExecution = normalizedExecutions.find((execution) => Boolean(execution.gitCheckpoint)) ?? null;
+  const latestExecution = normalizedExecutions[0] ?? null;
+  const rollbackAvailable = Boolean(checkpointExecution?.rollbackAvailable) && latestExecution?.status !== "ROLLED_BACK";
+  const rollbackStatus = latestExecution?.status === "ROLLED_BACK" ? "ROLLED_BACK" : rollbackAvailable ? "AVAILABLE" : "UNAVAILABLE";
+  const currentCheckpointExecution = checkpointExecution
+    ? { ...checkpointExecution, rollbackAvailable, rollbackStatus }
+    : null;
   return {
-    executions: db.prepare("SELECT id,status,git_checkpoint_json AS gitCheckpointJson,safety_summary_json AS safetySummaryJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC").all(taskId),
+    executions: normalizedExecutions,
+    checkpointExecution: currentCheckpointExecution,
+    latestExecution,
+    rollbackAvailable,
+    rollbackStatus,
+    recoveryOutcome: latestExecution?.status === "ROLLED_BACK" ? "CHECKPOINT_RESTORED" : null,
     appliedFiles: db.prepare("SELECT proposal_id AS proposalId,file_path AS filePath,operation,before_hash AS beforeHash,after_hash AS afterHash,result,created_at AS createdAt FROM applied_file_changes WHERE task_id=? ORDER BY created_at DESC").all(taskId)
   };
 }
