@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
-export type ProjectStatus = "ACTIVE" | "DEREGISTERED";
+export type ProjectStatus = "ACTIVE" | "PAUSED" | "ARCHIVED" | "DEREGISTERED";
 
 export type ProjectAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
 
