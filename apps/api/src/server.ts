@@ -1400,4 +1400,8 @@ app.get("/api/audit", async () => ({
 
 const port = Number(process.env.S4_API_PORT ?? 4310);
 generationWorker.recoverStartup(now());
-await app.listen({ host: "127.0.0.1", port });
+if (process.env.NODE_ENV !== "test") {
+  await app.listen({ host: "127.0.0.1", port });
+}
+
+export { app };
