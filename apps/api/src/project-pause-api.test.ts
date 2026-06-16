@@ -43,7 +43,7 @@ describe("project pause API", () => {
     assert.equal(await fs.readFile(path.join(root, "keep.txt"), "utf8"), "keep me\n");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE project_id='project-1'").get() as { count: number }).count, 1);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_PAUSED' AND project_id='project-1'").get() as { count: number }).count, 1);
-    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM projects WHERE status='ACTIVE'").get() as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM projects WHERE id='project-5' AND status='ACTIVE'").get() as { count: number }).count, 0);
   });
 
   it("returns 404 for unknown projects and repeated pause is safe", async () => {
@@ -103,6 +103,48 @@ describe("project resume API", () => {
     assert.equal(second.statusCode, 200);
     assert.equal((second.json() as { alreadyActive: boolean }).alreadyActive, true);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_RESUMED' AND project_id='project-4'").get() as { count: number }).count, 0);
+    assert.equal(await fs.readFile(path.join(root, "keep.txt"), "utf8"), "keep me\n");
+  });
+});
+
+describe("project archive API", () => {
+  it("archives an active project without modifying files and excludes it from active projects", async () => {
+    const root = await projectFolder("project-5");
+    const now = "2026-06-16T00:00:00.000Z";
+    db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)").run("project-5", "Fixture", root, "ACTIVE", now, now);
+    db.prepare("INSERT INTO tasks (id,project_id,title,objective,status,risk_level,plan_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run("task-5", "project-5", "Historical task", "Keep history", "COMPLETED", "low", "{}", now, now);
+
+    const response = await app.inject({ method: "POST", url: "/api/projects/project-5/archive" });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as { status: string; alreadyArchived: boolean };
+    assert.equal(body.status, "ARCHIVED");
+    assert.equal(body.alreadyArchived, false);
+
+    const row = db.prepare("SELECT status,archived_at AS archivedAt,paused_at AS pausedAt FROM projects WHERE id='project-5'").get() as { status: string; archivedAt: string | null; pausedAt: string | null };
+    assert.equal(row.status, "ARCHIVED");
+    assert.ok(row.archivedAt);
+    assert.equal(row.pausedAt, null);
+    assert.equal(await fs.readFile(path.join(root, "keep.txt"), "utf8"), "keep me\n");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE project_id='project-5'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_ARCHIVED' AND project_id='project-5'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM projects WHERE id='project-5' AND status='ACTIVE'").get() as { count: number }).count, 0);
+  });
+
+  it("returns 404 for unknown projects and repeated archive is safe", async () => {
+    const root = await projectFolder("project-6");
+    const now = "2026-06-16T00:00:00.000Z";
+    db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)").run("project-6", "Fixture", root, "PAUSED", now, now);
+
+    const missing = await app.inject({ method: "POST", url: "/api/projects/missing/archive" });
+    assert.equal(missing.statusCode, 404);
+    assert.equal(missing.json().error, "Project not found");
+
+    const first = await app.inject({ method: "POST", url: "/api/projects/project-6/archive" });
+    assert.equal(first.statusCode, 200);
+    const second = await app.inject({ method: "POST", url: "/api/projects/project-6/archive" });
+    assert.equal(second.statusCode, 200);
+    assert.equal((second.json() as { alreadyArchived: boolean }).alreadyArchived, true);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_ARCHIVED' AND project_id='project-6'").get() as { count: number }).count, 1);
     assert.equal(await fs.readFile(path.join(root, "keep.txt"), "utf8"), "keep me\n");
   });
 });

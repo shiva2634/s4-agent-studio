@@ -137,3 +137,30 @@ export function resumeProject(db: Database.Database, projectId: string, timestam
   });
   return { id: project.id, name: project.name, rootPath: project.rootPath, status: "ACTIVE" as const, alreadyActive: false };
 }
+
+export function archiveProject(db: Database.Database, projectId: string, timestamp: string, audit: ProjectAuditWriter) {
+  const project = db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE id=?").get(projectId) as ProjectRow | undefined;
+  if (!project) throw new ProjectRegistrationError("Project not found", 404);
+  if (project.status === "ARCHIVED") {
+    return { id: project.id, name: project.name, rootPath: project.rootPath, status: "ARCHIVED" as const, alreadyArchived: true };
+  }
+  if (project.status !== "ACTIVE" && project.status !== "PAUSED") {
+    throw new ProjectRegistrationError("Project cannot be archived", 409);
+  }
+
+  db.prepare("UPDATE projects SET status='ARCHIVED',paused_at=NULL,archived_at=?,updated_at=? WHERE id=?")
+    .run(timestamp, timestamp, project.id);
+  audit("PROJECT_ARCHIVED", `Project ${project.name} archived`, {
+    projectId: project.id,
+    payload: {
+      projectId: project.id,
+      projectName: project.name,
+      normalizedRootPath: project.rootPath,
+      previousStatus: project.status,
+      newStatus: "ARCHIVED",
+      timestamp,
+      action: "PROJECT_ARCHIVED"
+    }
+  });
+  return { id: project.id, name: project.name, rootPath: project.rootPath, status: "ARCHIVED" as const, alreadyArchived: false };
+}

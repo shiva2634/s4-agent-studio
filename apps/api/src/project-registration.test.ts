@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { ProjectRegistrationError, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
+import { ProjectRegistrationError, archiveProject, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
@@ -183,6 +183,55 @@ describe("project de-registration", () => {
     assert.equal(repeated.alreadyActive, true);
     assert.equal(repeated.status, "ACTIVE");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_RESUMED'").get() as { count: number }).count, 0);
+  });
+
+  it("archives an active project and preserves historical records", async () => {
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    db.prepare("INSERT INTO tasks (id,project_id,title,status,created_at) VALUES (?,?,?,?,?)").run("task-1", "project-1", "Historical task", "COMPLETED", "created");
+
+    const result = archiveProject(db, "project-1", "archived", audit(db));
+
+    assert.equal(result.status, "ARCHIVED");
+    assert.equal(result.alreadyArchived, false);
+    const row = db.prepare("SELECT status,archived_at AS archivedAt,paused_at AS pausedAt FROM projects WHERE id='project-1'").get() as { status: string; archivedAt: string | null; pausedAt: string | null };
+    assert.equal(row.status, "ARCHIVED");
+    assert.ok(row.archivedAt);
+    assert.equal(row.pausedAt, null);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE project_id='project-1'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_ARCHIVED'").get() as { count: number }).count, 1);
+    assert.equal(listActiveProjects(db).length, 0);
+    assert.equal(await fs.readFile(path.join(root, "source.ts"), "utf8"), "export const unchanged = true;\n");
+  });
+
+  it("archives a paused project and clears paused state", async () => {
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    pauseProject(db, "project-1", "paused", audit(db));
+
+    const result = archiveProject(db, "project-1", "archived", audit(db));
+
+    assert.equal(result.status, "ARCHIVED");
+    const row = db.prepare("SELECT status,archived_at AS archivedAt,paused_at AS pausedAt FROM projects WHERE id='project-1'").get() as { status: string; archivedAt: string | null; pausedAt: string | null };
+    assert.equal(row.status, "ARCHIVED");
+    assert.ok(row.archivedAt);
+    assert.equal(row.pausedAt, null);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_ARCHIVED'").get() as { count: number }).count, 1);
+  });
+
+  it("treats repeated archive as safe", async () => {
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    archiveProject(db, "project-1", "archived", audit(db));
+
+    const repeated = archiveProject(db, "project-1", "archived-again", audit(db));
+
+    assert.equal(repeated.alreadyArchived, true);
+    assert.equal(repeated.status, "ARCHIVED");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_ARCHIVED'").get() as { count: number }).count, 1);
   });
 
   it("handles case-safe duplicate path checks on Windows", async () => {

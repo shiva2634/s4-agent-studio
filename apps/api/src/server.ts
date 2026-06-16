@@ -15,7 +15,7 @@ import { loadProviderConfig, providerStatusResponse, sanitizeProviderError, vali
 import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./provider-factory.js";
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
-import { ProjectRegistrationError, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
+import { ProjectRegistrationError, archiveProject, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
 import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getPromptVersion, getSceneFlowPrompt, getSceneVersion, importSceneAsset, listMediaProjects, listMediaTemplates, listPromptVersions, listSceneVersions, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, restoreSceneVersion, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
@@ -1100,6 +1100,15 @@ app.post("/api/projects/:projectId/resume", async (request: any, reply) => {
   } catch (error) {
     if (error instanceof ProjectRegistrationError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to resume project" });
+  }
+});
+
+app.post("/api/projects/:projectId/archive", async (request: any, reply) => {
+  try {
+    return archiveProject(db, request.params.projectId, now(), audit);
+  } catch (error) {
+    if (error instanceof ProjectRegistrationError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to archive project" });
   }
 });
 
