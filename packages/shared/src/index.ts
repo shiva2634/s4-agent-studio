@@ -184,7 +184,8 @@ export const GenerateWanSceneSchema = z.object({
   mode: z.enum(["text-to-video", "image-to-video"]),
   approved: z.boolean(),
   fps: z.number().int().min(1).max(120).optional(),
-  seed: z.number().int().min(0).max(2_147_483_647).optional()
+  seed: z.number().int().min(0).max(2_147_483_647).optional(),
+  promptVersionId: z.string().trim().min(1).optional()
 });
 
 export const RetryWanGenerationSchema = z.object({
@@ -225,7 +226,17 @@ export const RouteMediaGenerationSchema = z.object({
   paidProviderApproved: z.boolean().optional(),
   maxAttempts: z.number().int().min(1).max(5).optional(),
   fps: z.number().int().min(1).max(120).optional(),
-  seed: z.number().int().min(0).max(2_147_483_647).optional()
+  seed: z.number().int().min(0).max(2_147_483_647).optional(),
+  promptVersionId: z.string().trim().min(1).optional()
+});
+export const RestoreMediaSceneVersionSchema = z.object({
+  approved: z.boolean(),
+  changeSummary: z.string().trim().max(500).optional()
+});
+export const ReuseMediaPromptVersionSchema = z.object({
+  approved: z.boolean(),
+  paidProviderApproved: z.boolean().optional(),
+  maxAttempts: z.number().int().min(1).max(5).optional()
 });
 
 export const ComfyWorkflowTypeSchema = z.enum(["WAN_T2V", "WAN_I2V"]);
@@ -293,6 +304,8 @@ export type FlowJobAction = z.infer<typeof FlowJobActionSchema>;
 export type FlowFallbackWan = z.infer<typeof FlowFallbackWanSchema>;
 export type MediaProviderTask = z.infer<typeof MediaProviderTaskSchema>;
 export type RouteMediaGeneration = z.infer<typeof RouteMediaGenerationSchema>;
+export type RestoreMediaSceneVersion = z.infer<typeof RestoreMediaSceneVersionSchema>;
+export type ReuseMediaPromptVersion = z.infer<typeof ReuseMediaPromptVersionSchema>;
 export type MediaGenerationStatusHistory = z.infer<typeof MediaGenerationStatusHistorySchema>;
 export type MediaAssetApprovalStatus = z.infer<typeof MediaAssetApprovalStatusSchema>;
 export type RejectMediaAsset = z.infer<typeof RejectMediaAssetSchema>;

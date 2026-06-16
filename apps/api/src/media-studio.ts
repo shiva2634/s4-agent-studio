@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sanitizeProviderError } from "./ai-provider.js";
@@ -91,6 +91,40 @@ export type MediaScene = {
   approvedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type MediaSceneVersion = {
+  id: string;
+  projectId: string;
+  sceneId: string;
+  versionNumber: number;
+  title: string;
+  scriptText: string;
+  visualDescription: string;
+  durationSeconds: number;
+  position: number;
+  orderingJson: string;
+  contentHash: string;
+  changeSummary: string | null;
+  createdAt: string;
+  createdBy: string;
+};
+
+export type MediaGenerationPromptVersion = {
+  id: string;
+  projectId: string;
+  sceneId: string;
+  sceneVersionId: string;
+  versionNumber: number;
+  providerKey: string;
+  taskType: string;
+  positivePrompt: string;
+  negativePrompt: string;
+  settingsJson: string;
+  referenceAssetIdsJson: string;
+  contentHash: string;
+  createdAt: string;
+  createdBy: string;
 };
 
 export type MediaAsset = {
@@ -489,13 +523,16 @@ export function updateMediaScene(db: Database.Database, projectId: string, scene
   getActiveMediaProjectOrThrow(db, projectId);
   const existing = getMediaSceneOrThrow(db, projectId, sceneId);
   const promptChanged = existing.title !== input.title || existing.dialogue !== input.dialogue || existing.visualPrompt !== input.visualPrompt || existing.aspectRatio !== input.aspectRatio || existing.durationSeconds !== input.durationSeconds;
+  const nextStatus = promptChanged && existing.status === "APPROVED" ? "DRAFT" : input.status;
   db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status=?,approved_at=?,updated_at=? WHERE id=? AND media_project_id=?`)
-    .run(input.title, input.visualPrompt, input.durationSeconds, input.dialogue, input.visualPrompt, input.aspectRatio, input.status, input.status === "APPROVED" ? (existing.approvedAt ?? input.now) : null, input.now, sceneId, projectId);
-  audit("MEDIA_SCENE_UPDATED", `Scene ${input.title} updated`, { projectId, payload: { sceneId, status: input.status } });
+    .run(input.title, input.visualPrompt, input.durationSeconds, input.dialogue, input.visualPrompt, input.aspectRatio, nextStatus, nextStatus === "APPROVED" ? (existing.approvedAt ?? input.now) : null, input.now, sceneId, projectId);
+  const updated = getMediaSceneOrThrow(db, projectId, sceneId);
+  if (promptChanged) createSceneVersion(db, updated, { now: input.now, createdBy: "local-user", changeSummary: "Scene edited" });
+  audit("MEDIA_SCENE_UPDATED", `Scene ${input.title} updated`, { projectId, payload: { sceneId, status: nextStatus } });
   if (promptChanged) {
     audit("MEDIA_FLOW_PROMPT_UPDATED", `Flow prompt updated for scene ${input.title}`, { projectId, payload: { sceneId, flowPrompt: buildGoogleFlowPrompt({ ...existing, ...input }, getPromptContext(db, projectId)) } });
   }
-  return getMediaSceneOrThrow(db, projectId, sceneId);
+  return updated;
 }
 
 export function approveMediaScene(db: Database.Database, projectId: string, sceneId: string, timestamp: string, audit: MediaAuditWriter): MediaScene {
@@ -526,6 +563,68 @@ export function getSceneProviderPrompt(db: Database.Database, projectId: string,
   return buildGoogleFlowPrompt(scene, getPromptContext(db, projectId));
 }
 
+export function listSceneVersions(db: Database.Database, projectId: string, sceneId: string): MediaSceneVersion[] {
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  ensureSceneVersion(db, projectId, sceneId, { now: new Date().toISOString(), createdBy: "system", changeSummary: "Initial scene version" });
+  return db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,version_number AS versionNumber,title,script_text AS scriptText,visual_description AS visualDescription,duration_seconds AS durationSeconds,position,ordering_json AS orderingJson,content_hash AS contentHash,change_summary AS changeSummary,created_at AS createdAt,created_by AS createdBy
+    FROM media_scene_versions WHERE media_project_id=? AND scene_id=? ORDER BY version_number DESC`).all(projectId, sceneId) as MediaSceneVersion[];
+}
+
+export function getSceneVersion(db: Database.Database, projectId: string, sceneId: string, versionId: string): MediaSceneVersion {
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  const version = db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,version_number AS versionNumber,title,script_text AS scriptText,visual_description AS visualDescription,duration_seconds AS durationSeconds,position,ordering_json AS orderingJson,content_hash AS contentHash,change_summary AS changeSummary,created_at AS createdAt,created_by AS createdBy
+    FROM media_scene_versions WHERE id=? AND media_project_id=? AND scene_id=?`).get(versionId, projectId, sceneId) as MediaSceneVersion | undefined;
+  if (!version) throw new MediaStudioError("Scene version not found", 404);
+  return version;
+}
+
+export function listPromptVersions(db: Database.Database, projectId: string, sceneId: string): MediaGenerationPromptVersion[] {
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  return db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,scene_version_id AS sceneVersionId,version_number AS versionNumber,provider_key AS providerKey,task_type AS taskType,positive_prompt AS positivePrompt,negative_prompt AS negativePrompt,settings_json AS settingsJson,reference_asset_ids_json AS referenceAssetIdsJson,content_hash AS contentHash,created_at AS createdAt,created_by AS createdBy
+    FROM media_generation_prompt_versions WHERE media_project_id=? AND scene_id=? ORDER BY version_number DESC`).all(projectId, sceneId) as MediaGenerationPromptVersion[];
+}
+
+export function getPromptVersion(db: Database.Database, projectId: string, sceneId: string, versionId: string): MediaGenerationPromptVersion {
+  getMediaSceneOrThrow(db, projectId, sceneId);
+  const version = db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,scene_version_id AS sceneVersionId,version_number AS versionNumber,provider_key AS providerKey,task_type AS taskType,positive_prompt AS positivePrompt,negative_prompt AS negativePrompt,settings_json AS settingsJson,reference_asset_ids_json AS referenceAssetIdsJson,content_hash AS contentHash,created_at AS createdAt,created_by AS createdBy
+    FROM media_generation_prompt_versions WHERE id=? AND media_project_id=? AND scene_id=?`).get(versionId, projectId, sceneId) as MediaGenerationPromptVersion | undefined;
+  if (!version) throw new MediaStudioError("Prompt version not found", 404);
+  return version;
+}
+
+export function restoreSceneVersion(db: Database.Database, projectId: string, sceneId: string, versionId: string, input: { now: string; createdBy?: string; changeSummary?: string }, audit: MediaAuditWriter): MediaScene {
+  const version = getSceneVersion(db, projectId, sceneId, versionId);
+  const summary = sanitizeChangeSummary(input.changeSummary ?? `Restored scene version ${version.versionNumber}`);
+  db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
+    .run(version.title, version.visualDescription, version.durationSeconds, version.scriptText, version.visualDescription, input.now, sceneId, projectId);
+  const current = getMediaSceneOrThrow(db, projectId, sceneId);
+  createSceneVersion(db, current, { now: input.now, createdBy: input.createdBy ?? "local-user", changeSummary: summary ?? undefined, force: true });
+  audit("MEDIA_SCENE_VERSION_RESTORED", `Scene ${current.title} restored from version ${version.versionNumber}`, { projectId, payload: { sceneId, versionId, restoredVersion: version.versionNumber } });
+  return current;
+}
+
+export function ensurePromptVersionForScene(db: Database.Database, projectId: string, sceneId: string, input: { id?: string; providerKey: string; taskType: string; positivePrompt?: string; negativePrompt?: string; settings?: Record<string, unknown>; referenceAssetIds?: string[]; now: string; createdBy?: string }): MediaGenerationPromptVersion {
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  if (!tableExists(db, "media_generation_prompt_versions")) {
+    return { id: "", projectId, sceneId, sceneVersionId: "", versionNumber: 1, providerKey: input.providerKey, taskType: input.taskType, positivePrompt: input.positivePrompt ?? buildGoogleFlowPrompt(scene, getPromptContext(db, projectId)), negativePrompt: input.negativePrompt ?? "", settingsJson: canonicalJson(sanitizePromptSettings(input.settings ?? {})), referenceAssetIdsJson: "[]", contentHash: "", createdAt: input.now, createdBy: input.createdBy ?? "local-user" };
+  }
+  const sceneVersion = ensureSceneVersion(db, projectId, sceneId, { now: input.now, createdBy: input.createdBy ?? "local-user", changeSummary: "Scene snapshot for generation" });
+  const referenceAssetIds = input.referenceAssetIds ?? listSceneReferenceAssetIds(db, projectId, sceneId);
+  assertReferenceAssetsBelongToProject(db, projectId, referenceAssetIds);
+  const settingsJson = canonicalJson(sanitizePromptSettings(input.settings ?? {}));
+  const referenceJson = canonicalJson([...referenceAssetIds].sort());
+  const positivePrompt = input.positivePrompt ?? buildGoogleFlowPrompt(scene, getPromptContext(db, projectId));
+  const contentHash = hashCanonical({ sceneVersionId: sceneVersion.id, providerKey: input.providerKey, taskType: input.taskType, positivePrompt, negativePrompt: input.negativePrompt ?? "", settings: JSON.parse(settingsJson), referenceAssetIds: JSON.parse(referenceJson) });
+  const latest = db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,scene_version_id AS sceneVersionId,version_number AS versionNumber,provider_key AS providerKey,task_type AS taskType,positive_prompt AS positivePrompt,negative_prompt AS negativePrompt,settings_json AS settingsJson,reference_asset_ids_json AS referenceAssetIdsJson,content_hash AS contentHash,created_at AS createdAt,created_by AS createdBy
+    FROM media_generation_prompt_versions WHERE media_project_id=? AND scene_id=? AND provider_key=? AND task_type=? ORDER BY version_number DESC LIMIT 1`).get(projectId, sceneId, input.providerKey, input.taskType) as MediaGenerationPromptVersion | undefined;
+  if (latest?.contentHash === contentHash) return latest;
+  const versionNumber = (latest?.versionNumber ?? 0) + 1;
+  const id = input.id ?? randomUUID();
+  db.prepare(`INSERT INTO media_generation_prompt_versions (id,media_project_id,scene_id,scene_version_id,version_number,provider_key,task_type,positive_prompt,negative_prompt,settings_json,reference_asset_ids_json,content_hash,created_at,created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, sceneId, sceneVersion.id, versionNumber, input.providerKey, input.taskType, positivePrompt, input.negativePrompt ?? "", settingsJson, referenceJson, contentHash, input.now, input.createdBy ?? "local-user");
+  return getPromptVersion(db, projectId, sceneId, id);
+}
+
 export function reorderMediaScenes(db: Database.Database, projectId: string, sceneIds: string[], timestamp: string, audit: MediaAuditWriter): MediaScene[] {
   getActiveMediaProjectOrThrow(db, projectId);
   const scenes = listMediaScenes(db, projectId);
@@ -536,6 +635,9 @@ export function reorderMediaScenes(db: Database.Database, projectId: string, sce
   const update = db.prepare("UPDATE media_scenes SET position=?,updated_at=? WHERE id=? AND media_project_id=?");
   for (const [index, sceneId] of sceneIds.entries()) {
     update.run(index + 1, timestamp, sceneId, projectId);
+  }
+  for (const scene of listMediaScenes(db, projectId)) {
+    createSceneVersion(db, scene, { now: timestamp, createdBy: "local-user", changeSummary: "Scene order changed" });
   }
   audit("MEDIA_SCENES_REORDERED", "Media scenes reordered", { projectId, payload: { sceneIds, timestamp } });
   return listMediaScenes(db, projectId);
@@ -1015,11 +1117,13 @@ function applyTemplateStructure(db: Database.Database, projectId: string, templa
       if (options.replaceAssets) db.prepare("DELETE FROM media_assets WHERE scene_id=? AND media_project_id=?").run(existing.id, projectId);
       db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
         .run(templateScene.title, templateScene.prompt, templateScene.durationSeconds, templateScene.dialogue ?? "", buildTemplateVisualPrompt(template, templateScene), template.aspectRatio, options.now, existing.id, projectId);
+      createSceneVersion(db, getMediaSceneOrThrow(db, projectId, existing.id), { now: options.now, createdBy: "local-user", changeSummary: `Applied template ${template.name}` });
       if (options.replaceAssets) insertTemplateReferenceAsset(db, projectId, existing.id, templateScene, options);
     } else {
       const sceneId = options.createId();
       db.prepare(`INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, templateScene.title, templateScene.prompt, templateScene.durationSeconds, templateScene.dialogue ?? "", buildTemplateVisualPrompt(template, templateScene), template.aspectRatio, "DRAFT", options.now, options.now);
+      createSceneVersion(db, getMediaSceneOrThrow(db, projectId, sceneId), { now: options.now, createdBy: "local-user", changeSummary: "Initial scene version" });
       insertTemplateReferenceAsset(db, projectId, sceneId, templateScene, options);
     }
   }
@@ -1102,6 +1206,7 @@ function replaceBrief(db: Database.Database, projectId: string, draft: BriefDraf
     const sceneId = createId();
     db.prepare(`INSERT INTO media_scenes (id,media_project_id,brief_id,position,title,description,duration_seconds,dialogue,visual_prompt,aspect_ratio,status,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sceneId, projectId, briefId, index + 1, scene.title, scene.description, scene.durationSeconds, scene.dialogue ?? "", scene.visualPrompt ?? scene.description, scene.aspectRatio ?? "16:9", "DRAFT", timestamp, timestamp);
+    createSceneVersion(db, getMediaSceneOrThrow(db, projectId, sceneId), { now: timestamp, createdBy: "local-user", changeSummary: "Initial scene version" });
     db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?)`).run(createId(), projectId, sceneId, "reference", scene.assetLabel, "chat-derived", "PLANNED", timestamp, timestamp);
   }
@@ -1239,7 +1344,9 @@ function deterministicSceneFromMessage(existing: MediaScene, message: string): V
 function replaceSceneFromDirector(db: Database.Database, projectId: string, sceneId: string, scene: VideoDirectorScene, timestamp: string): MediaScene {
   db.prepare(`UPDATE media_scenes SET title=?,description=?,duration_seconds=?,dialogue=?,visual_prompt=?,aspect_ratio=?,status='DRAFT',approved_at=NULL,updated_at=? WHERE id=? AND media_project_id=?`)
     .run(scene.title, scene.description, scene.durationSeconds, scene.dialogue, scene.visualPrompt, scene.aspectRatio, timestamp, sceneId, projectId);
-  return getMediaSceneOrThrow(db, projectId, sceneId);
+  const updated = getMediaSceneOrThrow(db, projectId, sceneId);
+  createSceneVersion(db, updated, { now: timestamp, createdBy: "local-user", changeSummary: "Scene regenerated by director" });
+  return updated;
 }
 
 function insertDirectorGenerationJob(db: Database.Database, id: string, projectId: string, providerKey: string, status: string, request: unknown, result: unknown, timestamp: string) {
@@ -1319,6 +1426,65 @@ function getMediaAssetOrThrow(db: Database.Database, projectId: string, assetId:
   return hydrateAssetApproval(db, asset);
 }
 
+function ensureSceneVersion(db: Database.Database, projectId: string, sceneId: string, input: { now: string; createdBy: string; changeSummary?: string }): MediaSceneVersion {
+  const scene = getMediaSceneOrThrow(db, projectId, sceneId);
+  return createSceneVersion(db, scene, input);
+}
+
+function createSceneVersion(db: Database.Database, scene: MediaScene, input: { now: string; createdBy: string; changeSummary?: string; force?: boolean }): MediaSceneVersion {
+  if (!tableExists(db, "media_scene_versions")) {
+    return { id: "", projectId: scene.mediaProjectId, sceneId: scene.id, versionNumber: 1, title: scene.title, scriptText: scene.dialogue, visualDescription: scene.visualPrompt || scene.description, durationSeconds: scene.durationSeconds, position: scene.position, orderingJson: "{}", contentHash: "", changeSummary: null, createdAt: input.now, createdBy: input.createdBy };
+  }
+  const ordering = { position: scene.position, aspectRatio: scene.aspectRatio };
+  const contentHash = hashCanonical({ title: scene.title, scriptText: scene.dialogue, visualDescription: scene.visualPrompt || scene.description, durationSeconds: scene.durationSeconds, ordering });
+  const latest = db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,version_number AS versionNumber,title,script_text AS scriptText,visual_description AS visualDescription,duration_seconds AS durationSeconds,position,ordering_json AS orderingJson,content_hash AS contentHash,change_summary AS changeSummary,created_at AS createdAt,created_by AS createdBy
+    FROM media_scene_versions WHERE media_project_id=? AND scene_id=? ORDER BY version_number DESC LIMIT 1`).get(scene.mediaProjectId, scene.id) as MediaSceneVersion | undefined;
+  if (!input.force && latest?.contentHash === contentHash) return latest;
+  const id = randomUUID();
+  const versionNumber = (latest?.versionNumber ?? 0) + 1;
+  db.prepare(`INSERT INTO media_scene_versions (id,media_project_id,scene_id,version_number,title,script_text,visual_description,duration_seconds,position,ordering_json,content_hash,change_summary,created_at,created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, scene.mediaProjectId, scene.id, versionNumber, scene.title, scene.dialogue, scene.visualPrompt || scene.description, scene.durationSeconds, scene.position, canonicalJson(ordering), contentHash, sanitizeChangeSummary(input.changeSummary), input.now, input.createdBy);
+  return db.prepare(`SELECT id,media_project_id AS projectId,scene_id AS sceneId,version_number AS versionNumber,title,script_text AS scriptText,visual_description AS visualDescription,duration_seconds AS durationSeconds,position,ordering_json AS orderingJson,content_hash AS contentHash,change_summary AS changeSummary,created_at AS createdAt,created_by AS createdBy
+    FROM media_scene_versions WHERE id=?`).get(id) as MediaSceneVersion;
+}
+
+function sanitizeChangeSummary(value: string | undefined): string | null {
+  const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 500);
+}
+
+function sanitizePromptSettings(value: Record<string, unknown>): Record<string, unknown> {
+  const forbidden = /secret|api[_-]?key|token|signed[_-]?url|authorization|password/i;
+  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => !forbidden.test(key) && typeof entry !== "function"));
+}
+
+function listSceneReferenceAssetIds(db: Database.Database, projectId: string, sceneId: string): string[] {
+  return (db.prepare("SELECT id FROM media_assets WHERE media_project_id=? AND scene_id=? AND kind IN ('reference','image','audio') ORDER BY created_at").all(projectId, sceneId) as Array<{ id: string }>).map((row) => row.id);
+}
+
+function assertReferenceAssetsBelongToProject(db: Database.Database, projectId: string, assetIds: string[]): void {
+  if (!assetIds.length) return;
+  const rows = db.prepare(`SELECT id FROM media_assets WHERE media_project_id=? AND id IN (${assetIds.map(() => "?").join(",")})`).all(projectId, ...assetIds) as Array<{ id: string }>;
+  if (rows.length !== new Set(assetIds).size) throw new MediaStudioError("Prompt reference assets must belong to the same media project", 400);
+}
+
+function tableExists(db: Database.Database, tableName: string): boolean {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName));
+}
+
+function hashCanonical(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function hydrateAssetApproval(db: Database.Database, asset: MediaAsset): MediaAsset {
   if (!hasAssetApprovalColumns(db)) return { ...asset, approvalStatus: null, approvalFeedback: null, approvedAt: null, approvedBy: null, rejectedAt: null, rejectedBy: null };
   const approval = db.prepare(`SELECT approval_status AS approvalStatus,approval_feedback AS approvalFeedback,approved_at AS approvedAt,approved_by AS approvedBy,rejected_at AS rejectedAt,rejected_by AS rejectedBy
@@ -1340,6 +1506,20 @@ export function buildGeneratedAssetMetadata(db: Database.Database, projectId: st
   const previous = db.prepare(`SELECT id FROM media_assets
     WHERE media_project_id=? AND scene_id=? AND source IN ('comfyui-wan','longcat-avatar','ovi','ltx','google-flow') ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId) as { id: string } | undefined;
   return previous ? { ...metadata, previousGeneratedAssetId: previous.id } : metadata;
+}
+
+export function linkGeneratedAssetVersion(db: Database.Database, projectId: string, assetId: string, sceneVersionId: string | null | undefined, promptVersionId: string | null | undefined): void {
+  const columns = db.prepare("PRAGMA table_info(media_assets)").all() as Array<{ name: string }>;
+  const hasPromptColumn = columns.some((column) => column.name === "prompt_version_id");
+  const asset = db.prepare("SELECT metadata_json AS metadataJson FROM media_assets WHERE id=? AND media_project_id=?").get(assetId, projectId) as { metadataJson: string | null } | undefined;
+  if (!asset) return;
+  const metadata = parseMetadata(asset.metadataJson);
+  const next = { ...metadata, sceneVersionId: sceneVersionId ?? metadata.sceneVersionId ?? null, promptVersionId: promptVersionId ?? metadata.promptVersionId ?? null };
+  if (hasPromptColumn) {
+    db.prepare("UPDATE media_assets SET scene_version_id=?,prompt_version_id=?,metadata_json=? WHERE id=? AND media_project_id=?").run(sceneVersionId ?? null, promptVersionId ?? null, JSON.stringify(next), assetId, projectId);
+  } else {
+    db.prepare("UPDATE media_assets SET metadata_json=? WHERE id=? AND media_project_id=?").run(JSON.stringify(next), assetId, projectId);
+  }
 }
 
 function assertGeneratedAsset(asset: MediaAsset): void {

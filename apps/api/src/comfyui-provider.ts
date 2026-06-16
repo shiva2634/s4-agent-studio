@@ -165,6 +165,7 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
   approved: boolean;
   fps?: number;
   seed?: number;
+  promptOverride?: string;
   config?: ComfyConfig;
   fetchImpl?: ComfyHttp;
   storageRoot?: string;
@@ -185,7 +186,7 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
     const imageAsset = getSceneInputImage(db, projectId, sceneId);
     uploadedImage = await uploadInputImage(config, imageAsset, fetchImpl);
   }
-  const compiled = compileWorkflow(activeWorkflow, scene, { fps: input.fps, seed: input.seed, inputImage: uploadedImage ?? undefined });
+  const compiled = compileWorkflow(activeWorkflow, scene, { fps: input.fps, seed: input.seed, inputImage: uploadedImage ?? undefined, promptOverride: input.promptOverride });
   insertGenerationJob(db, input.jobId, projectId, "wan-2.2", "QUEUED", { sceneId, mode: input.mode, workflowId: activeWorkflow.id, workflowVersion: activeWorkflow.version, values: compiled.values }, input.now);
   db.prepare("UPDATE media_scenes SET status='GENERATING',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
   updateGenerationJob(db, input.jobId, "RUNNING", input.now, "Starting ComfyUI Wan generation");
@@ -390,7 +391,7 @@ export function validateComfyWorkflow(workflowType: ComfyWorkflowType, workflowJ
   return { valid: issues.length === 0, issues };
 }
 
-function compileWorkflow(workflow: ComfyWorkflowRow, scene: SceneRow, input: { fps?: number; seed?: number; inputImage?: string }) {
+function compileWorkflow(workflow: ComfyWorkflowRow, scene: SceneRow, input: { fps?: number; seed?: number; inputImage?: string; promptOverride?: string }) {
   if (workflow.status !== "VALID" || workflow.isBuiltin || workflow.deletedAt) throw new MediaStudioError("ComfyUI workflow is not valid for generation", 409);
   const workflowJson = JSON.parse(workflow.workflowJson) as Record<string, unknown>;
   const mapping = JSON.parse(workflow.mappingJson) as ComfyWorkflowMapping;
@@ -399,7 +400,7 @@ function compileWorkflow(workflow: ComfyWorkflowRow, scene: SceneRow, input: { f
   const fps = input.fps ?? 24;
   const seed = input.seed ?? 1;
   const values = {
-    prompt: scene.visualPrompt,
+    prompt: input.promptOverride ?? scene.visualPrompt,
     image: input.inputImage,
     width: dimensions.width,
     height: dimensions.height,

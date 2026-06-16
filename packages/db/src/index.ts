@@ -218,6 +218,8 @@ export function initializeDatabase() {
       approved_by TEXT,
       rejected_at TEXT,
       rejected_by TEXT,
+      scene_version_id TEXT,
+      prompt_version_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE,
@@ -274,9 +276,45 @@ export function initializeDatabase() {
       status TEXT NOT NULL DEFAULT 'STUBBED',
       request_json TEXT NOT NULL,
       result_json TEXT,
+      scene_version_id TEXT,
+      prompt_version_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS media_scene_versions (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      scene_id TEXT NOT NULL,
+      version_number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      script_text TEXT NOT NULL DEFAULT '',
+      visual_description TEXT NOT NULL DEFAULT '',
+      duration_seconds INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      ordering_json TEXT NOT NULL DEFAULT '{}',
+      content_hash TEXT NOT NULL,
+      change_summary TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      UNIQUE(scene_id, version_number)
+    );
+    CREATE TABLE IF NOT EXISTS media_generation_prompt_versions (
+      id TEXT PRIMARY KEY,
+      media_project_id TEXT NOT NULL,
+      scene_id TEXT NOT NULL,
+      scene_version_id TEXT NOT NULL,
+      version_number INTEGER NOT NULL,
+      provider_key TEXT NOT NULL,
+      task_type TEXT NOT NULL,
+      positive_prompt TEXT NOT NULL,
+      negative_prompt TEXT NOT NULL DEFAULT '',
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      reference_asset_ids_json TEXT NOT NULL DEFAULT '[]',
+      content_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      UNIQUE(scene_id, provider_key, task_type, version_number)
     );
     CREATE TABLE IF NOT EXISTS media_generation_status_history (
       id TEXT PRIMARY KEY,
@@ -344,6 +382,8 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_media_messages_project ON media_chat_messages(media_project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_scenes_project ON media_scenes(media_project_id, position);
     CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(media_project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_media_scene_versions_scene ON media_scene_versions(media_project_id, scene_id, version_number);
+    CREATE INDEX IF NOT EXISTS idx_media_prompt_versions_scene ON media_generation_prompt_versions(media_project_id, scene_id, version_number);
     CREATE INDEX IF NOT EXISTS idx_media_brand_kits_project ON media_brand_kits(media_project_id, deleted_at, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_presenter_profiles_project ON media_presenter_profiles(media_project_id, deleted_at, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_templates_type ON media_project_templates(template_type, archived_at, created_at);
@@ -458,6 +498,57 @@ export function initializeDatabase() {
   if (!mediaAssetColumns.some((column) => column.name === "rejected_by")) {
     db.exec("ALTER TABLE media_assets ADD COLUMN rejected_by TEXT");
   }
+  if (!mediaAssetColumns.some((column) => column.name === "scene_version_id")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN scene_version_id TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "prompt_version_id")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN prompt_version_id TEXT");
+  }
+
+  const mediaJobColumns = db.prepare("PRAGMA table_info(media_generation_jobs)").all() as Array<{ name: string }>;
+  if (!mediaJobColumns.some((column) => column.name === "scene_version_id")) {
+    db.exec("ALTER TABLE media_generation_jobs ADD COLUMN scene_version_id TEXT");
+  }
+  if (!mediaJobColumns.some((column) => column.name === "prompt_version_id")) {
+    db.exec("ALTER TABLE media_generation_jobs ADD COLUMN prompt_version_id TEXT");
+  }
+
+  db.exec(`CREATE TABLE IF NOT EXISTS media_scene_versions (
+    id TEXT PRIMARY KEY,
+    media_project_id TEXT NOT NULL,
+    scene_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    script_text TEXT NOT NULL DEFAULT '',
+    visual_description TEXT NOT NULL DEFAULT '',
+    duration_seconds INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    ordering_json TEXT NOT NULL DEFAULT '{}',
+    content_hash TEXT NOT NULL,
+    change_summary TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE(scene_id, version_number)
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS media_generation_prompt_versions (
+    id TEXT PRIMARY KEY,
+    media_project_id TEXT NOT NULL,
+    scene_id TEXT NOT NULL,
+    scene_version_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    provider_key TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    positive_prompt TEXT NOT NULL,
+    negative_prompt TEXT NOT NULL DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    reference_asset_ids_json TEXT NOT NULL DEFAULT '[]',
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE(scene_id, provider_key, task_type, version_number)
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_scene_versions_scene ON media_scene_versions(media_project_id, scene_id, version_number)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_prompt_versions_scene ON media_generation_prompt_versions(media_project_id, scene_id, version_number)");
 
   db.exec(`CREATE TABLE IF NOT EXISTS media_brand_kits (
     id TEXT PRIMARY KEY,

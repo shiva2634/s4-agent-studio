@@ -47,6 +47,7 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   outputAssetId: string;
   now: string;
   approved: boolean;
+  promptOverride?: string;
   config?: LongCatConfig;
   fetchImpl?: LongCatHttp;
   storageRoot?: string;
@@ -63,12 +64,13 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   const fetchImpl = input.fetchImpl ?? fetch;
   const storageRoot = resolveStorageRoot(input.storageRoot);
 
-  insertGenerationJob(db, input.jobId, projectId, "longcat-avatar", "QUEUED", { sceneId, mode: "PRESENTER", prompt: scene.visualPrompt }, input.now);
+  const prompt = input.promptOverride ?? scene.visualPrompt;
+  insertGenerationJob(db, input.jobId, projectId, "longcat-avatar", "QUEUED", { sceneId, mode: "PRESENTER", prompt }, input.now);
   updateGenerationJob(db, input.jobId, "RUNNING", input.now, "Starting LongCat presenter generation");
   audit("MEDIA_LONGCAT_GENERATION_STARTED", `LongCat generation started for scene ${scene.title}`, { projectId, payload: { sceneId, jobId: input.jobId } });
 
   try {
-    const remoteJobId = await submitLongCatJob(config, { scene, image, audio }, fetchImpl);
+    const remoteJobId = await submitLongCatJob(config, { scene, image, audio, prompt }, fetchImpl);
     updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted LongCat job ${remoteJobId}`, { remoteJobId }, "submitted");
     const output = await pollLongCatOutput(config, remoteJobId, fetchImpl, input.shouldCancel, input.pollingIntervalMs, (status, progress) => {
       recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: "LongCat generation update", providerStatus: status });
@@ -124,13 +126,13 @@ export async function retryLongCatGeneration(db: Database.Database, projectId: s
   return generateLongCatPresenter(db, projectId, request.sceneId, input, audit);
 }
 
-async function submitLongCatJob(config: LongCatConfig, input: { scene: SceneRow; image: AssetRow; audio: AssetRow }, fetchImpl: LongCatHttp) {
+async function submitLongCatJob(config: LongCatConfig, input: { scene: SceneRow; image: AssetRow; audio: AssetRow; prompt: string }, fetchImpl: LongCatHttp) {
   const form = new FormData();
   const imageBytes = await fs.readFile(input.image.localPath);
   const audioBytes = await fs.readFile(input.audio.localPath);
   form.append("image", new Blob([new Uint8Array(imageBytes)], { type: input.image.mimeType ?? "image/png" }), input.image.fileName ?? input.image.originalName ?? "input.png");
   form.append("audio", new Blob([new Uint8Array(audioBytes)], { type: input.audio.mimeType ?? "audio/wav" }), input.audio.fileName ?? input.audio.originalName ?? "input.wav");
-  form.append("prompt", input.scene.visualPrompt);
+  form.append("prompt", input.prompt);
   form.append("dialogue", input.scene.dialogue);
   form.append("scene_title", input.scene.title);
   const response = await fetchWithTimeout(`${trimBaseUrl(config.baseUrl)}/jobs`, { method: "POST", body: form }, config.timeoutMs, fetchImpl);

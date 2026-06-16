@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { MediaStudioError, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, ensurePromptVersionForScene, getPromptVersion, type MediaAuditWriter } from "./media-studio.js";
 import { routeMediaGeneration, type MediaProviderTask, type ProviderKey } from "./media-provider-router.js";
 import { recordGenerationStatusHistory, sanitizeHistoryMessage } from "./media-generation-history.js";
 import { loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
@@ -24,6 +24,7 @@ export type EnqueueGenerationInput = {
   maxAttempts?: number;
   fps?: number;
   seed?: number;
+  promptVersionId?: string;
   now: string;
   jobId?: string;
   outputAssetId?: string;
@@ -79,6 +80,15 @@ export class MediaGenerationWorker {
     assertSceneExists(this.db, input.projectId, input.sceneId);
     const jobId = input.jobId ?? nanoid();
     const outputAssetId = input.outputAssetId ?? nanoid();
+    const promptVersion = input.promptVersionId
+      ? getPromptVersion(this.db, input.projectId, input.sceneId, input.promptVersionId)
+      : ensurePromptVersionForScene(this.db, input.projectId, input.sceneId, {
+        providerKey: input.providerKey ?? "router",
+        taskType: input.task,
+        settings: { fps: input.fps, seed: input.seed, maxAttempts: input.maxAttempts },
+        now: input.now,
+        createdBy: "local-user"
+      });
     const request = {
       sceneId: input.sceneId,
       task: input.task,
@@ -88,10 +98,13 @@ export class MediaGenerationWorker {
       maxAttempts: input.maxAttempts,
       fps: input.fps,
       seed: input.seed,
-      outputAssetId
+      outputAssetId,
+      sceneVersionId: promptVersion.sceneVersionId || undefined,
+      promptVersionId: promptVersion.id || undefined
     };
     this.db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(jobId, input.projectId, input.providerKey ?? "router", "QUEUED", JSON.stringify(request), null, input.now, input.now);
+    updateGenerationJobVersionLinks(this.db, jobId, promptVersion.sceneVersionId || null, promptVersion.id || null);
     recordGenerationStatusHistory(this.db, { generationJobId: jobId, status: "QUEUED", createdAt: input.now, message: "Generation job queued", providerStatus: input.providerKey ?? "router" });
     this.enqueue(jobId);
     return getGenerationJob(this.db, input.projectId, jobId);
@@ -122,6 +135,7 @@ export class MediaGenerationWorker {
       maxAttempts: request.maxAttempts,
       fps: request.fps,
       seed: request.seed,
+      promptVersionId: request.promptVersionId,
       now: input.now,
       jobId: input.jobId
     });
@@ -178,6 +192,8 @@ export class MediaGenerationWorker {
         maxAttempts: request.maxAttempts,
         fps: request.fps,
         seed: request.seed,
+        promptVersionId: request.promptVersionId,
+        sceneVersionId: request.sceneVersionId,
         config: this.deps.comfyConfig ?? loadComfyConfig(),
         fetchImpl: this.deps.comfyFetch,
         longCatConfig: this.deps.longCatConfig ?? loadLongCatConfig(),
@@ -236,7 +252,15 @@ function parseRequest(value: string) {
     fps?: number;
     seed?: number;
     outputAssetId: string;
+    sceneVersionId?: string;
+    promptVersionId?: string;
   };
+}
+
+function updateGenerationJobVersionLinks(db: Database.Database, jobId: string, sceneVersionId: string | null, promptVersionId: string | null) {
+  const columns = db.prepare("PRAGMA table_info(media_generation_jobs)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "prompt_version_id")) return;
+  db.prepare("UPDATE media_generation_jobs SET scene_version_id=?,prompt_version_id=? WHERE id=?").run(sceneVersionId, promptVersionId, jobId);
 }
 
 function safeJson(value: string): Record<string, unknown> {

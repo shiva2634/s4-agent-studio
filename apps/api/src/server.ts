@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -16,7 +16,7 @@ import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./p
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getPromptVersion, getSceneFlowPrompt, getSceneVersion, importSceneAsset, listMediaProjects, listMediaTemplates, listPromptVersions, listSceneVersions, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, restoreSceneVersion, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
 import { activateComfyWorkflow, comfyStatusResponse, deleteComfyWorkflow, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
@@ -481,6 +481,78 @@ app.get("/api/media/projects/:projectId/scenes/:sceneId/flow-prompt", async (req
   }
 });
 
+app.get("/api/media/projects/:projectId/scenes/:sceneId/versions", async (request: any, reply) => {
+  try {
+    return { versions: listSceneVersions(db, request.params.projectId, request.params.sceneId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to list scene versions" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/scenes/:sceneId/versions/:versionId", async (request: any, reply) => {
+  try {
+    return { version: getSceneVersion(db, request.params.projectId, request.params.sceneId, request.params.versionId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load scene version" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/versions/:versionId/restore", async (request: any, reply) => {
+  const parsed = RestoreMediaSceneVersionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid scene version restore", details: parsed.error.flatten() });
+  if (!parsed.data.approved) return reply.status(403).send({ error: "Restoring a scene version requires approval" });
+  try {
+    const scene = restoreSceneVersion(db, request.params.projectId, request.params.sceneId, request.params.versionId, { now: now(), createdBy: "local-user", changeSummary: parsed.data.changeSummary }, audit);
+    return { scene, versions: listSceneVersions(db, request.params.projectId, request.params.sceneId), bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to restore scene version" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/scenes/:sceneId/prompt-versions", async (request: any, reply) => {
+  try {
+    return { versions: listPromptVersions(db, request.params.projectId, request.params.sceneId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to list prompt versions" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/scenes/:sceneId/prompt-versions/:versionId", async (request: any, reply) => {
+  try {
+    return { version: getPromptVersion(db, request.params.projectId, request.params.sceneId, request.params.versionId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load prompt version" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/scenes/:sceneId/prompt-versions/:versionId/reuse", async (request: any, reply) => {
+  const parsed = ReuseMediaPromptVersionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid prompt reuse request", details: parsed.error.flatten() });
+  try {
+    const version = getPromptVersion(db, request.params.projectId, request.params.sceneId, request.params.versionId);
+    const job = generationWorker.enqueueGeneration({
+      projectId: request.params.projectId,
+      sceneId: request.params.sceneId,
+      task: version.taskType as any,
+      providerKey: version.providerKey === "router" ? undefined : version.providerKey as any,
+      approved: parsed.data.approved,
+      paidProviderApproved: parsed.data.paidProviderApproved,
+      maxAttempts: parsed.data.maxAttempts,
+      promptVersionId: version.id,
+      now: now()
+    });
+    return reply.status(202).send({ job });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reuse prompt version" });
+  }
+});
+
 app.post("/api/media/projects/:projectId/scenes/:sceneId/generate/wan", async (request: any, reply) => {
   const parsed = GenerateWanSceneSchema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.status(400).send({ error: "Invalid Wan generation request", details: parsed.error.flatten() });
@@ -493,6 +565,7 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate/wan", async (r
       approved: parsed.data.approved,
       fps: parsed.data.fps,
       seed: parsed.data.seed,
+      promptVersionId: parsed.data.promptVersionId,
       now: now()
     });
     return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
@@ -516,6 +589,7 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
       maxAttempts: parsed.data.maxAttempts,
       fps: parsed.data.fps,
       seed: parsed.data.seed,
+      promptVersionId: parsed.data.promptVersionId,
       now: now()
     });
     return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });

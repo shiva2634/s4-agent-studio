@@ -43,6 +43,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   outputAssetId: string;
   now: string;
   approved: boolean;
+  promptOverride?: string;
   config: ExternalMediaConfig;
   fetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
@@ -55,7 +56,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   assertValidBaseUrl(input.config.baseUrl);
   assertSupportedTask(input.providerKey, input.task);
   const scene = getScene(db, projectId, sceneId);
-  const prompt = getSceneProviderPrompt(db, projectId, sceneId);
+  const prompt = input.promptOverride ?? getSceneProviderPrompt(db, projectId, sceneId);
   const image = input.task === "I2V" ? getSceneAsset(db, projectId, sceneId, "image") : null;
   const audio = input.task === "AUDIO_VIDEO" ? getSceneAsset(db, projectId, sceneId, "audio") : null;
   const fetchImpl = input.fetchImpl ?? fetch;

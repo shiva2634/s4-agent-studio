@@ -17,6 +17,8 @@ type MediaAsset = { id: string; sceneId: string | null; kind: string; label: str
 type AudioSettings = { audioRole: "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO"; volume: number; trimStartSeconds: number; trimEndSeconds: number | null; fadeInSeconds: number; fadeOutSeconds: number; muted: boolean; backgroundMusic: boolean };
 type MediaGenerationJob = { id: string; providerKey: string; status: string; requestJson: string; resultJson: string | null };
 type MediaGenerationStatusHistory = { id: string; generationJobId: string; status: string; progressPercent: number | null; message: string | null; providerStatus: string | null; createdAt: string };
+type MediaSceneVersion = { id: string; sceneId: string; versionNumber: number; title: string; scriptText: string; visualDescription: string; durationSeconds: number; position: number; changeSummary: string | null; createdAt: string; createdBy: string };
+type MediaPromptVersion = { id: string; sceneId: string; sceneVersionId: string; versionNumber: number; providerKey: string; taskType: string; positivePrompt: string; negativePrompt: string; settingsJson: string; referenceAssetIdsJson: string; createdAt: string; createdBy: string };
 type MediaProvider = { key: string; name: string; capabilities: readonly string[]; status: string };
 type RouterCapability = { key: string; name: string; supports: string[]; enabled: boolean; healthy: boolean; priority: number; paid: boolean; mode: string; reason: string };
 type MediaProcessingJob = { id: string; assetId: string; status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"; error: string | null; createdAt: string };
@@ -241,6 +243,8 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   const [selectedSceneId, setSelectedSceneId] = useState("");
   const [selectedGenerationJobId, setSelectedGenerationJobId] = useState("");
   const [generationHistory, setGenerationHistory] = useState<MediaGenerationStatusHistory[]>([]);
+  const [sceneVersions, setSceneVersions] = useState<MediaSceneVersion[]>([]);
+  const [promptVersions, setPromptVersions] = useState<MediaPromptVersion[]>([]);
   const [notice, setNotice] = useState("");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -278,6 +282,17 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
 
   useEffect(() => { void refresh(); }, [selectedId]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ block: "end" }); }, [bundle?.messages.length]);
+  useEffect(() => { void loadVersions(); }, [selectedId, selectedSceneId]);
+
+  async function loadVersions() {
+    if (!selectedId || !selectedSceneId) { setSceneVersions([]); setPromptVersions([]); return; }
+    const [sceneResponse, promptResponse] = await Promise.all([
+      fetch(`${API}/api/media/projects/${selectedId}/scenes/${selectedSceneId}/versions`),
+      fetch(`${API}/api/media/projects/${selectedId}/scenes/${selectedSceneId}/prompt-versions`)
+    ]);
+    if (sceneResponse.ok) setSceneVersions((await sceneResponse.json()).versions ?? []);
+    if (promptResponse.ok) setPromptVersions((await promptResponse.json()).versions ?? []);
+  }
 
   async function sendMessage() {
     const value = input.trim();
@@ -675,6 +690,28 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
     setNotice("Generated asset rejected");
   }
 
+  async function restoreSceneVersion(versionId: string) {
+    if (!selectedId || !selectedSceneId) return;
+    if (!window.confirm("Restore this historical scene version? This creates a new current version.")) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/scenes/${selectedSceneId}/versions/${versionId}/restore`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approved: true, changeSummary: "Restored from history" }) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to restore scene version"); return; }
+    setBundle(data.bundle);
+    setSceneVersions(data.versions ?? []);
+    setNotice("Scene version restored");
+  }
+
+  async function reusePromptVersion(versionId: string) {
+    if (!selectedId || !selectedSceneId) return;
+    const response = await fetch(`${API}/api/media/projects/${selectedId}/scenes/${selectedSceneId}/prompt-versions/${versionId}/reuse`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approved: true }) });
+    const data = await response.json();
+    if (!response.ok) { setError(data.error ?? "Unable to reuse prompt version"); return; }
+    setSelectedGenerationJobId(data.job.id);
+    setNotice("Generation queued from prompt version");
+    await reloadBundle();
+    await loadVersions();
+  }
+
   async function cancelRender(jobId: string) {
     if (!selectedId) return;
     const response = await fetch(`${API}/api/media/projects/${selectedId}/render-jobs/${jobId}/cancel`, { method: "POST" });
@@ -953,6 +990,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
         <h3>Scenes</h3>
         {bundle?.scenes.length ? <div className="scene-list">{bundle.scenes.map((scene,index) => <div key={scene.id} className={`scene-tab ${scene.id===selectedScene?.id?"active":""}`}><button onClick={()=>setSelectedSceneId(scene.id)}><span>{scene.position}. {scene.title}</span><small>{scene.status}</small></button><div className="scene-order"><button onClick={()=>void reorderScenes(scene.id,-1)} disabled={index===0}>Up</button><button onClick={()=>void reorderScenes(scene.id,1)} disabled={index===bundle.scenes.length-1}>Down</button></div></div>)}</div> : <div className="card"><strong>No scenes</strong><p>Scene cards will appear after the first chat.</p></div>}
         {selectedId&&selectedScene&&<SceneEditor projectId={selectedId} scene={selectedScene} assets={bundle?.assets.filter(asset=>asset.sceneId===selectedScene.id) ?? []} onSave={saveScene} onApprove={approveScene} onReject={rejectScene} onCopyPrompt={copyPrompt} onRegenerateScene={regenerateScene} onGenerateWan={generateWan} onGeneratePresenter={generatePresenter} onGenerateAudioVideo={generateAudioVideo} onImportAsset={importAsset} onReplaceAsset={replaceAsset} onDeleteAsset={deleteAsset} onUpdateAudio={updateAudioSettings} onSelectBackgroundMusic={selectBackgroundMusic} onApproveAsset={approveAsset} onRejectAsset={rejectAsset}/>}
+        {selectedScene&&<VersionHistoryPanel sceneVersions={sceneVersions} promptVersions={promptVersions} onRestoreScene={restoreSceneVersion} onReusePrompt={reusePromptVersion}/>}
         <TemplatePanel templates={templates} hasProject={Boolean(selectedId)} onDuplicate={duplicateTemplate} onArchive={archiveTemplate} onCreateProject={createProjectFromTemplate} onApply={applyTemplate}/>
         {selectedId&&bundle&&<BrandPresenterPanel projectId={selectedId} bundle={bundle} onSaveBrand={saveBrandKit} onSavePresenter={savePresenterProfile} onSelectDefaults={selectLibraryDefaults} onUploadLibraryImage={uploadLibraryImage} onDeleteLibraryAsset={deleteLibraryAsset}/>}
         <h3>Assets</h3>
@@ -1001,6 +1039,11 @@ function BriefEditor({brief,onSave,onApprove}:{brief:MediaBrief;onSave:(brief:Me
   const [constraints,setConstraints]=useState(parseJsonList(brief.constraintsJson).join("\n"));
   useEffect(()=>{setDraft(brief);setConstraints(parseJsonList(brief.constraintsJson).join("\n"));},[brief]);
   return <div className="card editor-card"><div className="row first-row"><strong>Brief</strong><span className={`scene-status ${brief.status.toLowerCase()}`}>{brief.status}</span></div><label>Title<input value={draft.title} onChange={event=>setDraft({...draft,title:event.target.value})}/></label><label>Logline<textarea value={draft.logline} onChange={event=>setDraft({...draft,logline:event.target.value})}/></label><div className="split-fields"><label>Audience<input value={draft.audience} onChange={event=>setDraft({...draft,audience:event.target.value})}/></label><label>Style<input value={draft.style} onChange={event=>setDraft({...draft,style:event.target.value})}/></label></div><label>Duration seconds<input type="number" min="1" value={draft.durationSeconds} onChange={event=>setDraft({...draft,durationSeconds:Number(event.target.value)})}/></label><label>Constraints<textarea value={constraints} onChange={event=>setConstraints(event.target.value)}/></label><div className="decision"><button onClick={()=>void onSave(draft,constraints.split("\n").map(item=>item.trim()).filter(Boolean))}>Save brief</button><button onClick={()=>void onApprove()} disabled={brief.status==="APPROVED"}>Approve brief</button></div></div>;
+}
+
+function VersionHistoryPanel({sceneVersions,promptVersions,onRestoreScene,onReusePrompt}:{sceneVersions:MediaSceneVersion[];promptVersions:MediaPromptVersion[];onRestoreScene:(versionId:string)=>Promise<void>;onReusePrompt:(versionId:string)=>Promise<void>}) {
+  const [preview,setPreview]=useState<{title:string;body:string}|null>(null);
+  return <div className="card version-panel"><div className="row first-row"><strong>Versions</strong><small>{sceneVersions.length} scene / {promptVersions.length} prompt</small></div><div className="version-list">{sceneVersions.slice(0,5).map(version=><div className="mini" key={version.id}><span>Scene v{version.versionNumber}: {version.title}</span><small>{version.createdAt} | {version.createdBy} | {version.changeSummary ?? "No summary"}</small><div className="decision wrap"><button onClick={()=>setPreview({title:`Scene v${version.versionNumber}`,body:[version.title,version.scriptText,version.visualDescription].filter(Boolean).join("\n\n")})}>Preview</button><button onClick={()=>void onRestoreScene(version.id)}>Restore Scene</button></div></div>)}</div><div className="version-list">{promptVersions.slice(0,5).map(version=><div className="mini" key={version.id}><span>Prompt v{version.versionNumber}: {version.providerKey} {version.taskType}</span><small>{version.createdAt} | {version.createdBy}</small><div className="decision wrap"><button onClick={()=>setPreview({title:`Prompt v${version.versionNumber}`,body:version.positivePrompt})}>Preview</button><button onClick={()=>void onReusePrompt(version.id)}>Reuse Prompt</button></div></div>)}</div>{preview&&<div className="version-preview"><div className="row first-row"><strong>{preview.title}</strong><button onClick={()=>setPreview(null)}>Close</button></div><pre>{preview.body}</pre></div>}</div>;
 }
 
 function RenderPanel({projectId,scenes,assets,jobs,settings,onSettings,onRender,onExport,onCancel,onRetryExport,onRenameAsset,onDeleteAsset,rendering}:{projectId:string;scenes:MediaScene[];assets:MediaAsset[];jobs:MediaRenderJob[];settings:ExportSettings;onSettings:(settings:ExportSettings)=>void;onRender:()=>Promise<void>;onExport:()=>Promise<void>;onCancel:(jobId:string)=>Promise<void>;onRetryExport:(jobId:string)=>Promise<void>;onRenameAsset:(assetId:string)=>Promise<void>;onDeleteAsset:(assetId:string)=>Promise<void>;rendering:boolean}) {
