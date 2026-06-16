@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RetryWanGenerationSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -16,7 +16,7 @@ import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./p
 import { buildCodeProposalInput } from "./proposal-context.js";
 import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, deregisterProject, listActiveProjects, registerOrReactivateProject } from "./project-registration.js";
-import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
+import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getSceneFlowPrompt, importSceneAsset, listMediaProjects, listMediaTemplates, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
 import { cancelRenderJob, listRenderJobs, renderDraftVideo, renderProductionExport, retryProductionExport, validateExportReadiness } from "./media-rendering.js";
 import { activateComfyWorkflow, comfyStatusResponse, deleteComfyWorkflow, importComfyWorkflow, listComfyWorkflows, loadComfyConfig, previewCompiledWorkflow, testComfyConnection, updateComfyWorkflow, wanImageToVideoWorkflowTemplate, wanTextToVideoWorkflowTemplate } from "./comfyui-provider.js";
@@ -803,6 +803,48 @@ app.patch("/api/media/projects/:projectId/assets/:assetId", async (request: any,
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to rename media asset" });
+  }
+});
+
+app.get("/api/media/projects/:projectId/assets/:assetId/approval", async (request: any, reply) => {
+  try {
+    return { approval: getMediaAssetApproval(db, request.params.projectId, request.params.assetId) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load asset approval" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/assets/:assetId/approve", async (request: any, reply) => {
+  try {
+    const asset = approveGeneratedMediaAsset(db, request.params.projectId, request.params.assetId, { now: now(), actor: "local-user" }, audit);
+    return { asset, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to approve generated asset" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/assets/:assetId/reject", async (request: any, reply) => {
+  const parsed = RejectMediaAssetSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid asset rejection", details: parsed.error.flatten() });
+  try {
+    const asset = rejectGeneratedMediaAsset(db, request.params.projectId, request.params.assetId, { feedback: parsed.data.feedback, now: now(), actor: "local-user" }, audit);
+    return { asset, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reject generated asset" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/assets/:assetId/approval/reset", async (request: any, reply) => {
+  const parsed = ClearMediaAssetApprovalSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid approval reset", details: parsed.error.flatten() });
+  try {
+    return { asset: clearGeneratedMediaAssetApproval(db, request.params.projectId, request.params.assetId, { now: now(), reason: parsed.data.reason }, audit) };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to reset generated asset approval" });
   }
 });
 

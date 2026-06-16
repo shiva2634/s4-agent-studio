@@ -13,6 +13,7 @@ export type MediaSceneStatus = "DRAFT" | "APPROVED" | "GENERATING" | "ASSET_READ
 export type MediaAudioRole = "NARRATION" | "MUSIC" | "SFX" | "SCENE_AUDIO";
 export type MediaLibraryAssetOwner = "brand" | "presenter";
 export type MediaTemplateType = "PROMO" | "PRESENTER" | "EXPLAINER" | "INVESTOR_PITCH" | "REEL" | "YOUTUBE";
+export type GeneratedAssetApprovalStatus = "PENDING" | "APPROVED" | "REJECTED";
 
 export type MediaAuditWriter = (eventType: string, summary: string, values?: { projectId?: string; payload?: unknown }) => void;
 
@@ -112,6 +113,12 @@ export type MediaAsset = {
   previewPath: string | null;
   thumbnailPath: string | null;
   metadataJson: string | null;
+  approvalStatus: GeneratedAssetApprovalStatus | null;
+  approvalFeedback: string | null;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  rejectedAt: string | null;
+  rejectedBy: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -706,6 +713,40 @@ export function renameMediaAsset(db: Database.Database, projectId: string, asset
   return getMediaAssetOrThrow(db, projectId, assetId);
 }
 
+export function getMediaAssetApproval(db: Database.Database, projectId: string, assetId: string) {
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  return pickAssetApproval(asset);
+}
+
+export function approveGeneratedMediaAsset(db: Database.Database, projectId: string, assetId: string, input: { now: string; actor?: string }, audit: MediaAuditWriter): MediaAsset {
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  assertGeneratedAsset(asset);
+  if (!hasAssetApprovalColumns(db)) throw new MediaStudioError("Generated asset approvals are not available in this database", 500);
+  db.prepare(`UPDATE media_assets SET approval_status='APPROVED',approval_feedback=NULL,approved_at=?,approved_by=?,rejected_at=NULL,rejected_by=NULL,updated_at=?
+    WHERE id=? AND media_project_id=?`).run(input.now, input.actor ?? "local-user", input.now, assetId, projectId);
+  audit("MEDIA_GENERATED_ASSET_APPROVED", `Generated asset approved: ${asset.label}`, { projectId, payload: { assetId, sceneId: asset.sceneId, source: asset.source } });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export function rejectGeneratedMediaAsset(db: Database.Database, projectId: string, assetId: string, input: { feedback: string; now: string; actor?: string }, audit: MediaAuditWriter): MediaAsset {
+  const feedback = sanitizeApprovalFeedback(input.feedback);
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  assertGeneratedAsset(asset);
+  if (!hasAssetApprovalColumns(db)) throw new MediaStudioError("Generated asset approvals are not available in this database", 500);
+  db.prepare(`UPDATE media_assets SET approval_status='REJECTED',approval_feedback=?,approved_at=NULL,approved_by=NULL,rejected_at=?,rejected_by=?,updated_at=?
+    WHERE id=? AND media_project_id=?`).run(feedback, input.now, input.actor ?? "local-user", input.now, assetId, projectId);
+  audit("MEDIA_GENERATED_ASSET_REJECTED", `Generated asset rejected: ${asset.label}`, { projectId, payload: { assetId, sceneId: asset.sceneId, source: asset.source, feedback } });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
+export function clearGeneratedMediaAssetApproval(db: Database.Database, projectId: string, assetId: string, input: { now: string; reason?: string }, audit: MediaAuditWriter): MediaAsset {
+  const asset = getMediaAssetOrThrow(db, projectId, assetId);
+  assertGeneratedAsset(asset);
+  resetGeneratedAssetApproval(db, assetId, input.now);
+  audit("MEDIA_GENERATED_ASSET_APPROVAL_RESET", `Generated asset approval reset: ${asset.label}`, { projectId, payload: { assetId, sceneId: asset.sceneId, reason: input.reason ?? null } });
+  return getMediaAssetOrThrow(db, projectId, assetId);
+}
+
 export async function deleteProjectAsset(db: Database.Database, projectId: string, assetId: string, timestamp: string, audit: MediaAuditWriter, storageRoot?: string): Promise<{ deleted: true }> {
   getActiveMediaProjectOrThrow(db, projectId);
   const asset = getMediaAssetOrThrow(db, projectId, assetId);
@@ -940,8 +981,9 @@ function listMediaScenes(db: Database.Database, projectId: string): MediaScene[]
 }
 
 function listMediaAssets(db: Database.Database, projectId: string): MediaAsset[] {
-  return db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
+  const assets = db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
     FROM media_assets WHERE media_project_id=? ORDER BY created_at`).all(projectId) as MediaAsset[];
+  return assets.map((asset) => hydrateAssetApproval(db, asset));
 }
 
 function listBrandKits(db: Database.Database, projectId: string): MediaBrandKit[] {
@@ -1274,7 +1316,58 @@ function getMediaAssetOrThrow(db: Database.Database, projectId: string, assetId:
   const asset = db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,label,source,status,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,checksum_sha256 AS checksumSha256,local_path AS localPath,inspection_json AS inspectionJson,qc_status AS qcStatus,qc_issues_json AS qcIssuesJson,preview_path AS previewPath,thumbnail_path AS thumbnailPath,metadata_json AS metadataJson,created_at AS createdAt,updated_at AS updatedAt
     FROM media_assets WHERE id=? AND media_project_id=?`).get(assetId, projectId) as MediaAsset | undefined;
   if (!asset) throw new MediaStudioError("Media asset not found", 404);
-  return asset;
+  return hydrateAssetApproval(db, asset);
+}
+
+export function hydrateAssetApproval(db: Database.Database, asset: MediaAsset): MediaAsset {
+  if (!hasAssetApprovalColumns(db)) return { ...asset, approvalStatus: null, approvalFeedback: null, approvedAt: null, approvedBy: null, rejectedAt: null, rejectedBy: null };
+  const approval = db.prepare(`SELECT approval_status AS approvalStatus,approval_feedback AS approvalFeedback,approved_at AS approvedAt,approved_by AS approvedBy,rejected_at AS rejectedAt,rejected_by AS rejectedBy
+    FROM media_assets WHERE id=?`).get(asset.id) as Pick<MediaAsset, "approvalStatus" | "approvalFeedback" | "approvedAt" | "approvedBy" | "rejectedAt" | "rejectedBy"> | undefined;
+  return { ...asset, approvalStatus: approval?.approvalStatus ?? null, approvalFeedback: approval?.approvalFeedback ?? null, approvedAt: approval?.approvedAt ?? null, approvedBy: approval?.approvedBy ?? null, rejectedAt: approval?.rejectedAt ?? null, rejectedBy: approval?.rejectedBy ?? null };
+}
+
+export function isGeneratedSceneAsset(asset: { source: string; sceneId: string | null }): boolean {
+  return Boolean(asset.sceneId) && ["comfyui-wan", "longcat-avatar", "ovi", "ltx", "google-flow"].includes(asset.source);
+}
+
+export function resetGeneratedAssetApproval(db: Database.Database, assetId: string, timestamp: string): void {
+  if (!hasAssetApprovalColumns(db)) return;
+  db.prepare(`UPDATE media_assets SET approval_status='PENDING',approval_feedback=NULL,approved_at=NULL,approved_by=NULL,rejected_at=NULL,rejected_by=NULL,updated_at=?
+    WHERE id=?`).run(timestamp, assetId);
+}
+
+export function buildGeneratedAssetMetadata(db: Database.Database, projectId: string, sceneId: string, metadata: Record<string, unknown>): Record<string, unknown> {
+  const previous = db.prepare(`SELECT id FROM media_assets
+    WHERE media_project_id=? AND scene_id=? AND source IN ('comfyui-wan','longcat-avatar','ovi','ltx','google-flow') ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId) as { id: string } | undefined;
+  return previous ? { ...metadata, previousGeneratedAssetId: previous.id } : metadata;
+}
+
+function assertGeneratedAsset(asset: MediaAsset): void {
+  if (!isGeneratedSceneAsset(asset)) throw new MediaStudioError("Only generated scene assets can be approved or rejected", 400);
+}
+
+function pickAssetApproval(asset: MediaAsset) {
+  return {
+    assetId: asset.id,
+    approvalStatus: asset.approvalStatus,
+    approvalFeedback: asset.approvalFeedback,
+    approvedAt: asset.approvedAt,
+    approvedBy: asset.approvedBy,
+    rejectedAt: asset.rejectedAt,
+    rejectedBy: asset.rejectedBy
+  };
+}
+
+function sanitizeApprovalFeedback(value: string): string {
+  const feedback = value.trim();
+  if (!feedback) throw new MediaStudioError("Rejection feedback is required", 400);
+  if (feedback.length > 2_000) throw new MediaStudioError("Rejection feedback must be 2000 characters or fewer", 400);
+  return feedback;
+}
+
+function hasAssetApprovalColumns(db: Database.Database): boolean {
+  const columns = db.prepare("PRAGMA table_info(media_assets)").all() as Array<{ name: string }>;
+  return columns.some((column) => column.name === "approval_status");
 }
 
 function getBrandKitOrThrow(db: Database.Database, projectId: string, brandKitId: string): MediaBrandKit {

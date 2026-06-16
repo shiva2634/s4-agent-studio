@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, getSceneProviderPrompt, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getSceneProviderPrompt, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
 import { generateWanForScene, loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
 import { generateLongCatPresenter, loadLongCatConfig, type LongCatConfig, type LongCatHttp } from "./longcat-provider.js";
 import { generateExternalMedia, loadLtxConfig, loadOviConfig, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
@@ -444,8 +444,10 @@ async function saveFlowAsset(db: Database.Database, projectId: string, sceneId: 
   await fs.mkdir(path.dirname(localPath), { recursive: true });
   await fs.writeFile(localPath, input.bytes);
   const checksum = createHash("sha256").update(input.bytes).digest("hex");
+  const metadata = buildGeneratedAssetMetadata(db, projectId, sceneId, { provider: "google-flow" });
   db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.assetId, projectId, sceneId, kind, input.originalName, "google-flow", "GENERATED", fileName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify({ provider: "google-flow" }), input.now, input.now);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.assetId, projectId, sceneId, kind, input.originalName, "google-flow", "GENERATED", fileName, input.originalName, input.mimeType, input.bytes.length, checksum, localPath, JSON.stringify(metadata), input.now, input.now);
+  resetGeneratedAssetApproval(db, input.assetId, input.now);
   return getAsset(db, projectId, input.assetId);
 }
 

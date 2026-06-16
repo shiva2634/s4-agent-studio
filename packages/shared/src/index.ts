@@ -210,6 +210,13 @@ export const MediaGenerationStatusHistorySchema = z.object({
   providerStatus: z.string().nullable(),
   createdAt: z.string()
 });
+export const MediaAssetApprovalStatusSchema = z.enum(["PENDING", "APPROVED", "REJECTED"]);
+export const RejectMediaAssetSchema = z.object({
+  feedback: z.string().trim().min(1).max(2_000)
+});
+export const ClearMediaAssetApprovalSchema = z.object({
+  reason: z.string().trim().max(500).optional()
+});
 
 export const RouteMediaGenerationSchema = z.object({
   task: MediaProviderTaskSchema,
@@ -287,6 +294,9 @@ export type FlowFallbackWan = z.infer<typeof FlowFallbackWanSchema>;
 export type MediaProviderTask = z.infer<typeof MediaProviderTaskSchema>;
 export type RouteMediaGeneration = z.infer<typeof RouteMediaGenerationSchema>;
 export type MediaGenerationStatusHistory = z.infer<typeof MediaGenerationStatusHistorySchema>;
+export type MediaAssetApprovalStatus = z.infer<typeof MediaAssetApprovalStatusSchema>;
+export type RejectMediaAsset = z.infer<typeof RejectMediaAssetSchema>;
+export type ClearMediaAssetApproval = z.infer<typeof ClearMediaAssetApprovalSchema>;
 export type ComfyWorkflowType = z.infer<typeof ComfyWorkflowTypeSchema>;
 export type ComfyWorkflowMapping = z.infer<typeof ComfyWorkflowMappingSchema>;
 export type ImportComfyWorkflow = z.infer<typeof ImportComfyWorkflowSchema>;

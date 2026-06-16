@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { detectFfmpeg, type ProcessRunner } from "./media-processing.js";
-import { MediaStudioError, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, isGeneratedSceneAsset, type MediaAuditWriter } from "./media-studio.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,7 +40,7 @@ export type ProductionExportOptions = Omit<RenderDraftOptions, "fps" | "includeL
 export async function renderDraftVideo(db: Database.Database, projectId: string, options: RenderDraftOptions, audit: MediaAuditWriter) {
   const project = getProject(db, projectId);
   const renderSettings = resolveRenderSettings(project.aspectRatio, options);
-  const plan = buildRenderPlan(db, projectId, options.includeLogo ?? true);
+  const plan = buildRenderPlan(db, projectId, options.includeLogo ?? true, false);
   const storageRoot = resolveStorageRoot(options.storageRoot);
   const renderDir = path.resolve(storageRoot, "renders", sanitizeSegment(projectId), sanitizeSegment(options.jobId));
   assertInsideRoot(renderDir, storageRoot);
@@ -103,7 +103,7 @@ export async function renderDraftVideo(db: Database.Database, projectId: string,
 export async function renderProductionExport(db: Database.Database, projectId: string, options: ProductionExportOptions, audit: MediaAuditWriter) {
   const project = getProject(db, projectId);
   const renderSettings = resolveExportSettings(options);
-  const plan = buildRenderPlan(db, projectId, options.includeLogo);
+  const plan = buildRenderPlan(db, projectId, options.includeLogo, true);
   if (!options.includeMusic) {
     plan.scenes = plan.scenes.map((scene) => ({ ...scene, backgroundMusic: null }));
   }
@@ -169,7 +169,7 @@ export async function renderProductionExport(db: Database.Database, projectId: s
 
 export function validateExportReadiness(db: Database.Database, projectId: string, options: Pick<ProductionExportOptions, "preset" | "resolution" | "fps" | "bitrateKbps" | "includeLogo">) {
   const settings = resolveExportSettings(options);
-  const plan = buildRenderPlan(db, projectId, options.includeLogo);
+  const plan = buildRenderPlan(db, projectId, options.includeLogo, true);
   return { ready: true, preset: options.preset, resolution: options.resolution, settings, sceneCount: plan.scenes.length };
 }
 
@@ -195,16 +195,16 @@ export function cancelRenderJob(db: Database.Database, projectId: string, jobId:
 }
 
 export function validateRenderReadiness(db: Database.Database, projectId: string) {
-  buildRenderPlan(db, projectId, true);
+  buildRenderPlan(db, projectId, true, false);
   return { ready: true };
 }
 
-function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: boolean) {
+function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: boolean, requireApprovedGeneratedAssets: boolean) {
   const project = getProject(db, projectId);
   const scenes = db.prepare(`SELECT id,position,title,duration_seconds AS durationSeconds,dialogue,aspect_ratio AS aspectRatio,approved_at AS approvedAt
     FROM media_scenes WHERE media_project_id=? ORDER BY position`).all(projectId) as SceneRow[];
   if (!scenes.length) throw new MediaStudioError("Cannot render without scenes", 409);
-  const assets = db.prepare(`SELECT id,scene_id AS sceneId,kind,label,local_path AS localPath,qc_status AS qcStatus,metadata_json AS metadataJson
+  const assets = db.prepare(`SELECT id,scene_id AS sceneId,kind,label,source,local_path AS localPath,qc_status AS qcStatus,metadata_json AS metadataJson
     FROM media_assets WHERE media_project_id=? ORDER BY created_at DESC`).all(projectId) as AssetRow[];
   const backgroundMusic = assets.find((asset) => asset.kind === "audio" && asset.localPath && parseAudioMetadata(asset).backgroundMusic) ?? null;
   const scenePlans = scenes.map((scene) => {
@@ -212,6 +212,10 @@ function buildRenderPlan(db: Database.Database, projectId: string, includeLogo: 
     const asset = assets.find((candidate) => candidate.sceneId === scene.id && ["image", "video"].includes(candidate.kind) && candidate.localPath);
     if (!asset) throw new MediaStudioError(`Scene "${scene.title}" is missing an image or video asset`, 409);
     if (asset.qcStatus === "FAILED") throw new MediaStudioError(`Scene "${scene.title}" has failed QC`, 409);
+    if (requireApprovedGeneratedAssets && isGeneratedSceneAsset(asset)) {
+      const approval = getAssetApprovalForRender(db, asset.id);
+      if (approval !== "APPROVED") throw new MediaStudioError(`Scene "${scene.title}" generated asset "${asset.label}" must be approved before final export (${approval ?? "NO_DECISION"})`, 409);
+    }
     const sceneAudio = assets
       .filter((candidate) => candidate.sceneId === scene.id && candidate.kind === "audio" && candidate.localPath && candidate.qcStatus !== "FAILED")
       .map((audio) => ({ asset: audio, settings: parseAudioMetadata(audio) }))
@@ -302,6 +306,13 @@ function parseAudioMetadata(asset: AssetRow): AudioSettings {
     muted: Boolean(parsed.muted),
     backgroundMusic: Boolean(parsed.backgroundMusic)
   };
+}
+
+function getAssetApprovalForRender(db: Database.Database, assetId: string): string | null {
+  const columns = db.prepare("PRAGMA table_info(media_assets)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "approval_status")) return null;
+  const row = db.prepare("SELECT approval_status AS approvalStatus FROM media_assets WHERE id=?").get(assetId) as { approvalStatus: string | null } | undefined;
+  return row?.approvalStatus ?? null;
 }
 
 function findBrandLogo(assets: AssetRow[], brandKitId: string | null): AssetRow | null {
@@ -410,7 +421,7 @@ async function runProcess(command: string, args: string[], options: { timeoutMs:
 
 type RenderSettings = { width: number; height: number; fps: number };
 type SceneRow = { id: string; position: number; title: string; durationSeconds: number; dialogue: string; aspectRatio: string; approvedAt: string | null };
-type AssetRow = { id: string; sceneId: string | null; kind: string; label: string; localPath: string; qcStatus: string; metadataJson?: string | null };
+type AssetRow = { id: string; sceneId: string | null; kind: string; label: string; source: string; localPath: string; qcStatus: string; metadataJson?: string | null };
 type AudioSettings = { role: string; volume: number; trimStartSeconds: number; trimEndSeconds: number | null; fadeInSeconds: number; fadeOutSeconds: number; muted: boolean; backgroundMusic: boolean };
 type ScenePlan = SceneRow & { asset: AssetRow; audio: Array<{ asset: AssetRow; settings: AudioSettings }>; backgroundMusic: { asset: AssetRow; settings: AudioSettings } | null };
 

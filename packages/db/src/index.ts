@@ -212,6 +212,12 @@ export function initializeDatabase() {
       preview_path TEXT,
       thumbnail_path TEXT,
       metadata_json TEXT,
+      approval_status TEXT,
+      approval_feedback TEXT,
+      approved_at TEXT,
+      approved_by TEXT,
+      rejected_at TEXT,
+      rejected_by TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(media_project_id) REFERENCES media_projects(id) ON DELETE CASCADE,
@@ -433,6 +439,24 @@ export function initializeDatabase() {
   }
   if (!mediaAssetColumns.some((column) => column.name === "metadata_json")) {
     db.exec("ALTER TABLE media_assets ADD COLUMN metadata_json TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "approval_status")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN approval_status TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "approval_feedback")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN approval_feedback TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "approved_at")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN approved_at TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "approved_by")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN approved_by TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "rejected_at")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN rejected_at TEXT");
+  }
+  if (!mediaAssetColumns.some((column) => column.name === "rejected_by")) {
+    db.exec("ALTER TABLE media_assets ADD COLUMN rejected_by TEXT");
   }
 
   db.exec(`CREATE TABLE IF NOT EXISTS media_brand_kits (

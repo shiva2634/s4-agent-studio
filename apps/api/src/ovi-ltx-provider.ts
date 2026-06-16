@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, getSceneProviderPrompt, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getSceneProviderPrompt, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
 import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
@@ -80,7 +80,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
       bytes,
       now: input.now,
       storageRoot,
-      metadata: { remoteJobId, provider: input.providerKey, task: input.task }
+      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { remoteJobId, provider: input.providerKey, task: input.task })
     });
     updateGenerationJob(db, input.jobId, "COMPLETED", input.now, `Generated ${asset.originalName ?? asset.fileName ?? providerName(input.providerKey)}`, { remoteJobId, output, assetId: asset.id });
     db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -180,6 +180,7 @@ async function saveGeneratedVideoAsset(db: Database.Database, projectId: string,
   const checksum = createHash("sha256").update(input.bytes).digest("hex");
   db.prepare(`INSERT INTO media_assets (id,media_project_id,scene_id,kind,label,source,status,file_name,original_name,mime_type,size_bytes,checksum_sha256,local_path,metadata_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id, projectId, sceneId, "video", `${providerName(input.providerKey)} generated ${input.originalName}`, input.providerKey, "GENERATED", fileName, input.originalName, "video/mp4", input.bytes.length, checksum, localPath, JSON.stringify(input.metadata), input.now, input.now);
+  resetGeneratedAssetApproval(db, input.id, input.now);
   return getAsset(db, projectId, input.id);
 }
 
