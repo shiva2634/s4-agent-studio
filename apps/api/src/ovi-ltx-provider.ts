@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, buildGeneratedAssetMetadata, getSceneProviderPrompt, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getGenerationReferenceAssets, getSceneProviderPrompt, resetGeneratedAssetApproval, type GenerationReferenceAsset, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
 import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
@@ -44,6 +44,8 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   now: string;
   approved: boolean;
   promptOverride?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   config: ExternalMediaConfig;
   fetchImpl?: ExternalMediaHttp;
   storageRoot?: string;
@@ -59,6 +61,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   const prompt = input.promptOverride ?? getSceneProviderPrompt(db, projectId, sceneId);
   const image = input.task === "I2V" ? getSceneAsset(db, projectId, sceneId, "image") : null;
   const audio = input.task === "AUDIO_VIDEO" ? getSceneAsset(db, projectId, sceneId, "audio") : null;
+  const references = getGenerationReferenceAssets(db, projectId, input.referenceAssetIds ?? []);
   const fetchImpl = input.fetchImpl ?? fetch;
   const storageRoot = resolveStorageRoot(input.storageRoot);
 
@@ -67,7 +70,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
   audit(`MEDIA_${input.providerKey.toUpperCase()}_GENERATION_STARTED`, `${providerName(input.providerKey)} generation started for scene ${scene.title}`, { projectId, payload: { sceneId, jobId: input.jobId, task: input.task } });
 
   try {
-    const remoteJobId = await submitExternalJob(input.config, { providerKey: input.providerKey, task: input.task, prompt, scene, image, audio }, fetchImpl);
+    const remoteJobId = await submitExternalJob(input.config, { providerKey: input.providerKey, task: input.task, prompt, scene, image, audio, references }, fetchImpl);
     updateGenerationJob(db, input.jobId, "RUNNING", input.now, `Submitted ${providerName(input.providerKey)} job ${remoteJobId}`, { remoteJobId }, "submitted");
     const output = await pollExternalOutput(input.config, input.providerKey, remoteJobId, fetchImpl, input.shouldCancel, input.pollingIntervalMs, (status, progress) => {
       recordGenerationStatusHistory(db, { generationJobId: input.jobId, status: "RUNNING", createdAt: input.now, progressPercent: progress, message: `${providerName(input.providerKey)} generation update`, providerStatus: status });
@@ -81,7 +84,7 @@ export async function generateExternalMedia(db: Database.Database, projectId: st
       bytes,
       now: input.now,
       storageRoot,
-      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { remoteJobId, provider: input.providerKey, task: input.task })
+      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { remoteJobId, provider: input.providerKey, task: input.task, referenceAssetIds: input.referenceAssetIds ?? [], regenerationReason: input.regenerationReason ?? null })
     });
     updateGenerationJob(db, input.jobId, "COMPLETED", input.now, `Generated ${asset.originalName ?? asset.fileName ?? providerName(input.providerKey)}`, { remoteJobId, output, assetId: asset.id });
     db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -125,23 +128,38 @@ export async function retryExternalGeneration(db: Database.Database, projectId: 
   return generateExternalMedia(db, projectId, request.sceneId, { ...input, providerKey: previous.providerKey, task: request.task }, audit);
 }
 
-async function submitExternalJob(config: ExternalMediaConfig, input: { providerKey: ExternalMediaProviderKey; task: ExternalMediaTask; prompt: string; scene: SceneRow; image: AssetRow | null; audio: AssetRow | null }, fetchImpl: ExternalMediaHttp) {
+async function submitExternalJob(config: ExternalMediaConfig, input: { providerKey: ExternalMediaProviderKey; task: ExternalMediaTask; prompt: string; scene: SceneRow; image: AssetRow | null; audio: AssetRow | null; references: GenerationReferenceAsset[] }, fetchImpl: ExternalMediaHttp) {
   const baseUrl = assertValidBaseUrl(config.baseUrl);
-  const body = JSON.stringify({
+  const payload = {
     task: input.task,
     prompt: input.prompt,
     scene: { id: input.scene.id, title: input.scene.title, dialogue: input.scene.dialogue },
     references: {
       image: input.image ? { fileName: input.image.fileName ?? input.image.originalName, mimeType: input.image.mimeType } : null,
-      audio: input.audio ? { fileName: input.audio.fileName ?? input.audio.originalName, mimeType: input.audio.mimeType } : null
+      audio: input.audio ? { fileName: input.audio.fileName ?? input.audio.originalName, mimeType: input.audio.mimeType } : null,
+      selected: input.references.map((asset) => ({ id: asset.id, kind: asset.kind, mimeType: asset.mimeType, fileName: path.basename(asset.localPath ?? asset.label) }))
     }
-  });
-  const response = await fetchWithTimeout(input.providerKey, `${trimBaseUrl(baseUrl)}/jobs`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders(config) }, body }, config.timeoutMs, fetchImpl);
+  };
+  const body = input.references.length ? await buildReferenceForm(payload, input.references) : JSON.stringify(payload);
+  const headers = input.references.length ? authHeaders(config) : { "content-type": "application/json", ...authHeaders(config) };
+  const response = await fetchWithTimeout(input.providerKey, `${trimBaseUrl(baseUrl)}/jobs`, { method: "POST", headers, body }, config.timeoutMs, fetchImpl);
   if (!response.ok) throw new Error(`${providerName(input.providerKey)} submit failed: ${response.status}`);
   const data = await readJsonResponse(response, input.providerKey, "submit") as { job_id?: unknown; id?: unknown };
   const jobId = typeof data.job_id === "string" ? data.job_id : typeof data.id === "string" ? data.id : "";
   if (!jobId) throw new Error(`${providerName(input.providerKey)} did not return a job id`);
   return jobId;
+}
+
+async function buildReferenceForm(payload: unknown, references: GenerationReferenceAsset[]): Promise<FormData> {
+  const form = new FormData();
+  form.append("payload", new Blob([JSON.stringify(payload)], { type: "application/json" }), "payload.json");
+  for (const asset of references) {
+    if (!asset.localPath) throw new Error(`Reference asset ${asset.id} has no local file`);
+    const bytes = await fs.readFile(asset.localPath);
+    const filename = sanitizeSegment(path.basename(asset.localPath));
+    form.append("references", new Blob([new Uint8Array(bytes)], { type: asset.mimeType ?? "application/octet-stream" }), filename);
+  }
+  return form;
 }
 
 async function pollExternalOutput(config: ExternalMediaConfig, providerKey: ExternalMediaProviderKey, remoteJobId: string, fetchImpl: ExternalMediaHttp, shouldCancel?: () => boolean, pollingIntervalMs = 50, onStatus?: (status: string, progress?: number) => void) {

@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, buildGeneratedAssetMetadata, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getGenerationReferenceAssets, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
 import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
@@ -48,6 +48,8 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   now: string;
   approved: boolean;
   promptOverride?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   config?: LongCatConfig;
   fetchImpl?: LongCatHttp;
   storageRoot?: string;
@@ -59,8 +61,9 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
   const config = input.config ?? loadLongCatConfig();
   if (!config.enabled) throw new MediaStudioError("LongCat provider is disabled", 409);
   const scene = getScene(db, projectId, sceneId);
-  const image = getSceneAsset(db, projectId, sceneId, "image");
-  const audio = getSceneAsset(db, projectId, sceneId, "audio");
+  const references = getLongCatReferences(db, projectId, input.referenceAssetIds);
+  const image = references.image ?? getSceneAsset(db, projectId, sceneId, "image");
+  const audio = references.audio ?? getSceneAsset(db, projectId, sceneId, "audio");
   const fetchImpl = input.fetchImpl ?? fetch;
   const storageRoot = resolveStorageRoot(input.storageRoot);
 
@@ -83,7 +86,7 @@ export async function generateLongCatPresenter(db: Database.Database, projectId:
       bytes,
       now: input.now,
       storageRoot,
-      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { remoteJobId, provider: "longcat-avatar" })
+      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { remoteJobId, provider: "longcat-avatar", referenceAssetIds: input.referenceAssetIds ?? [], regenerationReason: input.regenerationReason ?? null })
     });
     updateGenerationJob(db, input.jobId, "COMPLETED", input.now, `Generated ${asset.originalName ?? asset.fileName ?? "LongCat presenter"}`, { remoteJobId, output, assetId: asset.id });
     db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -212,6 +215,14 @@ function getSceneAsset(db: Database.Database, projectId: string, sceneId: string
     WHERE media_project_id=? AND scene_id=? AND kind=? AND mime_type LIKE ? AND local_path IS NOT NULL ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId, kind, prefix) as AssetRow | undefined;
   if (!asset) throw new MediaStudioError(`LongCat presenter generation requires a scene ${kind} asset`, 409);
   return asset;
+}
+
+function getLongCatReferences(db: Database.Database, projectId: string, referenceAssetIds: string[] | undefined): { image: AssetRow | null; audio: AssetRow | null } {
+  const refs = getGenerationReferenceAssets(db, projectId, referenceAssetIds ?? []);
+  const toAsset = (asset: typeof refs[number]): AssetRow => ({ id: asset.id, fileName: null, originalName: asset.label, mimeType: asset.mimeType, localPath: asset.localPath as string });
+  const image = refs.find((asset) => asset.mimeType?.startsWith("image/"));
+  const audio = refs.find((asset) => asset.mimeType?.startsWith("audio/"));
+  return { image: image ? toAsset(image) : null, audio: audio ? toAsset(audio) : null };
 }
 
 function getGenerationJob(db: Database.Database, id: string) {

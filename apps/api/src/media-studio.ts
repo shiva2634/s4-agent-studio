@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sanitizeProviderError } from "./ai-provider.js";
@@ -125,6 +126,20 @@ export type MediaGenerationPromptVersion = {
   contentHash: string;
   createdAt: string;
   createdBy: string;
+};
+
+export type GenerationReferenceAsset = {
+  id: string;
+  mediaProjectId: string;
+  sceneId: string | null;
+  kind: string;
+  source: string;
+  label: string;
+  mimeType: string | null;
+  localPath: string | null;
+  qcStatus: string;
+  approvalStatus: GeneratedAssetApprovalStatus | null;
+  metadataJson: string | null;
 };
 
 export type MediaAsset = {
@@ -623,6 +638,30 @@ export function ensurePromptVersionForScene(db: Database.Database, projectId: st
   db.prepare(`INSERT INTO media_generation_prompt_versions (id,media_project_id,scene_id,scene_version_id,version_number,provider_key,task_type,positive_prompt,negative_prompt,settings_json,reference_asset_ids_json,content_hash,created_at,created_by)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, sceneId, sceneVersion.id, versionNumber, input.providerKey, input.taskType, positivePrompt, input.negativePrompt ?? "", settingsJson, referenceJson, contentHash, input.now, input.createdBy ?? "local-user");
   return getPromptVersion(db, projectId, sceneId, id);
+}
+
+export function validateGenerationReferences(db: Database.Database, projectId: string, taskType: string, referenceAssetIds: string[] = [], providerKey?: string): GenerationReferenceAsset[] {
+  const ids = [...new Set(referenceAssetIds.map((id) => id.trim()).filter(Boolean))];
+  if (!ids.length) return [];
+  const rows = ids.map((id) => getReferenceAsset(db, projectId, id));
+  for (const asset of rows) {
+    if (!asset.localPath) throw new MediaStudioError(`Reference asset ${asset.id} has no local file`, 400);
+    if (!existsSync(asset.localPath)) throw new MediaStudioError(`Reference asset ${asset.id} local file is missing`, 400);
+    if (!asset.mimeType || !mediaAssetMimeTypes.has(asset.mimeType)) throw new MediaStudioError(`Reference asset ${asset.id} has unsupported MIME type`, 400);
+    if (asset.qcStatus === "FAILED") throw new MediaStudioError(`Reference asset ${asset.id} has failed QC`, 400);
+    if (!isReferenceCompatible(taskType, asset.mimeType, providerKey)) throw new MediaStudioError(`${providerKey ?? "Selected provider"} does not support ${asset.mimeType} references for ${taskType}`, 400);
+  }
+  return rows;
+}
+
+export function getGenerationReferenceAssets(db: Database.Database, projectId: string, referenceAssetIds: string[] = []): GenerationReferenceAsset[] {
+  return [...new Set(referenceAssetIds)].map((id) => getReferenceAsset(db, projectId, id));
+}
+
+export function sanitizeRegenerationReason(value: string | undefined): string | null {
+  const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 500);
 }
 
 export function reorderMediaScenes(db: Database.Database, projectId: string, sceneIds: string[], timestamp: string, audit: MediaAuditWriter): MediaScene[] {
@@ -1456,7 +1495,7 @@ function sanitizeChangeSummary(value: string | undefined): string | null {
 
 function sanitizePromptSettings(value: Record<string, unknown>): Record<string, unknown> {
   const forbidden = /secret|api[_-]?key|token|signed[_-]?url|authorization|password/i;
-  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => !forbidden.test(key) && typeof entry !== "function"));
+  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => !forbidden.test(key) && entry !== undefined && typeof entry !== "function"));
 }
 
 function listSceneReferenceAssetIds(db: Database.Database, projectId: string, sceneId: string): string[] {
@@ -1467,6 +1506,25 @@ function assertReferenceAssetsBelongToProject(db: Database.Database, projectId: 
   if (!assetIds.length) return;
   const rows = db.prepare(`SELECT id FROM media_assets WHERE media_project_id=? AND id IN (${assetIds.map(() => "?").join(",")})`).all(projectId, ...assetIds) as Array<{ id: string }>;
   if (rows.length !== new Set(assetIds).size) throw new MediaStudioError("Prompt reference assets must belong to the same media project", 400);
+}
+
+function getReferenceAsset(db: Database.Database, projectId: string, assetId: string): GenerationReferenceAsset {
+  const asset = db.prepare(`SELECT id,media_project_id AS mediaProjectId,scene_id AS sceneId,kind,source,label,mime_type AS mimeType,local_path AS localPath,qc_status AS qcStatus,approval_status AS approvalStatus,metadata_json AS metadataJson
+    FROM media_assets WHERE id=? AND media_project_id=?`).get(assetId, projectId) as GenerationReferenceAsset | undefined;
+  if (!asset) throw new MediaStudioError("Reference asset not found in this media project", 404);
+  return asset;
+}
+
+function isReferenceCompatible(taskType: string, mimeType: string, providerKey?: string): boolean {
+  const family = mimeType.split("/")[0];
+  if (providerKey === "wan-2.2") return taskType === "I2V" && family === "image";
+  if (providerKey === "longcat-avatar") return taskType === "PRESENTER" && (family === "image" || family === "audio");
+  if (providerKey === "ovi") return (taskType === "T2V" && (family === "image" || family === "video")) || (taskType === "AUDIO_VIDEO" && (family === "audio" || family === "image" || family === "video"));
+  if (providerKey === "ltx") return (taskType === "I2V" && (family === "image" || family === "video")) || (taskType === "T2V" && family === "image");
+  if (providerKey === "google-flow") return ["image", "video", "audio"].includes(family);
+  if (taskType === "I2V") return family === "image" || family === "video";
+  if (taskType === "PRESENTER" || taskType === "AUDIO_VIDEO") return ["image", "video", "audio"].includes(family);
+  return family === "image" || family === "video";
 }
 
 function tableExists(db: Database.Database, tableName: string): boolean {
@@ -1503,6 +1561,12 @@ export function resetGeneratedAssetApproval(db: Database.Database, assetId: stri
 }
 
 export function buildGeneratedAssetMetadata(db: Database.Database, projectId: string, sceneId: string, metadata: Record<string, unknown>): Record<string, unknown> {
+  const referenceIds = Array.isArray(metadata.referenceAssetIds) ? metadata.referenceAssetIds.filter((item): item is string => typeof item === "string") : [];
+  if (referenceIds.length) {
+    const referenced = db.prepare(`SELECT id FROM media_assets
+      WHERE media_project_id=? AND scene_id=? AND id IN (${referenceIds.map(() => "?").join(",")}) AND source IN ('comfyui-wan','longcat-avatar','ovi','ltx','google-flow') ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId, ...referenceIds) as { id: string } | undefined;
+    if (referenced) return { ...metadata, previousGeneratedAssetId: referenced.id };
+  }
   const previous = db.prepare(`SELECT id FROM media_assets
     WHERE media_project_id=? AND scene_id=? AND source IN ('comfyui-wan','longcat-avatar','ovi','ltx','google-flow') ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId) as { id: string } | undefined;
   return previous ? { ...metadata, previousGeneratedAssetId: previous.id } : metadata;

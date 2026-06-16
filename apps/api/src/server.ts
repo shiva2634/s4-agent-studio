@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -545,6 +545,8 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/prompt-versions/:versio
       paidProviderApproved: parsed.data.paidProviderApproved,
       maxAttempts: parsed.data.maxAttempts,
       promptVersionId: version.id,
+      referenceAssetIds: parsed.data.referenceAssetIds,
+      regenerationReason: parsed.data.regenerationReason,
       now: now()
     });
     return reply.status(202).send({ job });
@@ -567,6 +569,8 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate/wan", async (r
       fps: parsed.data.fps,
       seed: parsed.data.seed,
       promptVersionId: parsed.data.promptVersionId,
+      referenceAssetIds: parsed.data.referenceAssetIds,
+      regenerationReason: parsed.data.regenerationReason,
       now: now()
     });
     return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
@@ -591,6 +595,8 @@ app.post("/api/media/projects/:projectId/scenes/:sceneId/generate", async (reque
       fps: parsed.data.fps,
       seed: parsed.data.seed,
       promptVersionId: parsed.data.promptVersionId,
+      referenceAssetIds: parsed.data.referenceAssetIds,
+      regenerationReason: parsed.data.regenerationReason,
       now: now()
     });
     return reply.status(202).send({ job, bundle: { ...getMediaProjectBundle(db, request.params.projectId), processingJobs: listProcessingJobs(db, request.params.projectId), renderJobs: listRenderJobs(db, request.params.projectId), comfyWorkflows: listComfyWorkflows(db, request.params.projectId) } });
@@ -920,6 +926,32 @@ app.post("/api/media/projects/:projectId/assets/:assetId/approval/reset", async 
   } catch (error) {
     if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to reset generated asset approval" });
+  }
+});
+
+app.post("/api/media/projects/:projectId/assets/:assetId/regenerate", async (request: any, reply) => {
+  const parsed = RegenerateMediaAssetSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid asset regeneration request", details: parsed.error.flatten() });
+  try {
+    const source = db.prepare("SELECT scene_id AS sceneId,source FROM media_assets WHERE id=? AND media_project_id=?").get(request.params.assetId, request.params.projectId) as { sceneId: string | null; source: string } | undefined;
+    if (!source?.sceneId || !["comfyui-wan", "longcat-avatar", "ovi", "ltx", "google-flow"].includes(source.source)) throw new MediaStudioError("Generated scene asset not found", 404);
+    const references = [...new Set([request.params.assetId, ...(parsed.data.referenceAssetIds ?? [])])];
+    const job = generationWorker.enqueueGeneration({
+      projectId: request.params.projectId,
+      sceneId: source.sceneId,
+      task: parsed.data.task,
+      providerKey: parsed.data.providerKey,
+      approved: parsed.data.approved,
+      paidProviderApproved: parsed.data.paidProviderApproved,
+      maxAttempts: parsed.data.maxAttempts,
+      referenceAssetIds: references,
+      regenerationReason: parsed.data.regenerationReason,
+      now: now()
+    });
+    return reply.status(202).send({ job });
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to queue asset regeneration" });
   }
 });
 

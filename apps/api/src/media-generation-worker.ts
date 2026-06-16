@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { MediaStudioError, ensurePromptVersionForScene, getPromptVersion, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, ensurePromptVersionForScene, getPromptVersion, sanitizeRegenerationReason, validateGenerationReferences, type MediaAuditWriter } from "./media-studio.js";
 import { routeMediaGeneration, type MediaProviderTask, type ProviderKey } from "./media-provider-router.js";
 import { recordGenerationStatusHistory, sanitizeHistoryMessage } from "./media-generation-history.js";
 import { loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
@@ -25,6 +25,8 @@ export type EnqueueGenerationInput = {
   fps?: number;
   seed?: number;
   promptVersionId?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   now: string;
   jobId?: string;
   outputAssetId?: string;
@@ -80,12 +82,18 @@ export class MediaGenerationWorker {
     assertSceneExists(this.db, input.projectId, input.sceneId);
     const jobId = input.jobId ?? nanoid();
     const outputAssetId = input.outputAssetId ?? nanoid();
-    const promptVersion = input.promptVersionId
-      ? getPromptVersion(this.db, input.projectId, input.sceneId, input.promptVersionId)
+    const referenceAssetIds = [...new Set(input.referenceAssetIds ?? [])];
+    validateGenerationReferences(this.db, input.projectId, input.task, referenceAssetIds, input.providerKey);
+    const reason = sanitizeRegenerationReason(input.regenerationReason);
+    const previousPromptVersion = input.promptVersionId ? getPromptVersion(this.db, input.projectId, input.sceneId, input.promptVersionId) : null;
+    const promptVersion = previousPromptVersion && !referenceAssetIds.length && !reason
+      ? previousPromptVersion
       : ensurePromptVersionForScene(this.db, input.projectId, input.sceneId, {
         providerKey: input.providerKey ?? "router",
         taskType: input.task,
-        settings: { fps: input.fps, seed: input.seed, maxAttempts: input.maxAttempts },
+        positivePrompt: previousPromptVersion?.positivePrompt,
+        settings: { fps: input.fps, seed: input.seed, maxAttempts: input.maxAttempts, regenerationReason: reason },
+        referenceAssetIds,
         now: input.now,
         createdBy: "local-user"
       });
@@ -100,7 +108,9 @@ export class MediaGenerationWorker {
       seed: input.seed,
       outputAssetId,
       sceneVersionId: promptVersion.sceneVersionId || undefined,
-      promptVersionId: promptVersion.id || undefined
+      promptVersionId: promptVersion.id || undefined,
+      referenceAssetIds,
+      regenerationReason: reason ?? undefined
     };
     this.db.prepare(`INSERT INTO media_generation_jobs (id,media_project_id,provider_key,status,request_json,result_json,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(jobId, input.projectId, input.providerKey ?? "router", "QUEUED", JSON.stringify(request), null, input.now, input.now);
@@ -136,6 +146,8 @@ export class MediaGenerationWorker {
       fps: request.fps,
       seed: request.seed,
       promptVersionId: request.promptVersionId,
+      referenceAssetIds: request.referenceAssetIds,
+      regenerationReason: request.regenerationReason,
       now: input.now,
       jobId: input.jobId
     });
@@ -194,6 +206,8 @@ export class MediaGenerationWorker {
         seed: request.seed,
         promptVersionId: request.promptVersionId,
         sceneVersionId: request.sceneVersionId,
+        referenceAssetIds: request.referenceAssetIds,
+        regenerationReason: request.regenerationReason,
         config: this.deps.comfyConfig ?? loadComfyConfig(),
         fetchImpl: this.deps.comfyFetch,
         longCatConfig: this.deps.longCatConfig ?? loadLongCatConfig(),
@@ -254,6 +268,8 @@ function parseRequest(value: string) {
     outputAssetId: string;
     sceneVersionId?: string;
     promptVersionId?: string;
+    referenceAssetIds?: string[];
+    regenerationReason?: string;
   };
 }
 

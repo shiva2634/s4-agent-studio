@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, buildGeneratedAssetMetadata, getPromptVersion, getSceneProviderPrompt, linkGeneratedAssetVersion, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getGenerationReferenceAssets, getPromptVersion, getSceneProviderPrompt, linkGeneratedAssetVersion, resetGeneratedAssetApproval, sanitizeRegenerationReason, validateGenerationReferences, type MediaAuditWriter } from "./media-studio.js";
 import { generateWanForScene, loadComfyConfig, type ComfyConfig, type ComfyHttp } from "./comfyui-provider.js";
 import { generateLongCatPresenter, loadLongCatConfig, type LongCatConfig, type LongCatHttp } from "./longcat-provider.js";
 import { generateExternalMedia, loadLtxConfig, loadOviConfig, type ExternalMediaConfig, type ExternalMediaHttp } from "./ovi-ltx-provider.js";
@@ -22,6 +22,7 @@ export type ProviderCapability = {
   priority: number;
   paid: boolean;
   mode: ProviderExecutionMode;
+  referenceTypes?: Array<"image" | "video" | "audio">;
   reason: string;
 };
 
@@ -51,6 +52,8 @@ type RouterAdapter = (input: {
   promptVersionId?: string;
   sceneVersionId?: string;
   promptOverride?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   audit: MediaAuditWriter;
 }) => Promise<unknown>;
 
@@ -79,6 +82,8 @@ export type ProviderRouterOptions = {
   pollingIntervalMs?: number;
   promptVersionId?: string;
   sceneVersionId?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   capabilities?: ProviderCapability[];
   adapters?: Partial<Record<ProviderKey, RouterAdapter>>;
 };
@@ -94,6 +99,7 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
       priority: 20,
       paid: false,
       mode: "COMFYUI",
+      referenceTypes: ["image"],
       reason: config.enabled ? "Local ComfyUI Wan adapter is enabled" : "ComfyUI is disabled"
     },
     {
@@ -105,6 +111,7 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
       priority: 5,
       paid: true,
       mode: "HUMAN_ASSISTED",
+      referenceTypes: ["image", "video", "audio"],
       reason: "Flow is human-assisted until provider API integration exists"
     },
     {
@@ -116,6 +123,7 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
       priority: 4,
       paid: true,
       mode: "LONGCAT",
+      referenceTypes: ["image", "audio"],
       reason: longCatConfig.enabled ? "LongCat Avatar adapter is enabled" : "LongCat adapter is disabled"
     },
     {
@@ -127,6 +135,7 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
       priority: 30,
       paid: false,
       mode: oviConfig.enabled ? "HTTP" : "DISABLED",
+      referenceTypes: ["image", "video", "audio"],
       reason: oviConfig.enabled ? "Ovi adapter is enabled" : "Ovi adapter is disabled"
     },
     {
@@ -138,6 +147,7 @@ export function getMediaProviderCapabilities(config: ComfyConfig = loadComfyConf
       priority: 40,
       paid: true,
       mode: ltxConfig.enabled ? "HTTP" : "DISABLED",
+      referenceTypes: ["image", "video"],
       reason: ltxConfig.enabled ? "LTX adapter is enabled; paid-provider approval required" : "LTX adapter is disabled"
     }
   ];
@@ -164,8 +174,12 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
   if (!options.approved) throw new MediaStudioError("Media provider routing requires explicit approval", 403);
   const capabilities = options.capabilities ?? getMediaProviderCapabilities(options.config, options.longCatConfig, options.oviConfig, options.ltxConfig);
   const promptVersion = options.promptVersionId ? getPromptVersion(db, projectId, sceneId, options.promptVersionId) : null;
+  const promptReferenceIds = promptVersion ? parseReferenceIds(promptVersion.referenceAssetIdsJson) : [];
+  const referenceAssetIds = [...new Set([...(options.referenceAssetIds ?? []), ...promptReferenceIds])];
+  const referenceAssets = validateGenerationReferences(db, projectId, options.task, referenceAssetIds, options.providerKey);
+  const regenerationReason = sanitizeRegenerationReason(options.regenerationReason);
   const sceneVersionId = promptVersion?.sceneVersionId ?? options.sceneVersionId;
-  const candidates = getProviderCandidates(capabilities, options.task, options.providerKey);
+  const candidates = getProviderCandidates(capabilities, options.task, options.providerKey, referenceAssets.map((asset) => asset.mimeType ?? ""));
   const maxAttempts = options.maxAttempts ?? 2;
   const attempted: Array<{ providerKey: ProviderKey; status: "SKIPPED" | "FAILED" | "SELECTED" | "HUMAN_ASSISTED"; reason: string }> = [];
   recordGenerationStatusHistory(db, { generationJobId: options.jobId, status: "ROUTING", createdAt: options.now, message: `Selecting media provider for ${options.task}` });
@@ -191,7 +205,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
     recordGenerationStatusHistory(db, { generationJobId: options.jobId, status: "PROVIDER_SELECTED", createdAt: options.now, message: `${provider.name} selected for ${options.task}`, providerStatus: provider.key });
     audit("MEDIA_PROVIDER_ROUTE_SELECTED", `${provider.name} selected for ${options.task}`, { projectId, payload: { sceneId, providerKey: provider.key, task: options.task, reason: provider.reason, attempt: attempts } });
     if (provider.mode === "HUMAN_ASSISTED") {
-      const flowPackage = buildFlowPackage(db, projectId, sceneId, options.task, options.now, promptVersion?.positivePrompt);
+      const flowPackage = buildFlowPackage(db, projectId, sceneId, options.task, options.now, promptVersion?.positivePrompt, referenceAssetIds, regenerationReason ?? undefined);
       insertHumanAssistedJob(db, options.jobId, projectId, sceneId, provider, { ...options, sceneVersionId }, provider.reason, flowPackage);
       attempted.push({ providerKey: provider.key, status: "HUMAN_ASSISTED", reason: provider.reason });
       persistRouting(db, options.jobId, { selectedProvider: provider.key, reason: provider.reason, attempted });
@@ -200,7 +214,7 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
     }
     const adapter = options.adapters?.[provider.key] ?? defaultAdapter(provider.key);
     try {
-      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, oviConfig: options.oviConfig, oviFetchImpl: options.oviFetchImpl, ltxConfig: options.ltxConfig, ltxFetchImpl: options.ltxFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, shouldCancel: options.shouldCancel, pollingIntervalMs: options.pollingIntervalMs, promptVersionId: options.promptVersionId, sceneVersionId, promptOverride: promptVersion?.positivePrompt, audit });
+      const result = await adapter({ db, projectId, sceneId, jobId: options.jobId, outputAssetId: options.outputAssetId, now: options.now, task: options.task, approved: options.approved, fps: options.fps, seed: options.seed, config: options.config, fetchImpl: options.fetchImpl, longCatConfig: options.longCatConfig, longCatFetchImpl: options.longCatFetchImpl, oviConfig: options.oviConfig, oviFetchImpl: options.oviFetchImpl, ltxConfig: options.ltxConfig, ltxFetchImpl: options.ltxFetchImpl, storageRoot: options.storageRoot, processOptions: options.processOptions, shouldCancel: options.shouldCancel, pollingIntervalMs: options.pollingIntervalMs, promptVersionId: options.promptVersionId, sceneVersionId, promptOverride: promptVersion?.positivePrompt, referenceAssetIds, regenerationReason: regenerationReason ?? undefined, audit });
       linkGeneratedAssetVersion(db, projectId, options.outputAssetId, sceneVersionId, options.promptVersionId);
       attempted.push({ providerKey: provider.key, status: "SELECTED", reason: provider.reason });
       persistRouting(db, options.jobId, { selectedProvider: provider.key, reason: provider.reason, attempted });
@@ -216,18 +230,32 @@ export async function routeMediaGeneration(db: Database.Database, projectId: str
   throw new MediaStudioError(`No provider completed ${options.task}`, 409);
 }
 
-function getProviderCandidates(capabilities: ProviderCapability[], task: MediaProviderTask, providerKey?: ProviderKey) {
-  const taskCandidates = capabilities.filter((provider) => provider.supports.includes(task));
+function getProviderCandidates(capabilities: ProviderCapability[], task: MediaProviderTask, providerKey?: ProviderKey, referenceMimeTypes: string[] = []) {
+  const required = [...new Set(referenceMimeTypes.filter(Boolean))];
+  const taskCandidates = capabilities.filter((provider) => provider.supports.includes(task) && providerSupportsReferences(provider.key, task, required));
   if (!providerKey) return taskCandidates.sort((a, b) => a.priority - b.priority);
   const provider = capabilities.find((candidate) => candidate.key === providerKey);
   if (!provider) throw new MediaStudioError(`Unknown media provider: ${providerKey}`, 400);
   if (!provider.supports.includes(task)) throw new MediaStudioError(`${provider.name} does not support ${task}`, 400);
+  if (!providerSupportsReferences(provider.key, task, required)) throw new MediaStudioError(`${provider.name} does not support selected reference assets for ${task}`, 400);
   return [provider];
+}
+
+function providerSupportsReferences(providerKey: ProviderKey, task: MediaProviderTask, mimeTypes: string[]): boolean {
+  return mimeTypes.every((mimeType) => {
+    const family = mimeType.split("/")[0];
+    if (providerKey === "wan-2.2") return task === "I2V" && family === "image";
+    if (providerKey === "longcat-avatar") return task === "PRESENTER" && (family === "image" || family === "audio");
+    if (providerKey === "ovi") return (task === "T2V" && (family === "image" || family === "video")) || (task === "AUDIO_VIDEO" && (family === "audio" || family === "image" || family === "video"));
+    if (providerKey === "ltx") return (task === "I2V" && (family === "image" || family === "video")) || (task === "T2V" && family === "image");
+    if (providerKey === "google-flow") return ["image", "video", "audio"].includes(family);
+    return false;
+  });
 }
 
 function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
   if (providerKey === "wan-2.2") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, fps, seed, config, fetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, audit }) => generateWanForScene(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, fps, seed, config, fetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, referenceAssetIds, regenerationReason, audit }) => generateWanForScene(db, projectId, sceneId, {
       jobId,
       outputAssetId,
       now,
@@ -236,6 +264,8 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       fps,
       seed,
       promptOverride,
+      referenceAssetIds,
+      regenerationReason,
       config,
       fetchImpl,
       storageRoot,
@@ -245,12 +275,14 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
     }, audit);
   }
   if (providerKey === "longcat-avatar") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, approved, longCatConfig, longCatFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, audit }) => generateLongCatPresenter(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, approved, longCatConfig, longCatFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, referenceAssetIds, regenerationReason, audit }) => generateLongCatPresenter(db, projectId, sceneId, {
       jobId,
       outputAssetId,
       now,
       approved,
       promptOverride,
+      referenceAssetIds,
+      regenerationReason,
       config: longCatConfig,
       fetchImpl: longCatFetchImpl,
       storageRoot,
@@ -260,7 +292,7 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
     }, audit);
   }
   if (providerKey === "ovi") {
-    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, oviConfig, oviFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, audit }) => generateExternalMedia(db, projectId, sceneId, {
+    return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, oviConfig, oviFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, referenceAssetIds, regenerationReason, audit }) => generateExternalMedia(db, projectId, sceneId, {
       providerKey: "ovi",
       task: task === "AUDIO_VIDEO" ? "AUDIO_VIDEO" : "T2V",
       jobId,
@@ -268,6 +300,8 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       now,
       approved,
       promptOverride,
+      referenceAssetIds,
+      regenerationReason,
       config: oviConfig ?? loadOviConfig(),
       fetchImpl: oviFetchImpl,
       storageRoot,
@@ -277,7 +311,7 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
     }, audit);
   }
   if (providerKey === "ltx") {
-  return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, ltxConfig, ltxFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, audit }) => generateExternalMedia(db, projectId, sceneId, {
+  return ({ db, projectId, sceneId, jobId, outputAssetId, now, task, approved, ltxConfig, ltxFetchImpl, storageRoot, processOptions, shouldCancel, pollingIntervalMs, promptOverride, referenceAssetIds, regenerationReason, audit }) => generateExternalMedia(db, projectId, sceneId, {
       providerKey: "ltx",
       task: task === "I2V" ? "I2V" : "T2V",
       jobId,
@@ -285,6 +319,8 @@ function defaultAdapter(providerKey: ProviderKey): RouterAdapter {
       now,
     approved,
     promptOverride,
+    referenceAssetIds,
+    regenerationReason,
       config: ltxConfig ?? loadLtxConfig(),
       fetchImpl: ltxFetchImpl,
       storageRoot,
@@ -425,10 +461,12 @@ function persistRouting(db: Database.Database, jobId: string, routing: unknown) 
   db.prepare("UPDATE media_generation_jobs SET result_json=? WHERE id=?").run(JSON.stringify({ ...result, routing }), jobId);
 }
 
-function buildFlowPackage(db: Database.Database, projectId: string, sceneId: string, task: MediaProviderTask, timestamp: string, promptOverride?: string): FlowPackage {
+function buildFlowPackage(db: Database.Database, projectId: string, sceneId: string, task: MediaProviderTask, timestamp: string, promptOverride?: string, referenceAssetIds: string[] = [], regenerationReason?: string): FlowPackage {
   const scene = getScene(db, projectId, sceneId);
-  const references = db.prepare(`SELECT id,label,kind,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,local_path AS localPath
-    FROM media_assets WHERE media_project_id=? AND scene_id=? ORDER BY created_at`).all(projectId, sceneId) as FlowPackage["references"];
+  const references = referenceAssetIds.length
+    ? getGenerationReferenceAssets(db, projectId, referenceAssetIds).map((asset) => ({ id: asset.id, label: asset.label, kind: asset.kind, fileName: null, originalName: null, mimeType: asset.mimeType, sizeBytes: null, localPath: null, importInstruction: "Use the registered project asset as a reference; import/download from S4 Media Studio." }))
+    : db.prepare(`SELECT id,label,kind,file_name AS fileName,original_name AS originalName,mime_type AS mimeType,size_bytes AS sizeBytes,NULL AS localPath,NULL AS importInstruction
+      FROM media_assets WHERE media_project_id=? AND scene_id=? ORDER BY created_at`).all(projectId, sceneId) as FlowPackage["references"];
   return {
     packageVersion: 1,
     provider: "google-flow",
@@ -443,6 +481,7 @@ function buildFlowPackage(db: Database.Database, projectId: string, sceneId: str
       durationSeconds: scene.durationSeconds
     },
     prompt: promptOverride ?? getSceneProviderPrompt(db, projectId, sceneId),
+    regenerationReason: regenerationReason ?? null,
     references
   };
 }
@@ -528,7 +567,17 @@ type FlowPackage = {
   };
   prompt: string;
   references: Array<{ id: string; label: string; kind: string; fileName: string | null; originalName: string | null; mimeType: string | null; sizeBytes: number | null; localPath: string | null }>;
+  regenerationReason?: string | null;
 };
+
+function parseReferenceIds(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 type FlowAssetRow = {
   id: string;

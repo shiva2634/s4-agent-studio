@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { MediaStudioError, buildGeneratedAssetMetadata, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
+import { MediaStudioError, buildGeneratedAssetMetadata, getGenerationReferenceAssets, resetGeneratedAssetApproval, type MediaAuditWriter } from "./media-studio.js";
 import { processMediaAsset, type MediaProcessingOptions } from "./media-processing.js";
 import { recordGenerationStatusHistory } from "./media-generation-history.js";
 
@@ -166,6 +166,8 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
   fps?: number;
   seed?: number;
   promptOverride?: string;
+  referenceAssetIds?: string[];
+  regenerationReason?: string;
   config?: ComfyConfig;
   fetchImpl?: ComfyHttp;
   storageRoot?: string;
@@ -183,7 +185,7 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
   const activeWorkflow = getActiveComfyWorkflow(db, projectId, workflowType);
   let uploadedImage: string | null = null;
   if (input.mode === "image-to-video") {
-    const imageAsset = getSceneInputImage(db, projectId, sceneId);
+    const imageAsset = getReferenceInputImage(db, projectId, input.referenceAssetIds) ?? getSceneInputImage(db, projectId, sceneId);
     uploadedImage = await uploadInputImage(config, imageAsset, fetchImpl);
   }
   const compiled = compileWorkflow(activeWorkflow, scene, { fps: input.fps, seed: input.seed, inputImage: uploadedImage ?? undefined, promptOverride: input.promptOverride });
@@ -207,7 +209,7 @@ export async function generateWanForScene(db: Database.Database, projectId: stri
       bytes,
       now: input.now,
       storageRoot,
-      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { promptId, uploadedImage, workflowId: activeWorkflow.id, workflowVersion: activeWorkflow.version, workflowType })
+      metadata: buildGeneratedAssetMetadata(db, projectId, sceneId, { promptId, uploadedImage, workflowId: activeWorkflow.id, workflowVersion: activeWorkflow.version, workflowType, referenceAssetIds: input.referenceAssetIds ?? [], regenerationReason: input.regenerationReason ?? null })
     });
     updateGenerationJob(db, input.jobId, "COMPLETED", input.now, `Generated ${output.filename}`, { promptId, output, assetId: asset.id });
     db.prepare("UPDATE media_scenes SET status='ASSET_READY',updated_at=? WHERE id=? AND media_project_id=?").run(input.now, sceneId, projectId);
@@ -422,6 +424,11 @@ function getPreviewImageName(db: Database.Database, projectId: string, sceneId: 
   const asset = db.prepare(`SELECT file_name AS fileName,original_name AS originalName FROM media_assets
     WHERE media_project_id=? AND scene_id=? AND kind='image' AND local_path IS NOT NULL ORDER BY created_at DESC LIMIT 1`).get(projectId, sceneId) as { fileName: string | null; originalName: string | null } | undefined;
   return asset?.fileName ?? asset?.originalName ?? undefined;
+}
+
+function getReferenceInputImage(db: Database.Database, projectId: string, referenceAssetIds: string[] | undefined): AssetRow | null {
+  const image = getGenerationReferenceAssets(db, projectId, referenceAssetIds ?? []).find((asset) => asset.mimeType?.startsWith("image/"));
+  return image ? { id: image.id, fileName: null, originalName: image.label, mimeType: image.mimeType, localPath: image.localPath } : null;
 }
 
 function toPublicWorkflow(workflow: ComfyWorkflowRow) {
