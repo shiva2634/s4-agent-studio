@@ -9,6 +9,7 @@ export type CodeProposalInput = {
   projectName: string;
   projectSummary: string;
   userObjective: string;
+  taskContext?: Record<string, unknown>;
   taskCategory: TaskCategory;
   riskLevel: RiskLevel;
   relevantFiles: string[];

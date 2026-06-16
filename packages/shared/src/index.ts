@@ -13,6 +13,7 @@ export const CreateProjectSchema = z.object({
 
 export const ChatRequestSchema = z.object({
   projectId: z.string().min(1),
+  taskId: z.string().min(1).optional(),
   conversationId: z.string().optional(),
   message: z.string().trim().min(1).max(20_000)
 });

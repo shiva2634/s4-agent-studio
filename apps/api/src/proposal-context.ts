@@ -37,7 +37,7 @@ export async function buildCodeProposalInput(
   userObjective: string,
   inspection: ProjectInspection,
   analysis: TaskAnalysis,
-  limits: { maximumFiles: number; maximumOutputBytes: number; maximumContextBytes?: number }
+  limits: { maximumFiles: number; maximumOutputBytes: number; maximumContextBytes?: number; taskContext?: Record<string, unknown> }
 ): Promise<CodeProposalInput> {
   const { files } = await collectProjectFiles(rootPath);
   const candidates = files
@@ -72,6 +72,7 @@ export async function buildCodeProposalInput(
     projectName,
     projectSummary: analysis.projectFindings.join("\n"),
     userObjective,
+    taskContext: limits.taskContext,
     taskCategory: analysis.featureCategory,
     riskLevel: analysis.riskLevel,
     relevantFiles: Object.keys(fileContents),

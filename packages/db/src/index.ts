@@ -70,6 +70,7 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE TABLE IF NOT EXISTS approvals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
+      task_round_id TEXT,
       action_type TEXT NOT NULL,
       summary TEXT NOT NULL,
       payload_json TEXT NOT NULL,
@@ -93,6 +94,7 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
+      task_round_id TEXT,
       project_id TEXT NOT NULL,
       file_path TEXT NOT NULL,
       operation TEXT NOT NULL CHECK(operation IN ('CREATE','UPDATE','DELETE')),
@@ -110,6 +112,7 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE TABLE IF NOT EXISTS task_executions (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
+      task_round_id TEXT,
       project_id TEXT NOT NULL,
       status TEXT NOT NULL,
       git_checkpoint_json TEXT,
@@ -380,6 +383,29 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_applied_file_changes_task ON applied_file_changes(task_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS task_rounds (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      round_number INTEGER NOT NULL,
+      round_type TEXT NOT NULL CHECK(round_type IN ('INITIAL','CONTINUATION','CORRECTION','RECOVERY')),
+      status TEXT NOT NULL CHECK(status IN ('PLANNING','AWAITING_APPROVAL','APPROVED','RUNNING','TESTING','FAILED','FAILED_VALIDATION','COMPLETED','CANCELLED','ROLLED_BACK')),
+      summary TEXT NOT NULL,
+      user_message TEXT NOT NULL,
+      context_json TEXT NOT NULL,
+      approval_required INTEGER NOT NULL DEFAULT 0,
+      proposal_count INTEGER NOT NULL DEFAULT 0,
+      next_required_action TEXT NOT NULL DEFAULT 'CONTINUE_CHAT',
+      check_results_json TEXT,
+      failure_summary TEXT,
+      recovery_available INTEGER NOT NULL DEFAULT 0,
+      recovery_status TEXT,
+      recovery_outcome TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      UNIQUE(task_id, round_number),
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
     CREATE INDEX IF NOT EXISTS idx_media_projects_status ON media_projects(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_messages_project ON media_chat_messages(media_project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_scenes_project ON media_scenes(media_project_id, position);
@@ -392,6 +418,7 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_media_jobs_project ON media_generation_jobs(media_project_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_generation_status_history_job ON media_generation_status_history(generation_job_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_comfy_workflows_project ON media_comfy_workflows(media_project_id, workflow_type, is_active);
+    CREATE INDEX IF NOT EXISTS idx_task_rounds_task ON task_rounds(task_id, round_number DESC);
     CREATE INDEX IF NOT EXISTS idx_media_processing_jobs_asset ON media_processing_jobs(asset_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_render_jobs_project ON media_render_jobs(media_project_id, created_at DESC);
   `);
@@ -399,6 +426,9 @@ export function initializeDatabaseOn(database: Database.Database) {
   const proposalColumns = database.prepare("PRAGMA table_info(change_proposals)").all() as Array<{ name: string }>;
   if (!proposalColumns.some((column) => column.name === "original_content")) {
     database.exec("ALTER TABLE change_proposals ADD COLUMN original_content TEXT");
+  }
+  if (!proposalColumns.some((column) => column.name === "task_round_id")) {
+    database.exec("ALTER TABLE change_proposals ADD COLUMN task_round_id TEXT");
   }
 
   const projectColumns = database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
@@ -421,6 +451,11 @@ export function initializeDatabaseOn(database: Database.Database) {
   }
   if (!mediaBriefColumns.some((column) => column.name === "approved_at")) {
     database.exec("ALTER TABLE media_video_briefs ADD COLUMN approved_at TEXT");
+  }
+
+  const approvalColumns = database.prepare("PRAGMA table_info(approvals)").all() as Array<{ name: string }>;
+  if (!approvalColumns.some((column) => column.name === "task_round_id")) {
+    database.exec("ALTER TABLE approvals ADD COLUMN task_round_id TEXT");
   }
 
   const mediaProjectColumns = database.prepare("PRAGMA table_info(media_projects)").all() as Array<{ name: string }>;
@@ -519,6 +554,11 @@ export function initializeDatabaseOn(database: Database.Database) {
   }
   if (!mediaJobColumns.some((column) => column.name === "prompt_version_id")) {
     database.exec("ALTER TABLE media_generation_jobs ADD COLUMN prompt_version_id TEXT");
+  }
+
+  const executionColumns = database.prepare("PRAGMA table_info(task_executions)").all() as Array<{ name: string }>;
+  if (!executionColumns.some((column) => column.name === "task_round_id")) {
+    database.exec("ALTER TABLE task_executions ADD COLUMN task_round_id TEXT");
   }
 
   database.exec(`CREATE TABLE IF NOT EXISTS media_scene_versions (

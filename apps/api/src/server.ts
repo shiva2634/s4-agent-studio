@@ -14,7 +14,7 @@ import { analyzeTask, formatPlanningOnlyResponse } from "./task-analysis.js";
 import { loadProviderConfig, providerStatusResponse, sanitizeProviderError, validateCodeProposalOutput } from "./ai-provider.js";
 import { createAiProvider, getProviderStatus, testConfiguredProvider } from "./provider-factory.js";
 import { buildCodeProposalInput } from "./proposal-context.js";
-import { applyTaskProposals, getTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
+import { applyTaskProposals, getTaskExecution, recoverTaskExecution, rollbackTask, runTaskChecks } from "./proposal-execution.js";
 import { ProjectRegistrationError, archiveProject, deregisterProject, listActiveProjects, listManageableProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
 import { MediaStudioError, addDirectorChatMessage, applyMediaTemplateToProject, approveGeneratedMediaAsset, approveMediaBrief, approveMediaScene, archiveMediaProject, archiveMediaTemplate, clearGeneratedMediaAssetApproval, createBrandKit, createMediaProject, createMediaProjectFromTemplate, createMediaTemplate, createPresenterProfile, deleteBrandKit, deleteLibraryAsset, deleteMediaChatMessage, deletePresenterProfile, deleteProjectAsset, deleteSceneAsset, duplicateMediaTemplate, exportMediaProductionPackage, getMediaAssetApproval, getMediaAssetForDownload, getMediaProjectBundle, getPromptVersion, getSceneFlowPrompt, getSceneVersion, importSceneAsset, listMediaProjects, listMediaTemplates, listPromptVersions, listSceneVersions, mediaAssetMaxBytes, mediaProviderRegistry, previewMediaTemplate, rejectGeneratedMediaAsset, rejectMediaScene, renameMediaAsset, reorderMediaScenes, replaceLibraryAsset, replaceSceneAsset, restoreSceneVersion, selectMediaLibraryDefaults, selectProjectBackgroundMusic, updateAudioAssetSettings, updateBrandKit, updateMediaBrief, updateMediaProject, updateMediaScene, updateMediaTemplate, updatePresenterProfile, uploadLibraryAsset, uploadProjectAsset, uploadSceneAsset } from "./media-studio.js";
 import { detectFfmpeg, getMediaDerivativeForDownload, listProcessingJobs, processMediaAsset } from "./media-processing.js";
@@ -26,6 +26,7 @@ import { NvidiaVideoDirectorProvider } from "./media-director-provider.js";
 import { externalProviderStatusResponse, loadLtxConfig, loadOviConfig, testExternalProviderConnection } from "./ovi-ltx-provider.js";
 import { listGenerationStatusHistory } from "./media-generation-history.js";
 import { MediaGenerationWorker, getGenerationJob, loadGenerationWorkerConfig } from "./media-generation-worker.js";
+import { buildTaskContext, createTaskRound, getCurrentTaskRound, listTaskHistory, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -1168,17 +1169,25 @@ app.post("/api/chat", async (request, reply) => {
   const project = db.prepare("SELECT id,name,root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(parsed.data.projectId) as any;
   if (!project) return reply.status(404).send({ error: "Select or register a project first" });
   const timestamp = now();
-  const conversationId = parsed.data.conversationId ?? nanoid();
-  if (!parsed.data.conversationId) {
+  const currentTask = parsed.data.taskId ? db.prepare("SELECT t.id,t.conversation_id AS conversationId,t.status,t.title,t.objective,t.plan_json AS planJson,t.acceptance_criteria AS acceptanceCriteria,t.rollback_plan AS rollbackPlan FROM tasks t WHERE t.id=? AND t.project_id=?").get(parsed.data.taskId, project.id) as { id: string; conversationId: string | null; status: string; title: string; objective: string; planJson: string; acceptanceCriteria: string | null; rollbackPlan: string | null } | undefined : undefined;
+  if (parsed.data.taskId && !currentTask) return reply.status(404).send({ error: "Task not found" });
+  if (parsed.data.taskId && currentTask?.conversationId && parsed.data.conversationId && parsed.data.conversationId !== currentTask.conversationId) return reply.status(400).send({ error: "Conversation does not match the selected task" });
+  const conversationTitle = currentTask?.title ?? parsed.data.message.slice(0, 80);
+  const conversationId = currentTask?.conversationId ?? parsed.data.conversationId ?? nanoid();
+  if (currentTask?.id && !currentTask.conversationId) {
     db.prepare("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)")
-      .run(conversationId, project.id, parsed.data.message.slice(0, 80), timestamp, timestamp);
+      .run(conversationId, project.id, conversationTitle, timestamp, timestamp);
+    db.prepare("UPDATE tasks SET conversation_id=?,updated_at=? WHERE id=?").run(conversationId, timestamp, currentTask.id);
+  } else if (!currentTask?.id && !parsed.data.conversationId) {
+    db.prepare("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)")
+      .run(conversationId, project.id, conversationTitle, timestamp, timestamp);
   }
   db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
     .run(nanoid(), conversationId, "user", parsed.data.message, timestamp);
 
   if (isReadOnlyInspectionRequest(parsed.data.message)) {
     const riskLevel = classifyRisk(parsed.data.message);
-    const taskId = nanoid();
+    const taskId = currentTask?.id ?? nanoid();
     const { inspection, report } = await inspectProject(project.rootPath);
     const plan = {
       summary: `Read-only inspection for: ${parsed.data.message.slice(0, 120)}`,
@@ -1188,8 +1197,25 @@ app.post("/api/chat", async (request, reply) => {
       acceptanceCriteria: ["Inspection report returned", "No project files modified"],
       inspectionResult: inspection
     };
-    db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, "COMPLETED", riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+    if (!currentTask) {
+      db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, "COMPLETED", riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+    } else {
+      db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
+        .run(plan.summary, parsed.data.message, "COMPLETED", riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, taskId);
+    }
+    const taskRound = createTaskRound(db, {
+      taskId,
+      userMessage: parsed.data.message,
+      summary: plan.summary,
+      roundType: currentTask ? (["FAILED", "FAILED_VALIDATION", "ROLLED_BACK"].includes(currentTask.status) ? "CORRECTION" : "CONTINUATION") : "INITIAL",
+      status: "COMPLETED",
+      context: { inspection, inspectionResult: inspection, previousTask: currentTask ? { id: currentTask.id, status: currentTask.status } : null },
+      approvalRequired: false,
+      nextRequiredAction: "CONTINUE_CHAT",
+      now: timestamp
+    });
+    updateTaskRound(db, taskRound.id, { status: "COMPLETED", nextRequiredAction: "CONTINUE_CHAT", completedAt: timestamp, recoveryAvailable: false, recoveryStatus: "COMPLETED", recoveryOutcome: "READ_ONLY_INSPECTION", now: timestamp });
     db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
       .run(nanoid(), conversationId, "agent", report, now());
     audit("READ_ONLY_INSPECTION_COMPLETED", `Read-only inspection completed for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel, inspection } });
@@ -1201,7 +1227,7 @@ app.post("/api/chat", async (request, reply) => {
     const { inspection } = await inspectProject(project.rootPath);
     const providerConfig = loadProviderConfig();
     const analysis = await analyzeTask(project.rootPath, parsed.data.message, inspection, providerConfig.configured);
-    const taskId = nanoid();
+    const taskId = currentTask?.id ?? nanoid();
     const planningOnly = analysis.mode === "PLANNING_ONLY";
     const mutationPlan = {
       summary: `${analysis.featureCategory}: ${parsed.data.message.slice(0, 120)}`,
@@ -1214,12 +1240,33 @@ app.post("/api/chat", async (request, reply) => {
       acceptanceCriteria: analysis.acceptanceCriteria,
       rollback: "No project files were changed. Reject this plan or revise the request before any code proposal is generated."
     };
+    if (!currentTask) {
+      db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", mutationPlan.summary, parsed.data.message, "PLANNING", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, timestamp);
+    }
+    const taskRound = createTaskRound(db, {
+      taskId,
+      userMessage: parsed.data.message,
+      summary: mutationPlan.summary,
+      roundType: currentTask ? (["FAILED", "FAILED_VALIDATION", "ROLLED_BACK"].includes(currentTask.status) ? "CORRECTION" : "CONTINUATION") : "INITIAL",
+      status: "PLANNING",
+      context: {
+        inspection,
+        analysis,
+        previousTask: currentTask ? { id: currentTask.id, status: currentTask.status, title: currentTask.title } : null
+      },
+      approvalRequired: analysis.approvalRequired,
+      nextRequiredAction: "CONTINUE_CHAT",
+      now: timestamp
+    });
+    const taskContext = buildTaskContext(db, taskId);
     if (!planningOnly) {
       try {
         const provider = createAiProvider(providerConfig);
         const input = await buildCodeProposalInput(project.rootPath, project.name, parsed.data.message, inspection, analysis, {
           maximumFiles: providerConfig.maxProposalFiles,
-          maximumOutputBytes: providerConfig.maxOutputBytes
+          maximumOutputBytes: providerConfig.maxOutputBytes,
+          taskContext
         });
         const rawOutput = await provider.generateCodeProposal(input);
         const output = validateCodeProposalOutput(rawOutput, project.rootPath, {
@@ -1230,14 +1277,15 @@ app.post("/api/chat", async (request, reply) => {
         mutationPlan.steps = output.plan;
         mutationPlan.acceptanceCriteria = analysis.acceptanceCriteria;
         mutationPlan.expectedFiles = output.proposals.map((proposal) => proposal.relativePath);
-        db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, timestamp);
+        db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
+          .run(mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, taskId);
         const insertedProposals = [];
         try {
           for (const providerProposal of output.proposals) {
             const proposal = await insertProposal(db, {
               id: nanoid(),
               taskId,
+              taskRoundId: taskRound.id,
               projectId: project.id,
               rootPath: project.rootPath,
               filePath: providerProposal.relativePath,
@@ -1255,8 +1303,9 @@ app.post("/api/chat", async (request, reply) => {
         mutationPlan.proposals = insertedProposals;
         db.prepare("UPDATE tasks SET plan_json=?,updated_at=? WHERE id=?").run(JSON.stringify({ ...mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), timestamp, taskId);
         const approvalId = nanoid();
-        db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-          .run(approvalId, taskId, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), analysis.riskLevel, "PENDING", timestamp);
+        db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+          .run(approvalId, taskId, taskRound.id, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), analysis.riskLevel, "PENDING", timestamp);
+        updateTaskRound(db, taskRound.id, { status: "AWAITING_APPROVAL", proposalCount: insertedProposals.length, nextRequiredAction: "APPROVE_PROPOSALS", now: timestamp });
         const responseText = [
           `I inspected ${project.name} and generated code proposals for review.`,
           "",
@@ -1279,8 +1328,9 @@ app.post("/api/chat", async (request, reply) => {
       } catch (error) {
         const sanitizedError = sanitizeProviderError(error);
         const failedPlan = { ...mutationPlan, providerError: sanitizedError };
-        db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", failedPlan.summary, parsed.data.message, "FAILED", analysis.riskLevel, JSON.stringify(failedPlan), failedPlan.acceptanceCriteria.join("\n"), failedPlan.rollback, timestamp, timestamp);
+        db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
+          .run(failedPlan.summary, parsed.data.message, "FAILED", analysis.riskLevel, JSON.stringify(failedPlan), failedPlan.acceptanceCriteria.join("\n"), failedPlan.rollback, timestamp, taskId);
+        updateTaskRound(db, taskRound.id, { status: "FAILED", nextRequiredAction: "CONTINUE_CHAT", completedAt: timestamp, recoveryAvailable: false, recoveryStatus: "FAILED", recoveryOutcome: "PROPOSAL_GENERATION_FAILED", now: timestamp });
         const responseText = `Code proposal generation failed: ${sanitizedError}\n\nNo files were modified.`;
         db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
           .run(nanoid(), conversationId, "agent", responseText, now());
@@ -1289,11 +1339,12 @@ app.post("/api/chat", async (request, reply) => {
       }
     }
 
-    db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, timestamp);
+    db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
+      .run(mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, taskId);
     const approvalId = nanoid();
-    db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(approvalId, taskId, "PLANNING_ONLY", `Approve plan for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan }), analysis.riskLevel, "PENDING", timestamp);
+    db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(approvalId, taskId, taskRound.id, "PLANNING_ONLY", `Approve plan for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan }), analysis.riskLevel, "PENDING", timestamp);
+    updateTaskRound(db, taskRound.id, { status: "AWAITING_APPROVAL", nextRequiredAction: "APPROVE_PROPOSALS", now: timestamp });
     const responseText = formatPlanningOnlyResponse(project.name, analysis);
     db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
       .run(nanoid(), conversationId, "agent", responseText, now());
@@ -1302,15 +1353,31 @@ app.post("/api/chat", async (request, reply) => {
   }
 
   const plan = createPlan(parsed.data.message, riskLevel);
-  const taskId = nanoid();
+  const taskId = currentTask?.id ?? nanoid();
   const taskStatus = requiresApproval(riskLevel) ? "AWAITING_APPROVAL" : "PLANNING";
-  db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, taskStatus, riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+  if (!currentTask) {
+    db.prepare(`INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,acceptance_criteria,rollback_plan,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, project.id, conversationId, "developer", plan.summary, parsed.data.message, taskStatus, riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, timestamp);
+  } else {
+    db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
+      .run(plan.summary, parsed.data.message, taskStatus, riskLevel, JSON.stringify(plan), plan.acceptanceCriteria.join("\n"), plan.rollback, timestamp, taskId);
+  }
+  const taskRound = createTaskRound(db, {
+    taskId,
+    userMessage: parsed.data.message,
+    summary: plan.summary,
+    roundType: currentTask ? (["FAILED", "FAILED_VALIDATION", "ROLLED_BACK"].includes(currentTask.status) ? "CORRECTION" : "CONTINUATION") : "INITIAL",
+    status: taskStatus as "PLANNING" | "AWAITING_APPROVAL",
+    context: { plan, previousTask: currentTask ? { id: currentTask.id, status: currentTask.status } : null },
+    approvalRequired: Boolean(requiresApproval(riskLevel)),
+    nextRequiredAction: requiresApproval(riskLevel) ? "APPROVE_PROPOSALS" : "CONTINUE_CHAT",
+    now: timestamp
+  });
   let approvalId: string | null = null;
   if (requiresApproval(riskLevel)) {
     approvalId = nanoid();
-    db.prepare(`INSERT INTO approvals (id,task_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(approvalId, taskId, "PLAN_EXECUTION", `Approve execution of: ${plan.summary}`, JSON.stringify({ plan }), riskLevel, "PENDING", timestamp);
+    db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(approvalId, taskId, taskRound.id, "PLAN_EXECUTION", `Approve execution of: ${plan.summary}`, JSON.stringify({ plan }), riskLevel, "PENDING", timestamp);
   }
   const responseText = `I created a ${plan.steps.length}-step plan for ${project.name}. ${requiresApproval(riskLevel) ? "The plan is waiting for your approval before sensitive work begins." : "I can continue with safe inspection and planning."}`;
   db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
@@ -1324,8 +1391,11 @@ app.get("/api/conversations/:conversationId/messages", async (request: any) => (
 }));
 
 app.get("/api/tasks", async (request: any) => ({
-  tasks: db.prepare(`SELECT t.id,t.title,t.objective,t.status,t.risk_level AS riskLevel,t.plan_json AS planJson,t.created_at AS createdAt,p.name AS projectName
-    FROM tasks t JOIN projects p ON p.id=t.project_id WHERE (? IS NULL OR t.project_id=?) ORDER BY t.created_at DESC LIMIT 100`).all(request.query?.projectId ?? null, request.query?.projectId ?? null)
+  tasks: db.prepare(`SELECT t.id,t.project_id AS projectId,t.title,t.objective,t.status,t.risk_level AS riskLevel,t.plan_json AS planJson,t.created_at AS createdAt,p.name AS projectName
+    FROM tasks t JOIN projects p ON p.id=t.project_id ORDER BY t.created_at DESC LIMIT 100`).all().map((task: any) => ({
+      ...task,
+      ...summarizeTaskState(db, task.id)
+    }))
 }));
 
 app.get("/api/approvals", async () => ({
@@ -1340,9 +1410,11 @@ app.post("/api/proposals", async (request, reply) => {
     FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?`).get(parsed.data.taskId) as any;
   if (!task) return reply.status(404).send({ error: "Task not found" });
   try {
+    const currentRound = getCurrentTaskRound(db, task.id);
     const proposal = await insertProposal(db, {
       id: nanoid(),
       taskId: task.id,
+      taskRoundId: currentRound?.id ?? null,
       projectId: task.projectId,
       rootPath: task.rootPath,
       filePath: parsed.data.filePath,
@@ -1359,7 +1431,7 @@ app.post("/api/proposals", async (request, reply) => {
 });
 
 app.get("/api/tasks/:taskId/proposals", async (request: any) => ({
-  proposals: db.prepare(`SELECT id,task_id AS taskId,file_path AS filePath,operation,original_content_hash AS originalContentHash,reason,status,created_at AS createdAt,updated_at AS updatedAt
+  proposals: db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,file_path AS filePath,operation,original_content_hash AS originalContentHash,reason,status,created_at AS createdAt,updated_at AS updatedAt
     FROM change_proposals WHERE task_id=? ORDER BY created_at`).all(request.params.taskId)
 }));
 
@@ -1383,6 +1455,15 @@ app.get("/api/tasks/:taskId/execution", async (request: any, reply) => {
   return getTaskExecution(db, request.params.taskId);
 });
 
+app.get("/api/tasks/:taskId/history", async (request: any, reply) => {
+  try {
+    return listTaskHistory(db, request.params.taskId);
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load task history" });
+  }
+});
+
 app.post("/api/tasks/:taskId/run-checks", async (request: any, reply) => {
   try {
     return await runTaskChecks(db, request.params.taskId, now(), request.body?.action);
@@ -1396,6 +1477,14 @@ app.post("/api/tasks/:taskId/rollback", async (request: any, reply) => {
     return await rollbackTask(db, request.params.taskId, now(), audit);
   } catch (error) {
     return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to roll back task" });
+  }
+});
+
+app.post("/api/tasks/:taskId/recover", async (request: any, reply) => {
+  try {
+    return await recoverTaskExecution(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to recover task execution" });
   }
 });
 
@@ -1432,12 +1521,23 @@ app.post("/api/tasks/:taskId/proposals/apply", async (request: any, reply) => {
 app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
   const parsed = ApprovalActionSchema.safeParse(request.body);
   if (!parsed.success) return reply.status(400).send({ error: "Invalid decision" });
-  const approval = db.prepare("SELECT id,task_id AS taskId,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
+  const approval = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
   if (!approval) return reply.status(404).send({ error: "Approval not found" });
   if (approval.status !== "PENDING") return reply.status(409).send({ error: "Approval is already decided" });
   const decidedAt = now();
   db.prepare("UPDATE approvals SET status=?,decision_note=?,decided_at=? WHERE id=?").run(parsed.data.decision, parsed.data.note ?? null, decidedAt, approval.id);
   db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  if (approval.taskRoundId) {
+    updateTaskRound(db, approval.taskRoundId, {
+      status: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
+      nextRequiredAction: parsed.data.decision === "APPROVED" ? "APPLY_PROPOSALS" : "CONTINUE_CHAT",
+      completedAt: decidedAt,
+      recoveryAvailable: false,
+      recoveryStatus: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
+      recoveryOutcome: parsed.data.decision === "APPROVED" ? "AWAITING_APPLICATION" : "TASK_CANCELLED",
+      now: decidedAt
+    });
+  }
   audit("APPROVAL_DECIDED", `Approval ${parsed.data.decision.toLowerCase()}`, { taskId: approval.taskId, payload: parsed.data });
   return { status: parsed.data.decision };
 });

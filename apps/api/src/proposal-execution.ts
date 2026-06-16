@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hashContent, validateProposalPath, type AuditWriter } from "./change-proposals.js";
 import { runAvailableChecks, runProjectCheck, type CheckAction } from "./command-runner.js";
+import { getCurrentTaskRound, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,7 @@ type ProposalRow = {
   projectId: string;
   filePath: string;
   operation: "CREATE" | "UPDATE" | "DELETE";
+  originalContent: string | null;
   originalContentHash: string | null;
   proposedContent: string | null;
   status: string;
@@ -31,8 +33,37 @@ type GitCheckpoint = {
   warning: string | null;
 };
 
+function hasColumn(db: Database.Database, table: string, column: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((entry) => entry.name === column);
+}
+
+function insertTaskExecution(db: Database.Database, values: {
+  id: string;
+  taskId: string;
+  taskRoundId: string | null;
+  projectId: string;
+  status: string;
+  gitCheckpointJson?: string | null;
+  safetySummaryJson?: string | null;
+  checkResultsJson?: string | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}) {
+  if (hasColumn(db, "task_executions", "task_round_id")) {
+    db.prepare(`INSERT INTO task_executions (id,task_id,task_round_id,project_id,status,git_checkpoint_json,safety_summary_json,check_results_json,error,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(values.id, values.taskId, values.taskRoundId, values.projectId, values.status, values.gitCheckpointJson ?? null, values.safetySummaryJson ?? null, values.checkResultsJson ?? null, values.error ?? null, values.createdAt, values.updatedAt);
+    return;
+  }
+  db.prepare(`INSERT INTO task_executions (id,task_id,project_id,status,git_checkpoint_json,safety_summary_json,check_results_json,error,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(values.id, values.taskId, values.projectId, values.status, values.gitCheckpointJson ?? null, values.safetySummaryJson ?? null, values.checkResultsJson ?? null, values.error ?? null, values.createdAt, values.updatedAt);
+}
+
 type TaskExecutionRow = {
   id: string;
+  taskId?: string;
+  taskRoundId?: string | null;
   status: string;
   gitCheckpointJson: string | null;
   safetySummaryJson: string | null;
@@ -78,23 +109,42 @@ function getTask(db: Database.Database, taskId: string) {
     FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?`).get(taskId) as TaskRow | undefined;
 }
 
-function getApprovedApproval(db: Database.Database, task: TaskRow) {
-  return db.prepare("SELECT id,task_id AS taskId FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1").get(task.id) as { id: string; taskId: string } | undefined;
+function getApprovedApproval(db: Database.Database, task: TaskRow, taskRoundId?: string | null) {
+  const hasTaskRoundColumn = hasColumn(db, "approvals", "task_round_id");
+  if (taskRoundId && hasTaskRoundColumn) {
+    return db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId FROM approvals WHERE task_id=? AND task_round_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1").get(task.id, taskRoundId) as { id: string; taskId: string; taskRoundId: string | null } | undefined;
+  }
+  return hasTaskRoundColumn
+    ? db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1").get(task.id) as { id: string; taskId: string; taskRoundId: string | null } | undefined
+    : db.prepare("SELECT id,task_id AS taskId FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY created_at DESC LIMIT 1").get(task.id) as { id: string; taskId: string; taskRoundId: string | null } | undefined;
 }
 
-function getApprovedProposals(db: Database.Database, task: TaskRow) {
-  return db.prepare(`SELECT id,task_id AS taskId,project_id AS projectId,file_path AS filePath,operation,
-    original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
-    FROM change_proposals WHERE task_id=? AND project_id=? AND status='APPROVED' ORDER BY created_at`)
-    .all(task.id, task.projectId) as ProposalRow[];
+function getApprovedProposals(db: Database.Database, task: TaskRow, taskRoundId?: string | null) {
+  const hasTaskRoundColumn = hasColumn(db, "change_proposals", "task_round_id");
+  if (taskRoundId && hasTaskRoundColumn) {
+    return db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,project_id AS projectId,file_path AS filePath,operation,
+    original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+    FROM change_proposals WHERE task_id=? AND task_round_id=? AND status='APPROVED' ORDER BY created_at`)
+      .all(task.id, taskRoundId) as ProposalRow[];
+  }
+  return hasTaskRoundColumn
+    ? db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,project_id AS projectId,file_path AS filePath,operation,
+      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+      FROM change_proposals WHERE task_id=? AND project_id=? AND status='APPROVED' ORDER BY created_at`)
+      .all(task.id, task.projectId) as ProposalRow[]
+    : db.prepare(`SELECT id,task_id AS taskId,project_id AS projectId,file_path AS filePath,operation,
+      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+      FROM change_proposals WHERE task_id=? AND project_id=? AND status='APPROVED' ORDER BY created_at`)
+      .all(task.id, task.projectId) as ProposalRow[];
 }
 
 export async function applyTaskProposals(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
-  const approval = getApprovedApproval(db, task);
+  const currentRound = getCurrentTaskRound(db, taskId);
+  const approval = getApprovedApproval(db, task, currentRound?.id ?? null);
   if (!approval) throw new Error("An approved task approval is required before applying proposals");
-  const proposals = getApprovedProposals(db, task);
+  const proposals = getApprovedProposals(db, task, currentRound?.id ?? null);
   if (!proposals.length) throw new Error("No approved proposals to apply");
   if (proposals.some((proposal) => proposal.operation === "DELETE")) throw new Error("DELETE proposals are disabled");
 
@@ -123,8 +173,20 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
 
   const checkpoint = await gitCheckpoint(task.rootPath, task.id);
   const executionId = randomUUID();
-  db.prepare(`INSERT INTO task_executions (id,task_id,project_id,status,git_checkpoint_json,safety_summary_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(executionId, task.id, task.projectId, "APPLYING", JSON.stringify(checkpoint), JSON.stringify({ files: staged.map((item) => item.target.relativePath), warning: checkpoint.warning }), now, now);
+  insertTaskExecution(db, {
+    id: executionId,
+    taskId: task.id,
+    taskRoundId: currentRound?.id ?? null,
+    projectId: task.projectId,
+    status: "APPLYING",
+    gitCheckpointJson: JSON.stringify(checkpoint),
+    safetySummaryJson: JSON.stringify({ files: staged.map((item) => item.target.relativePath), warning: checkpoint.warning }),
+    createdAt: now,
+    updatedAt: now
+  });
+  if (currentRound?.id) {
+    updateTaskRound(db, currentRound.id, { status: "RUNNING", recoveryAvailable: false, recoveryStatus: null, recoveryOutcome: null, now });
+  }
 
   const backups = new Map<string, string | null>();
   try {
@@ -155,6 +217,18 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
   }
   db.prepare("UPDATE task_executions SET status=?,check_results_json=?,updated_at=? WHERE id=?").run(finalStatus, JSON.stringify(checkResults), now, executionId);
   db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(finalStatus, now, task.id);
+  if (currentRound?.id) {
+    updateTaskRound(db, currentRound.id, {
+      status: finalStatus,
+      checkResultsJson: JSON.stringify(checkResults),
+      nextRequiredAction: finalStatus === "FAILED_VALIDATION" ? "REVIEW_CHECK_RESULTS" : "CONTINUE_CHAT",
+      completedAt: now,
+      recoveryAvailable: false,
+      recoveryStatus: null,
+      recoveryOutcome: finalStatus === "FAILED_VALIDATION" ? "CHECKS_FAILED" : "CHECKS_PASSED",
+      now
+    });
+  }
   await fs.rm(tempRoot, { recursive: true, force: true });
   return { status: finalStatus, applied: staged.length, gitCheckpoint: checkpoint, checkResults };
 }
@@ -162,16 +236,39 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
 export async function runTaskChecks(db: Database.Database, taskId: string, now: string, action?: CheckAction) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
+  const currentRound = getCurrentTaskRound(db, taskId);
   const results = action ? [await runProjectCheck(task.rootPath, action)] : await runAvailableChecks(task.rootPath);
   const ok = results.every((result) => result.ok);
-  db.prepare(`INSERT INTO task_executions (id,task_id,project_id,status,check_results_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), task.id, task.projectId, ok ? "CHECKS_PASSED" : "CHECKS_FAILED", JSON.stringify(results), now, now);
+  insertTaskExecution(db, {
+    id: randomUUID(),
+    taskId: task.id,
+    taskRoundId: currentRound?.id ?? null,
+    projectId: task.projectId,
+    status: ok ? "CHECKS_PASSED" : "CHECKS_FAILED",
+    checkResultsJson: JSON.stringify(results),
+    createdAt: now,
+    updatedAt: now
+  });
+  if (currentRound?.id) {
+    updateTaskRound(db, currentRound.id, {
+      status: ok ? "COMPLETED" : "FAILED_VALIDATION",
+      checkResultsJson: JSON.stringify(results),
+      nextRequiredAction: ok ? "CONTINUE_CHAT" : "REVIEW_CHECK_RESULTS",
+      completedAt: now,
+      recoveryAvailable: false,
+      recoveryStatus: ok ? "CHECKS_PASSED" : "CHECKS_FAILED",
+      recoveryOutcome: ok ? "CHECKS_PASSED" : "CHECKS_FAILED",
+      now
+    });
+  }
   if (!ok) db.prepare("UPDATE tasks SET status='FAILED_VALIDATION',updated_at=? WHERE id=?").run(now, task.id);
   return { status: ok ? "CHECKS_PASSED" : "CHECKS_FAILED", checkResults: results };
 }
 
 export function getTaskExecution(db: Database.Database, taskId: string) {
-  const executions = db.prepare("SELECT id,status,git_checkpoint_json AS gitCheckpointJson,safety_summary_json AS safetySummaryJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC").all(taskId) as TaskExecutionRow[];
+  const executions = (hasColumn(db, "task_executions", "task_round_id")
+    ? db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,status,git_checkpoint_json AS gitCheckpointJson,safety_summary_json AS safetySummaryJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC")
+    : db.prepare("SELECT id,task_id AS taskId,status,git_checkpoint_json AS gitCheckpointJson,safety_summary_json AS safetySummaryJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC")).all(taskId) as TaskExecutionRow[];
   const normalizedExecutions = executions.map((execution) => {
     const gitCheckpoint = parseGitCheckpoint(execution.gitCheckpointJson);
     const rollbackAvailable = Boolean(gitCheckpoint?.available) && execution.status !== "ROLLED_BACK";
@@ -189,13 +286,18 @@ export function getTaskExecution(db: Database.Database, taskId: string) {
   const currentCheckpointExecution = checkpointExecution
     ? { ...checkpointExecution, rollbackAvailable, rollbackStatus }
     : null;
+  const taskState = summarizeTaskState(db, taskId);
+  const recoveryRow = hasColumn(db, "task_rounds", "recovery_outcome")
+    ? db.prepare("SELECT recovery_outcome AS recoveryOutcome FROM task_rounds WHERE task_id=? ORDER BY round_number DESC LIMIT 1").get(taskId) as { recoveryOutcome: string | null } | undefined
+    : undefined;
   return {
     executions: normalizedExecutions,
     checkpointExecution: currentCheckpointExecution,
     latestExecution,
     rollbackAvailable,
     rollbackStatus,
-    recoveryOutcome: latestExecution?.status === "ROLLED_BACK" ? "CHECKPOINT_RESTORED" : null,
+    recoveryAvailable: taskState.recoveryAvailable,
+    recoveryOutcome: latestExecution?.status === "APPLYING" ? "EXECUTION_INTERRUPTED" : recoveryRow?.recoveryOutcome ?? (latestExecution?.status === "ROLLED_BACK" ? "CHECKPOINT_RESTORED" : latestExecution?.status === "FAILED_VALIDATION" ? "CHECKS_FAILED" : null),
     appliedFiles: db.prepare("SELECT proposal_id AS proposalId,file_path AS filePath,operation,before_hash AS beforeHash,after_hash AS afterHash,result,created_at AS createdAt FROM applied_file_changes WHERE task_id=? ORDER BY created_at DESC").all(taskId)
   };
 }
@@ -203,6 +305,7 @@ export function getTaskExecution(db: Database.Database, taskId: string) {
 export async function rollbackTask(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
+  const currentRound = getCurrentTaskRound(db, taskId);
   const changes = db.prepare("SELECT proposal_id AS proposalId,file_path AS filePath,before_content AS beforeContent,after_hash AS afterHash FROM applied_file_changes WHERE task_id=? ORDER BY created_at DESC").all(task.id) as Array<{ proposalId: string; filePath: string; beforeContent: string | null; afterHash: string | null }>;
   if (!changes.length) throw new Error("No applied changes to roll back");
   for (const change of changes) {
@@ -218,8 +321,80 @@ export async function rollbackTask(db: Database.Database, taskId: string, now: s
     audit("TASK_FILE_ROLLED_BACK", `Rolled back ${change.filePath}`, { projectId: task.projectId, taskId: task.id, payload: { proposalId: change.proposalId, path: change.filePath } });
   }
   db.prepare("UPDATE tasks SET status='ROLLED_BACK',updated_at=? WHERE id=?").run(now, task.id);
-  db.prepare(`INSERT INTO task_executions (id,task_id,project_id,status,created_at,updated_at)
-    VALUES (?,?,?,?,?,?)`).run(randomUUID(), task.id, task.projectId, "ROLLED_BACK", now, now);
+  insertTaskExecution(db, {
+    id: randomUUID(),
+    taskId: task.id,
+    taskRoundId: currentRound?.id ?? null,
+    projectId: task.projectId,
+    status: "ROLLED_BACK",
+    createdAt: now,
+    updatedAt: now
+  });
+  if (currentRound?.id) {
+    updateTaskRound(db, currentRound.id, {
+      status: "ROLLED_BACK",
+      nextRequiredAction: "CONTINUE_CHAT",
+      completedAt: now,
+      recoveryAvailable: false,
+      recoveryStatus: "ROLLED_BACK",
+      recoveryOutcome: "CHECKPOINT_RESTORED",
+      now
+    });
+  }
   audit("TASK_ROLLED_BACK", "Task files rolled back", { projectId: task.projectId, taskId: task.id, payload: { fileCount: changes.length } });
   return { status: "ROLLED_BACK", rolledBack: changes.length };
+}
+
+export async function recoverTaskExecution(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
+  const task = getTask(db, taskId);
+  if (!task) throw new Error("Task not found");
+  const currentRound = getCurrentTaskRound(db, taskId);
+  const latestExecution = (hasColumn(db, "task_executions", "task_round_id")
+    ? db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,status,git_checkpoint_json AS gitCheckpointJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC LIMIT 1")
+    : db.prepare("SELECT id,task_id AS taskId,status,git_checkpoint_json AS gitCheckpointJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC LIMIT 1")).get(taskId) as TaskExecutionRow | undefined;
+  if (!latestExecution || latestExecution.status !== "APPLYING") throw new Error("No interrupted execution to recover");
+  const approval = getApprovedApproval(db, task, currentRound?.id ?? null);
+  const proposals = getApprovedProposals(db, task, currentRound?.id ?? null);
+  if (!approval) throw new Error("An approved task approval is required before recovery");
+  if (!proposals.length) throw new Error("No approved proposals to recover");
+
+  for (const proposal of proposals) {
+    const target = validateProposalPath(task.rootPath, proposal.filePath);
+    const currentContent = await readTextIfExists(target.absolutePath);
+    const currentHash = currentContent === null ? null : hashContent(currentContent);
+    const expectedHash = proposal.proposedContent === null ? null : hashContent(proposal.proposedContent);
+    if (currentHash !== expectedHash) throw new Error(`Cannot recover because file content no longer matches the applied proposal: ${proposal.filePath}`);
+  }
+
+  const checkResults = await runAvailableChecks(task.rootPath);
+  const checksOk = checkResults.every((result) => result.ok);
+  const finalStatus = checksOk ? "COMPLETED" : "FAILED_VALIDATION";
+  const gitCheckpoint = latestExecution.gitCheckpointJson ?? null;
+
+  for (const proposal of proposals) {
+    const existingChange = db.prepare("SELECT id FROM applied_file_changes WHERE task_id=? AND proposal_id=?").get(task.id, proposal.id) as { id: string } | undefined;
+    if (existingChange) continue;
+    db.prepare(`INSERT INTO applied_file_changes
+      (id,task_id,project_id,proposal_id,file_path,operation,before_hash,after_hash,before_content,after_content,approval_id,git_checkpoint_json,result,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(randomUUID(), task.id, task.projectId, proposal.id, proposal.filePath, proposal.operation, proposal.originalContentHash, proposal.proposedContent ? hashContent(proposal.proposedContent) : null, proposal.originalContent, proposal.proposedContent ?? "", approval.id, gitCheckpoint, checksOk ? "APPLIED" : "APPLIED_FAILED_VALIDATION", now);
+    db.prepare("UPDATE change_proposals SET status='APPLIED',updated_at=? WHERE id=?").run(now, proposal.id);
+  }
+
+  db.prepare("UPDATE task_executions SET status=?,check_results_json=?,updated_at=? WHERE id=?").run(finalStatus, JSON.stringify(checkResults), now, latestExecution.id);
+  db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(finalStatus, now, task.id);
+  if (currentRound?.id) {
+    updateTaskRound(db, currentRound.id, {
+      status: finalStatus,
+      checkResultsJson: JSON.stringify(checkResults),
+      nextRequiredAction: finalStatus === "FAILED_VALIDATION" ? "REVIEW_CHECK_RESULTS" : "CONTINUE_CHAT",
+      completedAt: now,
+      recoveryAvailable: false,
+      recoveryStatus: "RECOVERED",
+      recoveryOutcome: checksOk ? "CHECKS_PASSED" : "CHECKS_FAILED",
+      now
+    });
+  }
+  audit("TASK_RECOVERED", `Task recovery ${checksOk ? "completed" : "requires review"}`, { projectId: task.projectId, taskId: task.id, payload: { status: finalStatus, checkCount: checkResults.length } });
+  return { status: finalStatus, checkResults, recoveryOutcome: checksOk ? "CHECKS_PASSED" : "CHECKS_FAILED" };
 }

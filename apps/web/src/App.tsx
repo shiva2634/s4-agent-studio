@@ -5,13 +5,15 @@ type Project = { id: string; name: string; rootPath: string; status?: string };
 type Agent = { id: string; name: string; status: string };
 type Message = { id: string; sender: "user" | "agent"; text: string };
 type Approval = { id: string; summary: string; riskLevel: string; status: string; projectName: string };
-type Task = { id: string; title: string; status: string; riskLevel: string; projectName: string };
+type Task = { id: string; projectId: string; title: string; status: string; riskLevel: string; projectName: string; attemptCount: number; correctionRounds: number; nextRequiredAction: string; currentRoundNumber: number | null; currentRoundStatus: string | null; recoveryAvailable: boolean };
+type TaskHistoryRound = { id: string; roundNumber: number; roundType: string; status: string; summary: string; userMessage: string; proposalCount: number; approvalRequired: boolean; nextRequiredAction: string; recoveryAvailable: boolean; recoveryStatus: string | null; recoveryOutcome: string | null; createdAt: string; updatedAt: string; completedAt: string | null; proposals: Array<{ id: string; filePath: string; operation: string; status: string; reason: string }>; approvals: Array<{ id: string; actionType: string; summary: string; status: string }>; executions: Array<{ id: string; status: string; checkResultsJson: string | null; error: string | null }> };
+type TaskHistory = { task: { id: string; projectId: string; projectName: string; title: string; objective: string; status: string; riskLevel: string; conversationId: string | null; attemptCount: number; correctionRounds: number; nextRequiredAction: string; currentRoundNumber: number | null; currentRoundStatus: string | null; recoveryAvailable: boolean; recoveryStatus: string | null }; rounds: TaskHistoryRound[] };
 type Proposal = { id: string; taskId: string; filePath: string; operation: string; reason: string; status: string };
 type ProviderStatus = { configured: boolean; provider: string; baseUrlHostname: string; model: string; status: string; lastTestedAt: string | null; sanitizedError: string | null };
 type GitCheckpoint = { available: boolean; branch: string | null; head: string | null; checkpointRef: string | null; dirty: boolean; warning: string | null };
 type CheckResult = { action: string; script: string; skipped: boolean; ok: boolean; exitCode: number | null; output: string };
 type ExecutionRecord = { id: string; status: string; gitCheckpointJson: string | null; checkResultsJson: string | null; createdAt: string; updatedAt: string; gitCheckpoint: GitCheckpoint | null; rollbackAvailable: boolean; rollbackStatus: "AVAILABLE" | "UNAVAILABLE" | "ROLLED_BACK" };
-type ExecutionState = { executions: ExecutionRecord[]; checkpointExecution: ExecutionRecord | null; latestExecution: ExecutionRecord | null; rollbackAvailable: boolean; rollbackStatus: "AVAILABLE" | "UNAVAILABLE" | "ROLLED_BACK"; recoveryOutcome: string | null; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
+type ExecutionState = { executions: ExecutionRecord[]; checkpointExecution: ExecutionRecord | null; latestExecution: ExecutionRecord | null; rollbackAvailable: boolean; rollbackStatus: "AVAILABLE" | "UNAVAILABLE" | "ROLLED_BACK"; recoveryAvailable: boolean; recoveryOutcome: string | null; appliedFiles: Array<{ filePath: string; operation: string; result: string }> };
 type AuditEvent = { id: string; eventType: string; summary: string; projectId: string | null; taskId: string | null; createdAt: string };
 type MediaProject = { id: string; name: string; description: string | null; aspectRatio: string; defaultBrandKitId: string | null; defaultPresenterProfileId: string | null; status: "ACTIVE" | "ARCHIVED"; createdAt: string; updatedAt: string };
 type MediaMessage = { id: string; sender: "user" | "director"; content: string; createdAt: string };
@@ -79,9 +81,12 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [providerStatus, setProviderStatus] = useState<ProviderStatus>();
   const [execution, setExecution] = useState<ExecutionState>();
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [taskHistory, setTaskHistory] = useState<TaskHistory>();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"project" | "agent" | "deregister" | null>(null);
   const [projectLifecycleDialog, setProjectLifecycleDialog] = useState<"pause" | "resume" | "archive" | "deregister" | null>(null);
   const [projectLifecycleTargetId, setProjectLifecycleTargetId] = useState<string | null>(null);
@@ -99,38 +104,46 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
     setAuditEvents(auditData.events);
+    const preferredProjectId = boot.projects.some((project: Project) => project.id === projectId) ? projectId : boot.projects[0]?.id ?? "";
+    const scopedTasks = taskData.tasks.filter((task: Task) => task.projectId === preferredProjectId);
+    const nextTask = scopedTasks.find((task: Task) => task.id === selectedTaskId) ?? scopedTasks.find((task: Task) => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(task.status)) ?? scopedTasks[0] ?? null;
     if (boot.projects.length === 0) {
       if (projectId) {
         setProjectId("");
         setConversationId(undefined);
         setProposals([]);
         setExecution(undefined);
+        setSelectedTaskId(null);
+        setTaskHistory(undefined);
       }
     } else if (!projectId || !boot.projects.some((project: Project) => project.id === projectId)) {
       setProjectId(boot.projects[0].id);
       setConversationId(undefined);
       setProposals([]);
       setExecution(undefined);
-    }
-    const reviewTask = taskData.tasks.find((t: Task) => ["AWAITING_APPROVAL", "APPROVED", "RUNNING"].includes(t.status));
-    if (reviewTask) {
-      const [proposalData, executionData] = await Promise.all([
-        fetch(`${API}/api/tasks/${reviewTask.id}/proposals`).then(r => r.json()),
-        fetch(`${API}/api/tasks/${reviewTask.id}/execution`).then(r => r.json())
-      ]);
-      setProposals(proposalData.proposals);
-      setExecution(executionData);
-    } else {
-      setProposals([]);
-      setExecution(undefined);
+      setSelectedTaskId(nextTask?.id ?? null);
+      setTaskHistory(undefined);
+    } else if (!selectedTaskId || !scopedTasks.some((task: Task) => task.id === selectedTaskId)) {
+      setSelectedTaskId(nextTask?.id ?? null);
     }
   }
   useEffect(() => { void refresh(); }, []);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ block: "end" }); }, [messages]);
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setTaskHistory(undefined);
+      setProposals([]);
+      setExecution(undefined);
+      return;
+    }
+    void loadTaskDetails(selectedTaskId);
+  }, [selectedTaskId]);
 
   const pending = useMemo(() => approvals.filter(a => a.status === "PENDING"), [approvals]);
-  const activeTask = tasks.find(t => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(t.status));
   const selectedProject = projects.find(project => project.id === projectId);
+  const scopedTasks = tasks.filter(task => task.projectId === projectId);
+  const activeTask = scopedTasks.find(t => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(t.status));
+  const selectedTask = scopedTasks.find(t => t.id === selectedTaskId) ?? activeTask ?? scopedTasks[0] ?? null;
   const lifecycleTarget = manageableProjects.find(project => project.id === projectLifecycleTargetId) ?? selectedProject ?? null;
   const lifecycleAffectsSelectedProject = Boolean(lifecycleTarget && selectedProject && lifecycleTarget.id === selectedProject.id);
 
@@ -141,13 +154,38 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     setExecution(undefined);
   }
 
+  async function loadTaskDetails(taskId: string) {
+    const [proposalsResponse, executionResponse, historyResponse] = await Promise.all([
+      fetch(`${API}/api/tasks/${taskId}/proposals`),
+      fetch(`${API}/api/tasks/${taskId}/execution`),
+      fetch(`${API}/api/tasks/${taskId}/history`)
+    ]);
+    if (proposalsResponse.ok) {
+      const proposalData = await proposalsResponse.json();
+      setProposals(proposalData.proposals ?? []);
+    } else {
+      setProposals([]);
+    }
+    if (executionResponse.ok) {
+      setExecution(await executionResponse.json());
+    } else {
+      setExecution(undefined);
+    }
+    if (historyResponse.ok) {
+      setTaskHistory(await historyResponse.json());
+    } else {
+      setTaskHistory(undefined);
+    }
+  }
+
   async function sendMessage() {
     const value = input.trim(); if (!value || !projectId || busy) return;
     setMessages(m => [...m, { id: crypto.randomUUID(), sender: "user", text: value }]); setInput(""); setBusy(true);
     try {
-      const response = await fetch(`${API}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId, conversationId, message: value }) });
+      const response = await fetch(`${API}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId, taskId: selectedTask?.id ?? undefined, conversationId, message: value }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "Developer Agent request failed");
       setConversationId(data.conversationId);
+      setSelectedTaskId(data.taskId ?? selectedTask?.id ?? null);
       setMessages(m => [
         ...m,
         {
@@ -193,6 +231,17 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     await refresh();
   }
 
+  async function recover(taskId: string) {
+    const response = await fetch(`${API}/api/tasks/${taskId}/recover`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to recover task execution");
+      return;
+    }
+    setNotice(`Task ${taskId} recovery completed.`);
+    await refresh();
+  }
+
   async function testProvider() {
     const data = await fetch(`${API}/api/providers/test`, { method: "POST" }).then(r => r.json());
     setProviderStatus(data);
@@ -210,10 +259,11 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       <aside className="sidebar">
         <button className="primary" onClick={()=>setDialog("project")}>+ Register project</button>
         <h3>Projects</h3>
-        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{setProjectId(e.target.value);setConversationId(undefined);setProposals([]);setExecution(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog(selectedProject.status==="PAUSED"?"resume":"pause");setProjectMenuOpen(false);}}>{selectedProject.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("archive");setProjectMenuOpen(false);}}>Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
+        {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{const nextProjectId=e.target.value;const nextTask=tasks.find(task=>task.projectId===nextProjectId&&["PLANNING","AWAITING_APPROVAL","APPROVED","RUNNING","TESTING"].includes(task.status)) ?? tasks.find(task=>task.projectId===nextProjectId) ?? null;setProjectId(nextProjectId);setConversationId(undefined);setProposals([]);setExecution(undefined);setSelectedTaskId(nextTask?.id ?? null);setTaskHistory(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog(selectedProject.status==="PAUSED"?"resume":"pause");setProjectMenuOpen(false);}}>{selectedProject.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("archive");setProjectMenuOpen(false);}}>Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
         <h3>Project management</h3>
         {manageableProjects.length ? manageableProjects.map(project => <div key={project.id} className="mini"><span>{project.name}</span><small>{project.status}</small><div className="decision wrap">{getProjectManagementActions(project.status).map(action => <button key={action} onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog(action==="Resume Project"?"resume":action==="Pause Project"?"pause":action==="Archive Project"?"archive":"deregister");}}>{action}</button>)}</div></div>) : <p className="muted">No manageable projects.</p>}
         {notice&&<p className="success">{notice}</p>}
+        {error&&<p className="error">{error}</p>}
         <h3>Agents</h3>{agents.map(a=><button key={a.id} className={`nav ${a.id==="developer"?"active":""}`}><span>{a.name}</span><small>{a.status}</small></button>)}
         <button className="secondary" onClick={()=>setDialog("agent")}>+ Create agent</button>
         <h3>Provider</h3>{providerStatus&&<div className="provider-box"><strong>{providerStatus.configured?"Configured":"Not configured"}</strong><small>{providerStatus.provider} · {providerStatus.model||"no model"}</small><small>{providerStatus.baseUrlHostname}</small><span className={`risk ${providerStatus.status==="ok"?"low":providerStatus.status==="error"?"critical":"medium"}`}>{providerStatus.status}</span>{providerStatus.sanitizedError&&<p className="error">{providerStatus.sanitizedError}</p>}<button className="secondary" onClick={()=>void testProvider()}>Test connection</button></div>}
@@ -225,13 +275,14 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         <div className="composer"><textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();void sendMessage();}}} placeholder={projectId?"Describe what you want to build, fix, research, or automate...":"Register a project first..."}/><button className="primary send" onClick={()=>void sendMessage()} disabled={busy||!projectId}>{busy?"Planning...":"Send"}</button></div>
       </section>
       <aside className="activity">
-        <h3>Current task</h3>{activeTask?<div className="card"><strong>{activeTask.title}</strong><div className="row"><span className={`risk ${activeTask.riskLevel}`}>{activeTask.riskLevel}</span><span>{activeTask.status.replaceAll("_"," ")}</span></div><p>{activeTask.projectName}</p></div>:<div className="card"><strong>No active task</strong><p>Your plan and execution status will appear here.</p></div>}
+        <h3>Current task</h3>{selectedTask?<div className="card"><strong>{selectedTask.title}</strong><div className="row"><span className={`risk ${selectedTask.riskLevel}`}>{selectedTask.riskLevel}</span><span>{selectedTask.status.replaceAll("_"," ")}</span></div><p>{selectedTask.projectName}</p><div className="mini-grid"><div className="mini"><span>Attempts</span><strong>{selectedTask.attemptCount}</strong></div><div className="mini"><span>Correction rounds</span><strong>{selectedTask.correctionRounds}</strong></div><div className="mini"><span>Next action</span><strong>{selectedTask.nextRequiredAction.replaceAll("_"," ")}</strong></div><div className="mini"><span>Current round</span><strong>{selectedTask.currentRoundNumber ?? "n/a"}</strong><small>{selectedTask.currentRoundStatus ?? "unknown"}</small></div></div>{selectedTask.recoveryAvailable&&<p className="notice">Interrupted execution can be recovered safely.</p>}</div>:<div className="card"><strong>No active task</strong><p>Your plan, attempts, and execution history will appear here.</p></div>}
         <h3>Change proposals</h3>{proposals.length?proposals.map(p=><div className="card proposal" key={p.id}><strong>{p.filePath}</strong><div className="row"><span>{p.operation}</span><span>{p.status}</span></div><p>{p.reason}</p><button onClick={()=>void loadDiff(p.id)}>Diff preview</button>{diffs[p.id]&&<pre>{diffs[p.id]}</pre>}<div className="decision"><button onClick={()=>void decideProposal(p.id,"approve")} disabled={p.status!=="PENDING"}>Approve</button><button onClick={()=>void decideProposal(p.id,"reject")} disabled={p.status!=="PENDING"}>Reject</button></div></div>):<div className="card"><strong>No proposals</strong><p>Mutation requests will appear here for review before any file changes.</p></div>}
-        {activeTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{checkpointExecution&&<div className="execution-grid"><div className="execution-field"><span>Rollback status</span><strong>{rollbackStatus}</strong></div><div className="execution-field"><span>Rollback available</span><strong>{rollbackAvailable ? "Yes" : "No"}</strong></div><div className="execution-field"><span>Branch</span><strong>{checkpointExecution.gitCheckpoint?.branch ?? "Unknown"}</strong></div><div className="execution-field"><span>Checkpoint commit</span><strong>{checkpointExecution.gitCheckpoint?.head ?? "Unavailable"}</strong></div><div className="execution-field"><span>Checkpoint ref</span><strong>{checkpointExecution.gitCheckpoint?.checkpointRef ?? "Unavailable"}</strong></div><div className="execution-field"><span>Repository state</span><strong>{checkpointExecution.gitCheckpoint?.dirty ? "Dirty" : "Clean"}</strong></div><div className="execution-field"><span>Checkpoint created</span><strong>{checkpointExecution.createdAt}</strong></div>{checkpointExecution.gitCheckpoint?.warning&&<div className="execution-field wide"><span>Recovery note</span><strong>{checkpointExecution.gitCheckpoint.warning}</strong></div>}</div>}{latestExecution&&<div className="execution-summary"><div className="row"><span>Status</span><span>{latestExecution.status}</span></div><div className="row"><span>Recovery outcome</span><span>{execution?.recoveryOutcome ?? "No recovery required"}</span></div></div>}{checkResults.length>0&&<div className="check-results">{checkResults.map((result)=><article key={`${result.action}-${result.script}`} className={`check-result ${result.ok ? "ok" : "fail"}`}><div className="row"><strong>{result.action}</strong><span>{result.ok ? "Passed" : "Failed"}</span></div><small>Script: {result.script}</small><small>{result.skipped ? "Skipped" : `Exit code: ${result.exitCode ?? "n/a"}`}</small><pre>{result.output || "No output captured."}</pre></article>)}</div>}{checkResults.length===0&&<div className="muted">No check results yet.</div>}{execution?.appliedFiles.length ? <div className="files-changed">{execution.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}</div> : <div className="muted">No files have been applied yet.</div>}<div className="decision"><button onClick={()=>void runChecks(activeTask.id)}>Run checks</button><button onClick={()=>void rollback(activeTask.id)} disabled={!rollbackAvailable}>Rollback</button></div></div>}
-        {activeTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(activeTask.id)}>Apply approved changes</button>}
+        {selectedTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{checkpointExecution&&<div className="execution-grid"><div className="execution-field"><span>Rollback status</span><strong>{rollbackStatus}</strong></div><div className="execution-field"><span>Rollback available</span><strong>{rollbackAvailable ? "Yes" : "No"}</strong></div><div className="execution-field"><span>Branch</span><strong>{checkpointExecution.gitCheckpoint?.branch ?? "Unknown"}</strong></div><div className="execution-field"><span>Checkpoint commit</span><strong>{checkpointExecution.gitCheckpoint?.head ?? "Unavailable"}</strong></div><div className="execution-field"><span>Checkpoint ref</span><strong>{checkpointExecution.gitCheckpoint?.checkpointRef ?? "Unavailable"}</strong></div><div className="execution-field"><span>Repository state</span><strong>{checkpointExecution.gitCheckpoint?.dirty ? "Dirty" : "Clean"}</strong></div><div className="execution-field"><span>Checkpoint created</span><strong>{checkpointExecution.createdAt}</strong></div>{checkpointExecution.gitCheckpoint?.warning&&<div className="execution-field wide"><span>Recovery note</span><strong>{checkpointExecution.gitCheckpoint.warning}</strong></div>}</div>}{latestExecution&&<div className="execution-summary"><div className="row"><span>Status</span><span>{latestExecution.status}</span></div><div className="row"><span>Recovery outcome</span><span>{execution?.recoveryOutcome ?? "No recovery required"}</span></div><div className="row"><span>Recovery action</span><span>{execution?.recoveryAvailable ? "Recover execution" : "Not available"}</span></div></div>}{checkResults.length>0&&<div className="check-results">{checkResults.map((result)=><article key={`${result.action}-${result.script}`} className={`check-result ${result.ok ? "ok" : "fail"}`}><div className="row"><strong>{result.action}</strong><span>{result.ok ? "Passed" : "Failed"}</span></div><small>Script: {result.script}</small><small>{result.skipped ? "Skipped" : `Exit code: ${result.exitCode ?? "n/a"}`}</small><pre>{result.output || "No output captured."}</pre></article>)}</div>}{checkResults.length===0&&<div className="muted">No check results yet.</div>}{execution?.appliedFiles.length ? <div className="files-changed">{execution.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}</div> : <div className="muted">No files have been applied yet.</div>}<div className="decision"><button onClick={()=>void runChecks(selectedTask.id)}>Run checks</button><button onClick={()=>void rollback(selectedTask.id)} disabled={!rollbackAvailable}>Rollback</button><button onClick={()=>void recover(selectedTask.id)} disabled={!execution?.recoveryAvailable}>Recover</button></div></div>}
+        {selectedTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(selectedTask.id)}>Apply approved changes</button>}
+        {taskHistory&&<div className="card"><strong>Task history</strong><div className="row"><span>Attempts</span><span>{taskHistory.task.attemptCount}</span></div><div className="row"><span>Correction rounds</span><span>{taskHistory.task.correctionRounds}</span></div><div className="row"><span>Next required action</span><span>{taskHistory.task.nextRequiredAction.replaceAll("_"," ")}</span></div><div className="history-list">{taskHistory.rounds.map(round=><article key={round.id} className="mini history-round"><div className="row"><strong>Round {round.roundNumber}</strong><span>{round.roundType}</span></div><div className="row"><span>Status</span><span>{round.status}</span></div><div className="row"><span>Next action</span><span>{round.nextRequiredAction.replaceAll("_"," ")}</span></div><small>{round.summary}</small><small>{round.userMessage}</small><small>{round.proposalCount} proposals · {round.approvalRequired ? "approval required" : "no approval required"}</small>{round.recoveryAvailable&&<small>Recovery available</small>}{round.recoveryOutcome&&<small>Recovery outcome: {round.recoveryOutcome}</small>}</article>)}</div></div>}
         <h3>Pending approvals</h3>{pending.length?pending.slice(0,5).map(a=><div className="card approval" key={a.id}><strong>{a.summary}</strong><div className="row"><span className={`risk ${a.riskLevel}`}>{a.riskLevel}</span><span>{a.projectName}</span></div><div className="decision"><button onClick={()=>void decide(a.id,"APPROVED")}>Approve</button><button onClick={()=>void decide(a.id,"REJECTED")}>Reject</button></div></div>):<div className="card"><strong>No pending approvals</strong><p>Sensitive actions wait for your decision.</p></div>}
         <h3>Audit events</h3>{auditEvents.length?auditEvents.slice(0,6).map(event=><div className="mini" key={event.id}><span>{event.eventType}</span><small>{event.summary}</small></div>):<div className="card"><strong>No audit events</strong><p>Lifecycle and execution events will appear here.</p></div>}
-        <h3>Recent tasks</h3>{tasks.slice(0,4).map(t=><div className="mini" key={t.id}><span>{t.title}</span><small>{t.status}</small></div>)}
+        <h3>Recent tasks</h3>{scopedTasks.slice(0,4).map(t=><button className={`mini task-item ${t.id===selectedTask?.id?"active":""}`} key={t.id} onClick={()=>setSelectedTaskId(t.id)}><span>{t.title}</span><small>{t.status} · {t.attemptCount} attempts</small></button>)}
       </aside>
     </div>
     {dialog==="project"&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={refresh}/>} {dialog==="agent"&&<AgentDialog projectId={projectId} onClose={()=>setDialog(null)} onCreated={refresh}/>} {projectLifecycleDialog&&lifecycleTarget&&<ProjectLifecycleDialog project={lifecycleTarget} action={projectLifecycleDialog} onClose={()=>{setProjectLifecycleDialog(null);setProjectLifecycleTargetId(null);}} onDone={async(message)=>{setNotice(message);if(projectLifecycleDialog==="resume"){await refresh();return;}if(lifecycleAffectsSelectedProject){await refreshAndReselectProject();return;}await refresh();}}/>}

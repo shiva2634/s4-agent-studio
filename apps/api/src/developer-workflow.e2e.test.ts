@@ -189,7 +189,7 @@ describe("developer agent workflow", () => {
     assert.equal(executionBody.checkpointExecution?.rollbackAvailable, true);
     assert.equal(executionBody.rollbackAvailable, true);
     assert.equal(executionBody.rollbackStatus, "AVAILABLE");
-    assert.equal(executionBody.recoveryOutcome, null);
+    assert.equal(executionBody.recoveryOutcome, "CHECKS_PASSED");
     assert.deepEqual(executionBody.appliedFiles.map((file) => file.filePath), ["created.ts", "existing.ts"]);
     assert.match(executionBody.checkpointExecution?.createdAt ?? "", /T/);
     assert.match(await fs.readFile(path.join(root, "unrelated.ts"), "utf8"), /false/);
@@ -291,5 +291,159 @@ describe("developer agent workflow", () => {
 
     const activeChat = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: activeProject.id, message: "Please build a dashboard widget." } });
     assert.equal(activeChat.statusCode, 200);
+  });
+
+  it("continues the same task across multiple chat turns and records extra proposal rounds", async () => {
+    const root = await createTestProject("project-continuation");
+    const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Continuation Project", rootPath: root } });
+    assert.equal(register.statusCode, 201);
+    const project = register.json() as { id: string };
+
+    const first = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, message: "Build a dashboard panel and update the existing helper." } });
+    assert.equal(first.statusCode, 200);
+    const firstBody = first.json() as { taskId: string; approvalId: string | null };
+    assert.ok(firstBody.approvalId);
+
+    const second = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, taskId: firstBody.taskId, message: "Continue the same task with a follow-up adjustment." } });
+    assert.equal(second.statusCode, 200);
+    const secondBody = second.json() as { taskId: string };
+    assert.equal(secondBody.taskId, firstBody.taskId);
+
+    const history = await app.inject({ method: "GET", url: `/api/tasks/${firstBody.taskId}/history` });
+    assert.equal(history.statusCode, 200);
+    const historyBody = history.json() as { task: { attemptCount: number; correctionRounds: number; nextRequiredAction: string }; rounds: Array<{ id: string; roundNumber: number; roundType: string }> };
+    assert.equal(historyBody.task.attemptCount, 2);
+    assert.equal(historyBody.task.correctionRounds, 0);
+    assert.equal(historyBody.rounds.length, 2);
+    assert.equal(historyBody.rounds[0]?.roundType, "INITIAL");
+    assert.equal(historyBody.rounds[1]?.roundType, "CONTINUATION");
+
+    const extraProposal = await app.inject({
+      method: "POST",
+      url: "/api/proposals",
+      payload: {
+        taskId: firstBody.taskId,
+        filePath: "follow-up.ts",
+        operation: "CREATE",
+        proposedContent: "export const followUp = true;\n",
+        reason: "Add the follow-up change"
+      }
+    });
+    assert.equal(extraProposal.statusCode, 201);
+    const proposalsResponse = await app.inject({ method: "GET", url: `/api/tasks/${firstBody.taskId}/proposals` });
+    assert.equal(proposalsResponse.statusCode, 200);
+    const proposals = proposalsResponse.json() as { proposals: Array<{ filePath: string; taskRoundId: string | null }> };
+    const followUpProposal = proposals.proposals.find((proposal) => proposal.filePath === "follow-up.ts");
+    assert.equal(followUpProposal?.taskRoundId, historyBody.rounds[1]?.id ?? null);
+    assert.ok(proposals.proposals.length >= 2);
+    assert.equal(new Set(proposals.proposals.map((proposal) => proposal.taskRoundId)).size, 2);
+  });
+
+  it("suppresses duplicate proposals for unchanged content", async () => {
+    const root = await createTestProject("project-duplicate");
+    const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Duplicate Project", rootPath: root } });
+    assert.equal(register.statusCode, 201);
+    const project = register.json() as { id: string };
+
+    const chat = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, message: "Build a dashboard panel." } });
+    assert.equal(chat.statusCode, 200);
+    const chatBody = chat.json() as { taskId: string };
+
+    const proposalsBefore = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/proposals` });
+    const initialCount = (proposalsBefore.json() as { proposals: unknown[] }).proposals.length;
+
+    const proposalPayload = { taskId: chatBody.taskId, filePath: "duplicate.ts", operation: "CREATE", proposedContent: "export const duplicate = true;\n", reason: "Add duplicate helper" };
+    const first = await app.inject({ method: "POST", url: "/api/proposals", payload: proposalPayload });
+    assert.equal(first.statusCode, 201);
+    const firstBody = first.json() as { proposal: { id: string } };
+
+    const second = await app.inject({ method: "POST", url: "/api/proposals", payload: proposalPayload });
+    assert.equal(second.statusCode, 201);
+    const secondBody = second.json() as { proposal: { id: string } };
+    assert.equal(secondBody.proposal.id, firstBody.proposal.id);
+
+    const proposalsAfter = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/proposals` });
+    const finalCount = (proposalsAfter.json() as { proposals: unknown[] }).proposals.length;
+    assert.equal(finalCount, initialCount + 1);
+  });
+
+  it("creates a correction round after failed checks and requires fresh approval", async () => {
+    const root = await createTestProject("project-correction", { test: "node -e \"process.exit(1)\"" });
+    const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Correction Project", rootPath: root } });
+    assert.equal(register.statusCode, 201);
+    const project = register.json() as { id: string };
+
+    const chat = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, message: "Build a dashboard panel and keep the repo changes recoverable." } });
+    assert.equal(chat.statusCode, 200);
+    const chatBody = chat.json() as { taskId: string; approvalId: string | null };
+
+    const approval = await app.inject({ method: "POST", url: `/api/approvals/${chatBody.approvalId}/decision`, payload: { decision: "APPROVED" } });
+    assert.equal(approval.statusCode, 200);
+
+    const proposalsResponse = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/proposals` });
+    const proposals = (proposalsResponse.json() as { proposals: Array<{ id: string }> }).proposals;
+    for (const proposal of proposals) {
+      const approved = await app.inject({ method: "POST", url: `/api/proposals/${proposal.id}/approve`, payload: {} });
+      assert.equal(approved.statusCode, 200);
+    }
+
+    const apply = await app.inject({ method: "POST", url: `/api/tasks/${chatBody.taskId}/apply` });
+    assert.equal(apply.statusCode, 200);
+    assert.equal((apply.json() as { status: string }).status, "FAILED_VALIDATION");
+
+    const correction = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, taskId: chatBody.taskId, message: "Fix the failing checks and create corrective updates." } });
+    assert.equal(correction.statusCode, 200);
+    const correctionBody = correction.json() as { taskId: string };
+    assert.equal(correctionBody.taskId, chatBody.taskId);
+
+    const history = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/history` });
+    const historyBody = history.json() as { task: { attemptCount: number; correctionRounds: number; nextRequiredAction: string }; rounds: Array<{ roundType: string }> };
+    assert.equal(historyBody.task.attemptCount, 2);
+    assert.equal(historyBody.task.correctionRounds, 1);
+    assert.equal(historyBody.rounds[1]?.roundType, "CORRECTION");
+
+    const correctionApply = await app.inject({ method: "POST", url: `/api/tasks/${chatBody.taskId}/apply` });
+    assert.equal(correctionApply.statusCode, 409);
+    assert.match((correctionApply.json() as { error: string }).error, /approved task approval/i);
+  });
+
+  it("recovers interrupted task executions safely", async () => {
+    const root = await createTestProject("project-recovery");
+    const register = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Recovery Project", rootPath: root } });
+    assert.equal(register.statusCode, 201);
+    const project = register.json() as { id: string };
+
+    const chat = await app.inject({ method: "POST", url: "/api/chat", payload: { projectId: project.id, message: "Build a dashboard panel." } });
+    assert.equal(chat.statusCode, 200);
+    const chatBody = chat.json() as { taskId: string; approvalId: string | null };
+
+    const approval = await app.inject({ method: "POST", url: `/api/approvals/${chatBody.approvalId}/decision`, payload: { decision: "APPROVED" } });
+    assert.equal(approval.statusCode, 200);
+    const proposalsResponse = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/proposals` });
+    const proposals = (proposalsResponse.json() as { proposals: Array<{ id: string }> }).proposals;
+    for (const proposal of proposals) {
+      const approved = await app.inject({ method: "POST", url: `/api/proposals/${proposal.id}/approve`, payload: {} });
+      assert.equal(approved.statusCode, 200);
+    }
+
+    const apply = await app.inject({ method: "POST", url: `/api/tasks/${chatBody.taskId}/apply` });
+    assert.equal(apply.statusCode, 200);
+    db.prepare("UPDATE change_proposals SET status='APPROVED' WHERE task_id=?").run(chatBody.taskId);
+    db.prepare("UPDATE task_executions SET status='APPLYING' WHERE task_id=?").run(chatBody.taskId);
+
+    const historyBefore = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/history` });
+    const historyBeforeBody = historyBefore.json() as { task: { recoveryAvailable: boolean } };
+    assert.equal(historyBeforeBody.task.recoveryAvailable, true);
+
+    const recover = await app.inject({ method: "POST", url: `/api/tasks/${chatBody.taskId}/recover` });
+    assert.equal(recover.statusCode, 200);
+    const recoverBody = recover.json() as { status: string; recoveryOutcome: string };
+    assert.equal(recoverBody.status, "COMPLETED");
+    assert.equal(recoverBody.recoveryOutcome, "CHECKS_PASSED");
+
+    const historyAfter = await app.inject({ method: "GET", url: `/api/tasks/${chatBody.taskId}/history` });
+    const historyAfterBody = historyAfter.json() as { task: { recoveryAvailable: boolean; recoveryStatus: string | null } };
+    assert.equal(historyAfterBody.task.recoveryAvailable, false);
+    assert.equal(historyAfterBody.task.recoveryStatus, "RECOVERED");
   });
 });

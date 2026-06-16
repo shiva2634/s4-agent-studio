@@ -12,6 +12,7 @@ const execFileAsync = promisify(execFile);
 export type ChangeProposalInput = {
   id: string;
   taskId: string;
+  taskRoundId?: string | null;
   projectId: string;
   rootPath: string;
   filePath: string;
@@ -90,6 +91,11 @@ function createUnifiedDiff(filePath: string, originalContent: string | null, pro
   return [...header, ...before.map((line) => `-${line}`), ...after.map((line) => `+${line}`)].join("\n");
 }
 
+function hasColumn(db: Database.Database, table: string, column: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((entry) => entry.name === column);
+}
+
 export async function buildProposal(input: ChangeProposalInput) {
   const { absolutePath, relativePath } = validateProposalPath(input.rootPath, input.filePath);
   const originalContent = await readExistingContent(input.rootPath, relativePath);
@@ -115,10 +121,26 @@ export async function buildProposal(input: ChangeProposalInput) {
 
 export async function insertProposal(db: Database.Database, input: ChangeProposalInput) {
   const proposal = await buildProposal(input);
-  db.prepare(`INSERT INTO change_proposals
-    (id,task_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(proposal.id, proposal.taskId, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+  const hasTaskRoundColumn = hasColumn(db, "change_proposals", "task_round_id");
+  const duplicate = hasTaskRoundColumn
+    ? db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,file_path AS filePath,operation,original_content_hash AS originalContentHash,proposed_content AS proposedContent,reason,status,created_at AS createdAt,updated_at AS updatedAt
+      FROM change_proposals WHERE task_id=? AND COALESCE(task_round_id,'')=COALESCE(?, '') AND file_path=? AND operation=? AND COALESCE(original_content_hash,'')=COALESCE(?, '') AND COALESCE(proposed_content,'')=COALESCE(?, '')
+      ORDER BY created_at DESC LIMIT 1`).get(proposal.taskId, input.taskRoundId ?? null, proposal.filePath, proposal.operation, proposal.originalContentHash, proposal.proposedContent) as { id: string } | undefined
+    : db.prepare(`SELECT id,task_id AS taskId,file_path AS filePath,operation,original_content_hash AS originalContentHash,proposed_content AS proposedContent,reason,status,created_at AS createdAt,updated_at AS updatedAt
+      FROM change_proposals WHERE task_id=? AND file_path=? AND operation=? AND COALESCE(original_content_hash,'')=COALESCE(?, '') AND COALESCE(proposed_content,'')=COALESCE(?, '')
+      ORDER BY created_at DESC LIMIT 1`).get(proposal.taskId, proposal.filePath, proposal.operation, proposal.originalContentHash, proposal.proposedContent) as { id: string } | undefined;
+  if (duplicate) return { ...proposal, id: duplicate.id };
+  if (hasTaskRoundColumn) {
+    db.prepare(`INSERT INTO change_proposals
+      (id,task_id,task_round_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(proposal.id, proposal.taskId, input.taskRoundId ?? null, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+  } else {
+    db.prepare(`INSERT INTO change_proposals
+      (id,task_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(proposal.id, proposal.taskId, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+  }
   return proposal;
 }
 
