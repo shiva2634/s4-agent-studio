@@ -167,7 +167,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   }
 
   return <main className="app-shell">
-    <header className="topbar"><div><h1>S4 Agent Studio</h1><p>Local Developer Agent Workspace</p></div><div className="top-actions"><button className="top-link" onClick={()=>navigate("/media-studio")}>Media Studio</button><span className="status-dot"/> Local API connected<select defaultValue="guided"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div></header>
+    <header className="topbar"><div><h1>App Studio</h1><p>Shrinika Automation Studio</p></div><div className="top-actions"><button className="top-link" onClick={()=>navigate("/media-studio")}>Media Studio</button><span className="status-dot"/> Local API connected<select defaultValue="guided"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div></header>
     <div className="workspace-grid">
       <aside className="sidebar">
         <button className="primary" onClick={()=>setDialog("project")}>+ Register project</button>

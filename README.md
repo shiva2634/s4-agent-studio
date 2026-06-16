@@ -1,6 +1,8 @@
-# S4 Agent Studio
+# App Studio
 
-Local-first conversational agent workspace for building websites, applications, APIs, tools, and specialist agents.
+Parent brand: Shrinika Automation Studio
+
+Local-first conversational workspace for building websites, applications, APIs, tools, and specialist agents.
 
 ## Milestone 1 implemented
 

@@ -65,7 +65,7 @@ app.post("/api/providers/test", async (_request, reply) => {
 });
 
 app.get("/api/bootstrap", async () => ({
-  product: "S4 Agent Studio",
+  product: "App Studio",
   projects: listActiveProjects(db),
   agents: db.prepare("SELECT id,name,role,purpose,status,project_id AS projectId FROM agents ORDER BY created_at").all(),
   pendingApprovals: db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status='PENDING'").get()
