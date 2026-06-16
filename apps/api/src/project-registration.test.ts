@@ -94,6 +94,7 @@ describe("project de-registration", () => {
     const db = dbFixture();
     const root = await projectFolder();
     registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    db.prepare("INSERT INTO tasks (id,project_id,title,status,created_at) VALUES (?,?,?,?,?)").run("task-1", "project-1", "Historical task", "COMPLETED", "created");
     deregisterProject(db, "project-1", "later", audit(db));
 
     const result = registerOrReactivateProject(db, { id: "project-2", name: "Fixture Again", rootPath: root, now: "again" }, audit(db));
@@ -102,7 +103,8 @@ describe("project de-registration", () => {
     assert.equal(result.id, "project-1");
     assert.equal(result.status, "ACTIVE");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM projects").get() as { count: number }).count, 1);
-    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_REREGISTERED'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE project_id='project-1'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_REACTIVATED'").get() as { count: number }).count, 1);
     assert.equal(listActiveProjects(db)[0]?.id, "project-1");
   });
 
@@ -112,6 +114,21 @@ describe("project de-registration", () => {
     registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
 
     assert.throws(() => registerOrReactivateProject(db, { id: "project-2", name: "Duplicate", rootPath: root, now: "again" }, audit(db)), (error) => {
+      assert.ok(error instanceof ProjectRegistrationError);
+      assert.equal(error.statusCode, 409);
+      return true;
+    });
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM projects").get() as { count: number }).count, 1);
+  });
+
+  it("handles case-safe duplicate path checks on Windows", async () => {
+    if (process.platform !== "win32") return;
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    const upperCased = root.toUpperCase();
+
+    assert.throws(() => registerOrReactivateProject(db, { id: "project-2", name: "Duplicate", rootPath: upperCased, now: "again" }, audit(db)), (error) => {
       assert.ok(error instanceof ProjectRegistrationError);
       assert.equal(error.statusCode, 409);
       return true;

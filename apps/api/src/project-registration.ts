@@ -23,6 +23,11 @@ export function normalizeProjectRoot(rootPath: string) {
   return path.resolve(rootPath);
 }
 
+function projectPathKey(rootPath: string) {
+  const normalized = normalizeProjectRoot(rootPath);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 export function listActiveProjects(db: Database.Database): ProjectRow[] {
   return db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE status='ACTIVE' ORDER BY created_at DESC").all() as ProjectRow[];
 }
@@ -33,14 +38,16 @@ export function registerOrReactivateProject(db: Database.Database, input: { id: 
     throw new ProjectRegistrationError("Project directory does not exist", 400);
   }
 
-  const existing = db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE root_path=?").get(rootPath) as ProjectRow | undefined;
-  if (existing?.status === "ACTIVE") {
+  const incomingPathKey = projectPathKey(rootPath);
+  const existingProjects = db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects").all() as ProjectRow[];
+  const existing = existingProjects.find((project) => projectPathKey(project.rootPath) === incomingPathKey);
+  if (existing?.status && existing.status !== "DEREGISTERED") {
     throw new ProjectRegistrationError("This project directory is already registered", 409);
   }
   if (existing?.status === "DEREGISTERED") {
-    db.prepare("UPDATE projects SET name=?,status='ACTIVE',deregistered_at=NULL,deregistered_by=NULL,updated_at=? WHERE id=?")
-      .run(input.name, input.now, existing.id);
-    audit("PROJECT_REREGISTERED", `Project ${input.name} re-registered`, {
+    db.prepare("UPDATE projects SET name=?,root_path=?,status='ACTIVE',deregistered_at=NULL,deregistered_by=NULL,updated_at=? WHERE id=?")
+      .run(input.name, rootPath, input.now, existing.id);
+    audit("PROJECT_REACTIVATED", `Project ${input.name} reactivated`, {
       projectId: existing.id,
       payload: { projectId: existing.id, projectName: input.name, normalizedRootPath: rootPath, previousStatus: existing.status, newStatus: "ACTIVE", timestamp: input.now }
     });
