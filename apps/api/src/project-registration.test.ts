@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { ProjectRegistrationError, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject } from "./project-registration.js";
+import { ProjectRegistrationError, deregisterProject, listActiveProjects, pauseProject, registerOrReactivateProject, resumeProject } from "./project-registration.js";
 
 function dbFixture() {
   const db = new Database(":memory:");
@@ -151,6 +151,38 @@ describe("project de-registration", () => {
     assert.equal(repeated.alreadyPaused, true);
     assert.equal(repeated.status, "PAUSED");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_PAUSED'").get() as { count: number }).count, 1);
+  });
+
+  it("resumes a paused project and restores active listing", async () => {
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+    db.prepare("INSERT INTO tasks (id,project_id,title,status,created_at) VALUES (?,?,?,?,?)").run("task-1", "project-1", "Historical task", "COMPLETED", "created");
+    pauseProject(db, "project-1", "paused", audit(db));
+
+    const result = resumeProject(db, "project-1", "resumed", audit(db));
+
+    assert.equal(result.status, "ACTIVE");
+    assert.equal(result.alreadyActive, false);
+    const row = db.prepare("SELECT status,paused_at AS pausedAt FROM projects WHERE id='project-1'").get() as { status: string; pausedAt: string | null };
+    assert.equal(row.status, "ACTIVE");
+    assert.equal(row.pausedAt, null);
+    assert.equal(listActiveProjects(db)[0]?.id, "project-1");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE project_id='project-1'").get() as { count: number }).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_RESUMED'").get() as { count: number }).count, 1);
+    assert.equal(await fs.readFile(path.join(root, "source.ts"), "utf8"), "export const unchanged = true;\n");
+  });
+
+  it("treats repeated resume as safe", async () => {
+    const db = dbFixture();
+    const root = await projectFolder();
+    registerOrReactivateProject(db, { id: "project-1", name: "Fixture", rootPath: root, now: "created" }, audit(db));
+
+    const repeated = resumeProject(db, "project-1", "resumed", audit(db));
+
+    assert.equal(repeated.alreadyActive, true);
+    assert.equal(repeated.status, "ACTIVE");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type='PROJECT_RESUMED'").get() as { count: number }).count, 0);
   });
 
   it("handles case-safe duplicate path checks on Windows", async () => {

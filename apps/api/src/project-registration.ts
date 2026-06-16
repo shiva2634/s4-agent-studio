@@ -110,3 +110,30 @@ export function pauseProject(db: Database.Database, projectId: string, timestamp
   });
   return { id: project.id, name: project.name, rootPath: project.rootPath, status: "PAUSED" as const, alreadyPaused: false };
 }
+
+export function resumeProject(db: Database.Database, projectId: string, timestamp: string, audit: ProjectAuditWriter) {
+  const project = db.prepare("SELECT id,name,root_path AS rootPath,status FROM projects WHERE id=?").get(projectId) as ProjectRow | undefined;
+  if (!project) throw new ProjectRegistrationError("Project not found", 404);
+  if (project.status === "ACTIVE") {
+    return { id: project.id, name: project.name, rootPath: project.rootPath, status: "ACTIVE" as const, alreadyActive: true };
+  }
+  if (project.status !== "PAUSED") {
+    throw new ProjectRegistrationError("Project cannot be resumed", 409);
+  }
+
+  db.prepare("UPDATE projects SET status='ACTIVE',paused_at=NULL,updated_at=? WHERE id=?")
+    .run(timestamp, project.id);
+  audit("PROJECT_RESUMED", `Project ${project.name} resumed`, {
+    projectId: project.id,
+    payload: {
+      projectId: project.id,
+      projectName: project.name,
+      normalizedRootPath: project.rootPath,
+      previousStatus: project.status,
+      newStatus: "ACTIVE",
+      timestamp,
+      action: "PROJECT_RESUMED"
+    }
+  });
+  return { id: project.id, name: project.name, rootPath: project.rootPath, status: "ACTIVE" as const, alreadyActive: false };
+}
