@@ -1015,7 +1015,7 @@ function MediaStudio({path,navigate}:{path:string;navigate:(path:string)=>void})
   const selectedScene = bundle?.scenes.find(scene => scene.id === selectedSceneId) ?? bundle?.scenes[0];
 
   return <main className="app-shell media-shell">
-    <header className="topbar"><div><h1>S4 Media Studio</h1><p>Video Director planning workspace</p></div><div className="top-actions"><button className="top-link" onClick={()=>navigate("/")}>Developer Studio</button><span className="status-dot"/> Local API connected</div></header>
+    <header className="topbar"><div><h1>App Studio</h1><p>Shrinika Automation Studio</p></div><div className="top-actions"><button className="top-link" onClick={()=>navigate("/")}>Developer Studio</button><span className="status-dot"/> Local API connected</div></header>
     <div className="workspace-grid media-grid">
       <aside className="sidebar">
         <button className="primary" onClick={()=>setDialog("create")}>+ New media project</button>
