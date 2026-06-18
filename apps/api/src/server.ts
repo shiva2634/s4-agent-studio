@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, CreateTaskGitWorkflowSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, ConvertBuildMissionSchema, CreateAgentSchema, CreateBuildMissionSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, CreateTaskGitWorkflowSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -31,6 +31,7 @@ import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments, list
 import { ScaffoldError, createScaffoldJob, generateScaffoldProposals, getScaffoldJob, listScaffoldTemplates, previewScaffoldTemplate } from "./scaffold-engine.js";
 import { PermissionDeniedError, assertFilePermission, assertNetworkAllowed, assertProjectActiveForPolicy, assertProviderAllowed, classifyCommandRisk, getProjectSecurityPolicy, listPermissionEvents, listPermissionProfiles, requestProjectPolicyChange, resolveProjectPolicyApproval, sanitizeForPolicy } from "./security-policy.js";
 import { GitWorkflowError, applyApprovedProposalsToGitWorkflow, cleanupTaskWorktree, createReleaseCandidate, createTaskGitWorkflow, getProjectGitStatus, getTaskGitWorkflowStatus, mergeApprovedReleaseCandidate, recoverGitWorkflow, requestMergeApproval, rollbackGitWorkflow, runGitWorkflowChecks } from "./git-workflow.js";
+import { SelfBuildReadinessError, convertApprovedBuildMission, createBuildMissionDraft, getBuildMission, getLatestReadinessReport, getReadinessReport, listBuildMissionEvents, listBuildMissions, listReadinessHistory, requestBuildMissionApproval, resolveBuildMissionApproval, runSelfBuildReadiness } from "./self-build-readiness.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -1192,6 +1193,81 @@ app.post("/api/projects/:projectId/permissions/test", async (request: any, reply
   }
 });
 
+app.post("/api/projects/:projectId/self-build/readiness/run", async (request: any, reply) => {
+  try {
+    return { report: await runSelfBuildReadiness(db, { id: nanoid(), projectId: request.params.projectId, now: now(), audit }) };
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to run self-build readiness validation" });
+  }
+});
+
+app.get("/api/projects/:projectId/self-build/readiness/latest", async (request: any) => ({
+  report: getLatestReadinessReport(db, request.params.projectId)
+}));
+
+app.get("/api/projects/:projectId/self-build/readiness/history", async (request: any) => ({
+  runs: listReadinessHistory(db, request.params.projectId)
+}));
+
+app.get("/api/self-build/readiness/:runId", async (request: any, reply) => {
+  try {
+    return { report: getReadinessReport(db, request.params.runId) };
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load readiness report" });
+  }
+});
+
+app.post("/api/projects/:projectId/build-missions", async (request: any, reply) => {
+  const parsed = CreateBuildMissionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid build mission", details: parsed.error.flatten() });
+  try {
+    const mission = createBuildMissionDraft(db, { id: nanoid(), projectId: request.params.projectId, ...parsed.data, now: now(), audit });
+    return reply.status(201).send({ mission });
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError || error instanceof PermissionDeniedError) return reply.status(error instanceof SelfBuildReadinessError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create build mission" });
+  }
+});
+
+app.get("/api/projects/:projectId/build-missions", async (request: any) => ({
+  missions: listBuildMissions(db, request.params.projectId)
+}));
+
+app.get("/api/build-missions/:missionId", async (request: any, reply) => {
+  try {
+    return { mission: getBuildMission(db, request.params.missionId) };
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load build mission" });
+  }
+});
+
+app.post("/api/build-missions/:missionId/approval", async (request: any, reply) => {
+  try {
+    return requestBuildMissionApproval(db, request.params.missionId, { approvalId: nanoid(), now: now(), audit });
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to request build mission approval" });
+  }
+});
+
+app.post("/api/build-missions/:missionId/convert", async (request: any, reply) => {
+  const parsed = ConvertBuildMissionSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid build mission conversion", details: parsed.error.flatten() });
+  try {
+    return { mission: convertApprovedBuildMission(db, request.params.missionId, { gitMode: parsed.data.gitMode, now: now(), audit }) };
+  } catch (error) {
+    if (error instanceof SelfBuildReadinessError || error instanceof PermissionDeniedError) return reply.status(error instanceof SelfBuildReadinessError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to convert build mission" });
+  }
+});
+
+app.get("/api/build-missions/:missionId/events", async (request: any) => ({
+  events: listBuildMissionEvents(db, request.params.missionId)
+}));
+
 app.get("/api/projects/:projectId/git/status", async (request: any, reply) => {
   try {
     return await getProjectGitStatus(db, request.params.projectId, now());
@@ -1890,9 +1966,11 @@ app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
   const approval = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,action_type AS actionType,payload_json AS payloadJson,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
   if (!approval) return reply.status(404).send({ error: "Approval not found" });
   if (approval.status !== "PENDING") return reply.status(409).send({ error: "Approval is already decided" });
+  if (approval.actionType === "BUILD_MISSION" && parsed.data.decidedBy === "agent") return reply.status(403).send({ error: "Agents cannot approve build missions" });
   const decidedAt = now();
   db.prepare("UPDATE approvals SET status=?,decision_note=?,decided_at=? WHERE id=?").run(parsed.data.decision, parsed.data.note ?? null, decidedAt, approval.id);
   const policyApproval = resolveProjectPolicyApproval(db, approval.id, parsed.data.decision, decidedAt, audit);
+  const buildMissionApproval = resolveBuildMissionApproval(db, approval.id, parsed.data.decision, decidedAt, audit, parsed.data.decidedBy);
   const payload = parsePayload(approval.payloadJson);
   const assignmentAction = payload.assignmentAction as { type?: string; assignmentId?: string; specialistAgentId?: string } | undefined;
   if (assignmentAction?.assignmentId && parsed.data.decision === "APPROVED") {
@@ -1914,8 +1992,8 @@ app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
   if (gitApproval) {
     audit(parsed.data.decision === "APPROVED" ? "GIT_MERGE_APPROVED" : "GIT_MERGE_REJECTED", `Git merge ${parsed.data.decision.toLowerCase()}`, { taskId: approval.taskId, payload: { approvalId: approval.id } });
   }
-  if (!specialistApproval && !policyApproval && !gitApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
-  if (approval.taskRoundId && !specialistApproval && !policyApproval && !gitApproval) {
+  if (!specialistApproval && !policyApproval && !gitApproval && !buildMissionApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  if (approval.taskRoundId && !specialistApproval && !policyApproval && !gitApproval && !buildMissionApproval) {
     updateTaskRound(db, approval.taskRoundId, {
       status: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
       nextRequiredAction: parsed.data.decision === "APPROVED" ? "APPLY_PROPOSALS" : "CONTINUE_CHAT",

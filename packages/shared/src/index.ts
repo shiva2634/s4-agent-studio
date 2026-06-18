@@ -47,6 +47,30 @@ export const CreateTaskGitWorkflowSchema = z.object({
   worktreeName: z.string().trim().min(1).max(120).optional()
 });
 
+export const BuildMissionTargetSchema = z.enum([
+  "Agent Core extension",
+  "Social Studio",
+  "Growth Studio",
+  "CRM",
+  "Cloud Studio",
+  "Finance & Billing Studio",
+  "Business Control Centre",
+  "Client Portal",
+  "General Custom Module"
+]);
+
+export const CreateBuildMissionSchema = z.object({
+  targetModule: BuildMissionTargetSchema,
+  scope: z.string().trim().min(10).max(5_000),
+  dependencies: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
+  riskLevel: RiskLevelSchema.default("high"),
+  gitMode: z.enum(["BRANCH", "WORKTREE"]).default("WORKTREE")
+});
+
+export const ConvertBuildMissionSchema = z.object({
+  gitMode: z.enum(["BRANCH", "WORKTREE"]).optional()
+});
+
 export const ChatRequestSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1).optional(),
@@ -56,7 +80,8 @@ export const ChatRequestSchema = z.object({
 
 export const ApprovalActionSchema = z.object({
   decision: z.enum(["APPROVED", "REJECTED"]),
-  note: z.string().max(2_000).optional()
+  note: z.string().max(2_000).optional(),
+  decidedBy: z.enum(["human", "agent"]).default("human")
 });
 
 export const CreateAgentSchema = z.object({
@@ -334,6 +359,9 @@ export type ProposalOperation = z.infer<typeof ProposalOperationSchema>;
 export type ScaffoldJobMode = z.infer<typeof ScaffoldJobModeSchema>;
 export type CreateScaffoldJob = z.infer<typeof CreateScaffoldJobSchema>;
 export type GenerateScaffoldProposals = z.infer<typeof GenerateScaffoldProposalsSchema>;
+export type BuildMissionTarget = z.infer<typeof BuildMissionTargetSchema>;
+export type CreateBuildMission = z.infer<typeof CreateBuildMissionSchema>;
+export type ConvertBuildMission = z.infer<typeof ConvertBuildMissionSchema>;
 export type CreateMediaProject = z.infer<typeof CreateMediaProjectSchema>;
 export type MediaChatMessage = z.infer<typeof MediaChatMessageSchema>;
 export type MediaSceneStatus = z.infer<typeof MediaSceneStatusSchema>;

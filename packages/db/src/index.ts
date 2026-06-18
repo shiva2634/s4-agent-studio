@@ -202,6 +202,80 @@ export function initializeDatabaseOn(database: Database.Database) {
       payload_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS self_build_readiness_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK(decision IN ('READY','READY_WITH_WARNINGS','NOT_READY')),
+      status TEXT NOT NULL DEFAULT 'COMPLETED',
+      summary TEXT NOT NULL,
+      blocker_count INTEGER NOT NULL DEFAULT 0,
+      warning_count INTEGER NOT NULL DEFAULT 0,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS self_build_readiness_gate_results (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      gate_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('PASS','FAIL','WARNING','NOT_CHECKED')),
+      explanation TEXT NOT NULL,
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      blocking INTEGER NOT NULL DEFAULT 0,
+      recommended_fix TEXT NOT NULL DEFAULT '',
+      last_checked_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES self_build_readiness_runs(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS build_missions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT,
+      readiness_run_id TEXT,
+      target_module TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      dependencies_json TEXT NOT NULL DEFAULT '[]',
+      risk_level TEXT NOT NULL,
+      required_specialists_json TEXT NOT NULL DEFAULT '[]',
+      scaffold_needs_json TEXT NOT NULL DEFAULT '{}',
+      git_mode TEXT NOT NULL CHECK(git_mode IN ('BRANCH','WORKTREE')),
+      acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+      rollback_plan TEXT NOT NULL,
+      status TEXT NOT NULL,
+      approval_id TEXT,
+      plan_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      approved_at TEXT,
+      converted_at TEXT,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+      FOREIGN KEY(readiness_run_id) REFERENCES self_build_readiness_runs(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS build_mission_specialist_plan (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      rationale TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PLANNED',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS build_mission_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      build_mission_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -693,6 +767,10 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_media_generation_status_history_job ON media_generation_status_history(generation_job_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_media_comfy_workflows_project ON media_comfy_workflows(media_project_id, workflow_type, is_active);
     CREATE INDEX IF NOT EXISTS idx_task_rounds_task ON task_rounds(task_id, round_number DESC);
+    CREATE INDEX IF NOT EXISTS idx_self_build_runs_project ON self_build_readiness_runs(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_self_build_gates_run ON self_build_readiness_gate_results(run_id, gate_id);
+    CREATE INDEX IF NOT EXISTS idx_build_missions_project ON build_missions(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_build_mission_events_mission ON build_mission_events(build_mission_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_processing_jobs_asset ON media_processing_jobs(asset_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_media_render_jobs_project ON media_render_jobs(media_project_id, created_at DESC);
   `);
@@ -1121,6 +1199,86 @@ export function initializeDatabaseOn(database: Database.Database) {
   database.exec("CREATE INDEX IF NOT EXISTS idx_task_git_workflows_task ON task_git_workflows(task_id, status)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_release_candidates_task ON release_candidates(task_id, status, created_at DESC)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_git_workflow_events_task ON git_workflow_events(task_id, created_at DESC)");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS self_build_readiness_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK(decision IN ('READY','READY_WITH_WARNINGS','NOT_READY')),
+      status TEXT NOT NULL DEFAULT 'COMPLETED',
+      summary TEXT NOT NULL,
+      blocker_count INTEGER NOT NULL DEFAULT 0,
+      warning_count INTEGER NOT NULL DEFAULT 0,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS self_build_readiness_gate_results (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      gate_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('PASS','FAIL','WARNING','NOT_CHECKED')),
+      explanation TEXT NOT NULL,
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      blocking INTEGER NOT NULL DEFAULT 0,
+      recommended_fix TEXT NOT NULL DEFAULT '',
+      last_checked_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES self_build_readiness_runs(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS build_missions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT,
+      readiness_run_id TEXT,
+      target_module TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      dependencies_json TEXT NOT NULL DEFAULT '[]',
+      risk_level TEXT NOT NULL,
+      required_specialists_json TEXT NOT NULL DEFAULT '[]',
+      scaffold_needs_json TEXT NOT NULL DEFAULT '{}',
+      git_mode TEXT NOT NULL CHECK(git_mode IN ('BRANCH','WORKTREE')),
+      acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+      rollback_plan TEXT NOT NULL,
+      status TEXT NOT NULL,
+      approval_id TEXT,
+      plan_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      approved_at TEXT,
+      converted_at TEXT,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+      FOREIGN KEY(readiness_run_id) REFERENCES self_build_readiness_runs(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS build_mission_specialist_plan (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      rationale TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PLANNED',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS build_mission_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      build_mission_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_self_build_runs_project ON self_build_readiness_runs(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_self_build_gates_run ON self_build_readiness_gate_results(run_id, gate_id);
+    CREATE INDEX IF NOT EXISTS idx_build_missions_project ON build_missions(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_build_mission_events_mission ON build_mission_events(build_mission_id, created_at DESC);
+  `);
   database.exec("CREATE INDEX IF NOT EXISTS idx_permission_decisions_project ON permission_decisions(project_id, created_at DESC)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_sandbox_events_project ON sandbox_events(project_id, created_at DESC)");
 

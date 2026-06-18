@@ -48,6 +48,9 @@ type SecurityPolicy = { permissionProfileId: string; profileName: string; sandbo
 type PermissionEvent = { id: string; action: string; resource: string | null; decision: string; riskClass: string; reason: string; createdAt: string };
 type GitProjectStatus = { isGit: boolean; currentBranch: string | null; headCommit: string | null; dirty: boolean; untrackedFiles: string[]; aheadBehind: { ahead: number; behind: number; available: boolean }; remoteUrl: string | null; error?: string };
 type TaskGitWorkflow = { workflow: { id: string; mode: "DIRECT"|"BRANCH"|"WORKTREE"; status: string; branchName: string | null; worktreePath: string | null; lastError: string | null }; branch: { branchName: string; baseCommit: string; headCommit: string | null; status: string } | null; worktree: { worktreePath: string; status: string; cleanedAt: string | null } | null; releaseCandidate: { id: string; status: string; approvalId: string | null; mergeStrategy: string; blockedReason: string | null; changedFiles: string[]; checkResults: CheckResult[] } | null; events: Array<{ eventType: string; summary: string; createdAt: string }> };
+type ReadinessGate = { id: string; gateId: string; name: string; status: "PASS"|"FAIL"|"WARNING"|"NOT_CHECKED"; explanation: string; evidence: Record<string,unknown>; blocking: boolean; recommendedFix: string; lastCheckedAt: string };
+type ReadinessReport = { id: string; projectId: string; decision: "READY"|"READY_WITH_WARNINGS"|"NOT_READY"; summary: string; blockerCount: number; warningCount: number; createdAt: string; gates: ReadinessGate[] };
+type BuildMission = { id: string; projectId: string; taskId: string | null; targetModule: string; scope: string; riskLevel: string; gitMode: "BRANCH"|"WORKTREE"; status: string; approvalId: string | null; requiredSpecialists: string[]; scaffoldNeeds: Record<string,unknown>; acceptanceCriteria: string[]; rollbackPlan: string; createdAt: string };
 const API = "http://127.0.0.1:4310";
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -115,6 +118,13 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [projectGitStatus, setProjectGitStatus] = useState<GitProjectStatus | null>(null);
   const [taskGitWorkflow, setTaskGitWorkflow] = useState<TaskGitWorkflow | null>(null);
   const [gitMode, setGitMode] = useState<"BRANCH" | "WORKTREE">("WORKTREE");
+  const [readinessReport, setReadinessReport] = useState<ReadinessReport | null>(null);
+  const [readinessHistory, setReadinessHistory] = useState<Array<{ id: string; decision: string; blockerCount: number; warningCount: number; createdAt: string }>>([]);
+  const [buildMissions, setBuildMissions] = useState<BuildMission[]>([]);
+  const [missionTarget, setMissionTarget] = useState("Social Studio");
+  const [missionScope, setMissionScope] = useState("Plan the first governed module slice with proposals, checks, Git workflow, rollback, and final human approval.");
+  const [missionRisk, setMissionRisk] = useState<"low" | "medium" | "high" | "critical">("high");
+  const [missionGitMode, setMissionGitMode] = useState<"BRANCH" | "WORKTREE">("WORKTREE");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
@@ -174,9 +184,13 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       setSecurityPolicy(null);
       setPermissionEvents([]);
       setProjectGitStatus(null);
+      setReadinessReport(null);
+      setReadinessHistory([]);
+      setBuildMissions([]);
       return;
     }
     void loadSecurityPolicy(projectId);
+    void loadSelfBuildState(projectId);
   }, [projectId]);
 
   const pending = useMemo(() => approvals.filter(a => a.status === "PENDING"), [approvals]);
@@ -250,6 +264,26 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     }
     const data = await response.json();
     setTaskGitWorkflow(data.gitWorkflow ?? null);
+  }
+
+  async function loadSelfBuildState(nextProjectId: string) {
+    const [latestResponse, historyResponse, missionsResponse] = await Promise.all([
+      fetch(`${API}/api/projects/${nextProjectId}/self-build/readiness/latest`),
+      fetch(`${API}/api/projects/${nextProjectId}/self-build/readiness/history`),
+      fetch(`${API}/api/projects/${nextProjectId}/build-missions`)
+    ]);
+    if (latestResponse.ok) {
+      const data = await latestResponse.json();
+      setReadinessReport(data.report ?? null);
+    }
+    if (historyResponse.ok) {
+      const data = await historyResponse.json();
+      setReadinessHistory(data.runs ?? []);
+    }
+    if (missionsResponse.ok) {
+      const data = await missionsResponse.json();
+      setBuildMissions(data.missions ?? []);
+    }
   }
 
   async function sendMessage() {
@@ -435,6 +469,51 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     await refresh();
   }
 
+  async function runReadinessValidation() {
+    if (!selectedProject) return;
+    setError("");
+    const response = await fetch(`${API}/api/projects/${selectedProject.id}/self-build/readiness/run`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to run readiness validation");
+      return;
+    }
+    setReadinessReport(data.report);
+    setNotice(`Self-build readiness: ${data.report.decision.replaceAll("_"," ")}`);
+    await loadSelfBuildState(selectedProject.id);
+    await refresh();
+  }
+
+  async function createBuildMission() {
+    if (!selectedProject) return;
+    setError("");
+    const response = await fetch(`${API}/api/projects/${selectedProject.id}/build-missions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ targetModule: missionTarget, scope: missionScope, riskLevel: missionRisk, gitMode: missionGitMode }) });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to create build mission");
+      return;
+    }
+    setSelectedTaskId(data.mission.taskId);
+    setNotice("Build mission draft created. Approval is required before execution.");
+    await loadSelfBuildState(selectedProject.id);
+    await refresh();
+  }
+
+  async function missionAction(missionId: string, action: "approval" | "convert") {
+    if (!selectedProject) return;
+    setError("");
+    const response = await fetch(`${API}/api/build-missions/${missionId}/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: action === "convert" ? JSON.stringify({ gitMode: missionGitMode }) : JSON.stringify({}) });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Build mission action failed");
+      return;
+    }
+    if (data.mission?.taskId) setSelectedTaskId(data.mission.taskId);
+    setNotice(action === "approval" ? "Build mission approval requested." : "Build mission converted to governed task plan.");
+    await loadSelfBuildState(selectedProject.id);
+    await refresh();
+  }
+
   const checkpointExecution = execution?.checkpointExecution ?? execution?.executions.find((entry) => entry.gitCheckpoint);
   const latestExecution = execution?.latestExecution ?? execution?.executions[0];
   const rollbackAvailable = execution?.rollbackAvailable ?? Boolean(checkpointExecution?.rollbackAvailable);
@@ -452,6 +531,19 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         {manageableProjects.length ? manageableProjects.map(project => <div key={project.id} className="mini"><span>{project.name}</span><small>{project.status}</small><div className="decision wrap">{getProjectManagementActions(project.status).map(action => <button key={action} onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog(action==="Resume Project"?"resume":action==="Pause Project"?"pause":action==="Archive Project"?"archive":"deregister");}}>{action}</button>)}</div></div>) : <p className="muted">No manageable projects.</p>}
         <h3>Sandbox policy</h3>
         {securityPolicy?<div className="policy-panel"><div className="row"><span>Profile</span><strong>{securityPolicy.profileName}</strong></div><div className="policy-grid"><span>Sandbox</span><strong>{securityPolicy.sandboxEnabled?"on":"off"}</strong><span>Network</span><strong>{securityPolicy.networkEnabled?"allowlisted":"blocked"}</strong><span>Secrets</span><strong>{securityPolicy.secretsBlocked?"blocked":"allowed"}</strong><span>Providers</span><strong>{securityPolicy.providerCallsEnabled?"adapter only":"blocked"}</strong></div><label>Change profile<select value={policyProfileId} onChange={e=>setPolicyProfileId(e.target.value)}>{permissionProfiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}{profile.requiresApproval?" (approval)":""}</option>)}</select></label><label>Reason<input value={policyReason} onChange={e=>setPolicyReason(e.target.value)} /></label><button className="secondary" onClick={()=>void requestPolicyChange()}>Request policy change</button>{permissionEvents.length?<div className="decision-history">{permissionEvents.slice(0,4).map(event=><small key={event.id} className={event.decision.toLowerCase()}>{event.decision}: {event.action.replaceAll("_"," ")} - {event.reason}</small>)}</div>:<small className="muted">No policy decisions yet.</small>}</div>:<p className="muted">Select a project to view sandbox policy.</p>}
+        <h3>Self-build readiness</h3>
+        <div className="self-build-panel">
+          <div className="row first-row"><span>Decision</span><strong className={`readiness-decision ${(readinessReport?.decision ?? "not_ready").toLowerCase()}`}>{readinessReport?.decision.replaceAll("_"," ") ?? "NOT CHECKED"}</strong></div>
+          {readinessReport?<><small>{readinessReport.summary}</small><div className="policy-grid"><span>Blockers</span><strong>{readinessReport.blockerCount}</strong><span>Warnings</span><strong>{readinessReport.warningCount}</strong><span>Checked</span><strong>{readinessReport.createdAt}</strong></div><div className="readiness-gates">{readinessReport.gates.map(gate=><small key={gate.gateId} className={gate.status.toLowerCase()}>{gate.status}: {gate.name}{gate.blocking&&gate.status==="FAIL" ? " (blocking)" : ""}</small>)}</div></>:<small className="muted">Run validation before starting a build mission.</small>}
+          <button className="secondary" onClick={()=>void runReadinessValidation()} disabled={!selectedProject}>Run validation</button>
+          {readinessHistory.length?<div className="decision-history">{readinessHistory.slice(0,3).map(run=><small key={run.id}>{run.decision.replaceAll("_"," ")} - {run.blockerCount} blockers - {run.createdAt}</small>)}</div>:null}
+          <label>Target module<select value={missionTarget} onChange={e=>setMissionTarget(e.target.value)}><option>Agent Core extension</option><option>Social Studio</option><option>Growth Studio</option><option>CRM</option><option>Cloud Studio</option><option>Finance & Billing Studio</option><option>Business Control Centre</option><option>Client Portal</option><option>General Custom Module</option></select></label>
+          <label>Scope<textarea value={missionScope} onChange={e=>setMissionScope(e.target.value)}/></label>
+          <label>Risk<select value={missionRisk} onChange={e=>setMissionRisk(e.target.value as "low" | "medium" | "high" | "critical")}><option value="medium">medium</option><option value="high">high</option><option value="critical">critical</option><option value="low">low</option></select></label>
+          <label>Git plan<select value={missionGitMode} onChange={e=>setMissionGitMode(e.target.value as "BRANCH" | "WORKTREE")}><option value="WORKTREE">worktree</option><option value="BRANCH">branch</option></select></label>
+          <button className="secondary" onClick={()=>void createBuildMission()} disabled={!selectedProject}>Create mission draft</button>
+          {buildMissions.slice(0,2).map(mission=><div className="template-preview" key={mission.id}><div className="row"><strong>{mission.targetModule}</strong><span>{mission.status.replaceAll("_"," ")}</span></div><small>{mission.gitMode} - {mission.riskLevel}</small><small>Specialists: {mission.requiredSpecialists.join(", ")}</small><small>Scaffold: {String(mission.scaffoldNeeds.template ?? "none")}</small>{mission.approvalId&&<small>Approval: {mission.approvalId}</small>}<div className="decision wrap"><button onClick={()=>void missionAction(mission.id,"approval")} disabled={Boolean(mission.approvalId)}>Request approval</button><button onClick={()=>void missionAction(mission.id,"convert")} disabled={mission.status!=="APPROVED"}>Convert</button></div></div>)}
+        </div>
         <h3>Create new project</h3>
         <div className="scaffold-panel">
           <label>Template<select value={selectedScaffoldTemplate?.id ?? ""} onChange={e=>setSelectedScaffoldTemplateId(e.target.value)}>{scaffoldTemplates.map(template=><option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
