@@ -14,7 +14,8 @@ export type PermissionAction =
   | "RECOVERY"
   | "PROVIDER_CALL"
   | "NETWORK_ACCESS"
-  | "SECRET_ACCESS";
+  | "SECRET_ACCESS"
+  | "GIT_WORKFLOW";
 
 export type PermissionDecision = "ALLOW" | "DENY" | "APPROVAL_REQUIRED";
 export type CommandRiskClass = "safe-read-only" | "test-check" | "build-typecheck" | "package-install" | "migration-database" | "filesystem-mutation" | "network" | "destructive";

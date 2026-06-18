@@ -46,6 +46,8 @@ type ScaffoldJob = { id: string; templateId: string; taskId: string; targetProje
 type PermissionProfile = { id: string; name: string; description: string; riskLevel: string; requiresApproval: 0 | 1 };
 type SecurityPolicy = { permissionProfileId: string; profileName: string; sandboxEnabled: boolean; networkEnabled: boolean; providerCallsEnabled: boolean; secretsBlocked: boolean; providerPolicy: Record<string,unknown>; costPolicy: Record<string,unknown>; networkAllowlist: Array<{ host: string; status: string }> };
 type PermissionEvent = { id: string; action: string; resource: string | null; decision: string; riskClass: string; reason: string; createdAt: string };
+type GitProjectStatus = { isGit: boolean; currentBranch: string | null; headCommit: string | null; dirty: boolean; untrackedFiles: string[]; aheadBehind: { ahead: number; behind: number; available: boolean }; remoteUrl: string | null; error?: string };
+type TaskGitWorkflow = { workflow: { id: string; mode: "DIRECT"|"BRANCH"|"WORKTREE"; status: string; branchName: string | null; worktreePath: string | null; lastError: string | null }; branch: { branchName: string; baseCommit: string; headCommit: string | null; status: string } | null; worktree: { worktreePath: string; status: string; cleanedAt: string | null } | null; releaseCandidate: { id: string; status: string; approvalId: string | null; mergeStrategy: string; blockedReason: string | null; changedFiles: string[]; checkResults: CheckResult[] } | null; events: Array<{ eventType: string; summary: string; createdAt: string }> };
 const API = "http://127.0.0.1:4310";
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -110,6 +112,9 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [permissionEvents, setPermissionEvents] = useState<PermissionEvent[]>([]);
   const [policyProfileId, setPolicyProfileId] = useState("standard-governed");
   const [policyReason, setPolicyReason] = useState("Project permission profile update");
+  const [projectGitStatus, setProjectGitStatus] = useState<GitProjectStatus | null>(null);
+  const [taskGitWorkflow, setTaskGitWorkflow] = useState<TaskGitWorkflow | null>(null);
+  const [gitMode, setGitMode] = useState<"BRANCH" | "WORKTREE">("WORKTREE");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
@@ -158,14 +163,17 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       setTaskHistory(undefined);
       setProposals([]);
       setExecution(undefined);
+      setTaskGitWorkflow(null);
       return;
     }
     void loadTaskDetails(selectedTaskId);
+    void loadTaskGitWorkflow(selectedTaskId);
   }, [selectedTaskId]);
   useEffect(() => {
     if (!projectId) {
       setSecurityPolicy(null);
       setPermissionEvents([]);
+      setProjectGitStatus(null);
       return;
     }
     void loadSecurityPolicy(projectId);
@@ -213,9 +221,10 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   }
 
   async function loadSecurityPolicy(nextProjectId: string) {
-    const [policyResponse, eventsResponse] = await Promise.all([
+    const [policyResponse, eventsResponse, gitResponse] = await Promise.all([
       fetch(`${API}/api/projects/${nextProjectId}/security-policy`),
-      fetch(`${API}/api/projects/${nextProjectId}/permission-events`)
+      fetch(`${API}/api/projects/${nextProjectId}/permission-events`),
+      fetch(`${API}/api/projects/${nextProjectId}/git/status`)
     ]);
     if (policyResponse.ok) {
       const data = await policyResponse.json();
@@ -226,6 +235,21 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       const data = await eventsResponse.json();
       setPermissionEvents(data.events ?? []);
     }
+    if (gitResponse.ok) {
+      setProjectGitStatus(await gitResponse.json());
+    } else {
+      setProjectGitStatus(null);
+    }
+  }
+
+  async function loadTaskGitWorkflow(taskId: string) {
+    const response = await fetch(`${API}/api/tasks/${taskId}/git-workflow`);
+    if (!response.ok) {
+      setTaskGitWorkflow(null);
+      return;
+    }
+    const data = await response.json();
+    setTaskGitWorkflow(data.gitWorkflow ?? null);
   }
 
   async function sendMessage() {
@@ -391,6 +415,26 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     await loadSecurityPolicy(selectedProject.id);
   }
 
+  async function gitWorkflowAction(endpoint: string, body?: unknown) {
+    if (!selectedTask) return;
+    setError("");
+    const response = await fetch(`${API}/api/tasks/${selectedTask.id}/git-workflow${endpoint}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Git workflow action failed");
+      return;
+    }
+    setTaskGitWorkflow(data.gitWorkflow ?? taskGitWorkflow);
+    setNotice("Git workflow updated.");
+    await loadTaskGitWorkflow(selectedTask.id);
+    if (projectId) await loadSecurityPolicy(projectId);
+    await refresh();
+  }
+
   const checkpointExecution = execution?.checkpointExecution ?? execution?.executions.find((entry) => entry.gitCheckpoint);
   const latestExecution = execution?.latestExecution ?? execution?.executions[0];
   const rollbackAvailable = execution?.rollbackAvailable ?? Boolean(checkpointExecution?.rollbackAvailable);
@@ -434,6 +478,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       </section>
       <aside className="activity">
         <h3>Current task</h3>{selectedTask?<div className="card"><strong>{selectedTask.title}</strong><div className="row"><span className={`risk ${selectedTask.riskLevel}`}>{selectedTask.riskLevel}</span><span>{selectedTask.status.replaceAll("_"," ")}</span></div><p>{selectedTask.projectName}</p><div className="mini-grid"><div className="mini"><span>Attempts</span><strong>{selectedTask.attemptCount}</strong></div><div className="mini"><span>Correction rounds</span><strong>{selectedTask.correctionRounds}</strong></div><div className="mini"><span>Next action</span><strong>{selectedTask.nextRequiredAction.replaceAll("_"," ")}</strong></div><div className="mini"><span>Current round</span><strong>{selectedTask.currentRoundNumber ?? "n/a"}</strong><small>{selectedTask.currentRoundStatus ?? "unknown"}</small></div></div>{selectedTask.recoveryAvailable&&<p className="notice">Interrupted execution can be recovered safely.</p>}</div>:<div className="card"><strong>No active task</strong><p>Your plan, attempts, and execution history will appear here.</p></div>}
+        <h3>Git workflow</h3><div className="card git-panel"><strong>{projectGitStatus?.isGit ? "Project repository" : "Git unavailable"}</strong>{projectGitStatus?.error&&<p className="error">{projectGitStatus.error}</p>}<div className="policy-grid"><span>Branch</span><strong>{projectGitStatus?.currentBranch ?? "n/a"}</strong><span>HEAD</span><strong>{projectGitStatus?.headCommit?.slice(0,12) ?? "n/a"}</strong><span>Dirty</span><strong>{projectGitStatus?.dirty ? "yes" : "no"}</strong><span>Untracked</span><strong>{projectGitStatus?.untrackedFiles.length ?? 0}</strong><span>Remote</span><strong>{projectGitStatus?.remoteUrl ?? "none"}</strong></div>{selectedTask?<><label>Mode<select value={gitMode} onChange={event=>setGitMode(event.target.value as "BRANCH" | "WORKTREE")}><option value="WORKTREE">Worktree mode</option><option value="BRANCH">Branch mode</option></select></label><div className="decision wrap"><button onClick={()=>void gitWorkflowAction("", { mode: gitMode })} disabled={Boolean(taskGitWorkflow)}>Create</button><button onClick={()=>void gitWorkflowAction("/apply")} disabled={!taskGitWorkflow}>Apply</button><button onClick={()=>void gitWorkflowAction("/checks")} disabled={!taskGitWorkflow}>Checks</button><button onClick={()=>void gitWorkflowAction("/release-candidate")} disabled={!taskGitWorkflow}>RC</button><button onClick={()=>void gitWorkflowAction("/merge-approval")} disabled={!taskGitWorkflow}>Merge approval</button><button onClick={()=>void gitWorkflowAction("/merge")} disabled={!taskGitWorkflow}>Merge</button><button onClick={()=>void gitWorkflowAction("/rollback")} disabled={!taskGitWorkflow}>Rollback</button><button onClick={()=>void gitWorkflowAction("/cleanup")} disabled={!taskGitWorkflow?.worktree}>Cleanup</button><button onClick={()=>void gitWorkflowAction("/recover")} disabled={!taskGitWorkflow}>Recover</button></div></>:<p className="muted">Select a task to create a governed branch or worktree.</p>}{taskGitWorkflow&&<div className="git-status"><div className="row"><span>Task mode</span><strong>{taskGitWorkflow.workflow.mode}</strong></div><div className="row"><span>Status</span><strong>{taskGitWorkflow.workflow.status.replaceAll("_"," ")}</strong></div>{taskGitWorkflow.workflow.branchName&&<small>Branch: {taskGitWorkflow.workflow.branchName}</small>}{taskGitWorkflow.workflow.worktreePath&&<small>Worktree: {taskGitWorkflow.workflow.worktreePath}</small>}{taskGitWorkflow.workflow.lastError&&<p className="error">{taskGitWorkflow.workflow.lastError}</p>}{taskGitWorkflow.releaseCandidate&&<div className="template-preview"><div className="row"><span>Release candidate</span><strong>{taskGitWorkflow.releaseCandidate.status.replaceAll("_"," ")}</strong></div><small>Strategy: {taskGitWorkflow.releaseCandidate.mergeStrategy}</small>{taskGitWorkflow.releaseCandidate.approvalId&&<small>Approval: {taskGitWorkflow.releaseCandidate.approvalId}</small>}{taskGitWorkflow.releaseCandidate.changedFiles.length?<div className="scaffold-files">{taskGitWorkflow.releaseCandidate.changedFiles.map(file=><small key={file}>{file}</small>)}</div>:<small>No RC file summary yet.</small>}</div>}{taskGitWorkflow.events.length?<div className="decision-history">{taskGitWorkflow.events.slice(0,5).map(event=><small key={`${event.eventType}-${event.createdAt}`}>{event.eventType.replaceAll("_"," ")}: {event.summary}</small>)}</div>:<small className="muted">No Git workflow events yet.</small>}</div>}</div>
         <h3>Change proposals</h3>{proposals.length?proposals.map(p=><div className={`card proposal ${p.conflictState==="CONFLICT"?"conflict":""}`} key={p.id}><strong>{p.filePath}</strong><div className="row"><span>{p.operation}</span><span>{p.status}</span></div><div className="row"><span>Owner</span><span>{p.ownerName ?? "Developer Agent"}{p.ownerRole ? ` · ${p.ownerRole}` : ""}</span></div>{p.conflictState==="CONFLICT"&&<p className="error">Same-file conflict requires review before apply.</p>}<p>{p.reason}</p><button onClick={()=>void loadDiff(p.id)}>Diff preview</button>{diffs[p.id]&&<pre>{diffs[p.id]}</pre>}<div className="decision"><button onClick={()=>void decideProposal(p.id,"approve")} disabled={p.status!=="PENDING"}>Approve</button><button onClick={()=>void decideProposal(p.id,"reject")} disabled={p.status!=="PENDING"}>Reject</button></div></div>):<div className="card"><strong>No proposals</strong><p>Mutation requests will appear here for review before any file changes.</p></div>}
         {selectedTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{checkpointExecution&&<div className="execution-grid"><div className="execution-field"><span>Rollback status</span><strong>{rollbackStatus}</strong></div><div className="execution-field"><span>Rollback available</span><strong>{rollbackAvailable ? "Yes" : "No"}</strong></div><div className="execution-field"><span>Branch</span><strong>{checkpointExecution.gitCheckpoint?.branch ?? "Unknown"}</strong></div><div className="execution-field"><span>Checkpoint commit</span><strong>{checkpointExecution.gitCheckpoint?.head ?? "Unavailable"}</strong></div><div className="execution-field"><span>Checkpoint ref</span><strong>{checkpointExecution.gitCheckpoint?.checkpointRef ?? "Unavailable"}</strong></div><div className="execution-field"><span>Repository state</span><strong>{checkpointExecution.gitCheckpoint?.dirty ? "Dirty" : "Clean"}</strong></div><div className="execution-field"><span>Checkpoint created</span><strong>{checkpointExecution.createdAt}</strong></div>{checkpointExecution.gitCheckpoint?.warning&&<div className="execution-field wide"><span>Recovery note</span><strong>{checkpointExecution.gitCheckpoint.warning}</strong></div>}</div>}{latestExecution&&<div className="execution-summary"><div className="row"><span>Status</span><span>{latestExecution.status}</span></div><div className="row"><span>Recovery outcome</span><span>{execution?.recoveryOutcome ?? "No recovery required"}</span></div><div className="row"><span>Recovery action</span><span>{execution?.recoveryAvailable ? "Recover execution" : "Not available"}</span></div></div>}{checkResults.length>0&&<div className="check-results">{checkResults.map((result)=><article key={`${result.action}-${result.script}`} className={`check-result ${result.ok ? "ok" : "fail"}`}><div className="row"><strong>{result.action}</strong><span>{result.ok ? "Passed" : "Failed"}</span></div><small>Script: {result.script}</small><small>{result.skipped ? "Skipped" : `Exit code: ${result.exitCode ?? "n/a"}`}</small><pre>{result.output || "No output captured."}</pre></article>)}</div>}{checkResults.length===0&&<div className="muted">No check results yet.</div>}{execution?.appliedFiles.length ? <div className="files-changed">{execution.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}</div> : <div className="muted">No files have been applied yet.</div>}<div className="decision"><button onClick={()=>void runChecks(selectedTask.id)}>Run checks</button><button onClick={()=>void rollback(selectedTask.id)} disabled={!rollbackAvailable}>Rollback</button><button onClick={()=>void recover(selectedTask.id)} disabled={!execution?.recoveryAvailable}>Recover</button></div></div>}
         {selectedTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(selectedTask.id)}>Apply approved changes</button>}

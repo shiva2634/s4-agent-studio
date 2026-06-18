@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, CreateTaskGitWorkflowSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -30,6 +30,7 @@ import { buildTaskContext, createTaskRound, getCurrentTaskRound, listTaskHistory
 import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments, listSpecialistAgents, reassignTaskAssignment, updateAssignmentLifecycle, type SpecialistAssignmentAction } from "./specialist-orchestration.js";
 import { ScaffoldError, createScaffoldJob, generateScaffoldProposals, getScaffoldJob, listScaffoldTemplates, previewScaffoldTemplate } from "./scaffold-engine.js";
 import { PermissionDeniedError, assertFilePermission, assertNetworkAllowed, assertProjectActiveForPolicy, assertProviderAllowed, classifyCommandRisk, getProjectSecurityPolicy, listPermissionEvents, listPermissionProfiles, requestProjectPolicyChange, resolveProjectPolicyApproval, sanitizeForPolicy } from "./security-policy.js";
+import { GitWorkflowError, applyApprovedProposalsToGitWorkflow, cleanupTaskWorktree, createReleaseCandidate, createTaskGitWorkflow, getProjectGitStatus, getTaskGitWorkflowStatus, mergeApprovedReleaseCandidate, recoverGitWorkflow, requestMergeApproval, rollbackGitWorkflow, runGitWorkflowChecks } from "./git-workflow.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -1191,6 +1192,103 @@ app.post("/api/projects/:projectId/permissions/test", async (request: any, reply
   }
 });
 
+app.get("/api/projects/:projectId/git/status", async (request: any, reply) => {
+  try {
+    return await getProjectGitStatus(db, request.params.projectId, now());
+  } catch (error) {
+    if (error instanceof GitWorkflowError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to inspect Git status" });
+  }
+});
+
+app.get("/api/tasks/:taskId/git-workflow", async (request: any) => ({
+  gitWorkflow: getTaskGitWorkflowStatus(db, request.params.taskId)
+}));
+
+app.post("/api/tasks/:taskId/git-workflow", async (request: any, reply) => {
+  const parsed = CreateTaskGitWorkflowSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid Git workflow request", details: parsed.error.flatten() });
+  try {
+    return { gitWorkflow: await createTaskGitWorkflow(db, request.params.taskId, { mode: parsed.data.mode, worktreeName: parsed.data.worktreeName, now: now(), audit }) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create task Git workflow" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/apply", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await applyApprovedProposalsToGitWorkflow(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to apply proposals to task Git workflow" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/checks", async (request: any, reply) => {
+  try {
+    return await runGitWorkflowChecks(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to run Git workflow checks" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/release-candidate", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await createReleaseCandidate(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to create release candidate" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/merge-approval", async (request: any, reply) => {
+  try {
+    return requestMergeApproval(db, request.params.taskId, now(), audit);
+  } catch (error) {
+    if (error instanceof GitWorkflowError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to request merge approval" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/merge", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await mergeApprovedReleaseCandidate(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    audit("GIT_MERGE_BLOCKED", error instanceof Error ? error.message : "Merge blocked", { taskId: request.params.taskId });
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to merge release candidate" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/rollback", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await rollbackGitWorkflow(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to roll back Git workflow" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/cleanup", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await cleanupTaskWorktree(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to clean up worktree" });
+  }
+});
+
+app.post("/api/tasks/:taskId/git-workflow/recover", async (request: any, reply) => {
+  try {
+    return { gitWorkflow: await recoverGitWorkflow(db, request.params.taskId, now(), audit) };
+  } catch (error) {
+    if (error instanceof GitWorkflowError || error instanceof PermissionDeniedError) return reply.status(error instanceof GitWorkflowError ? error.statusCode : 403).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to recover Git workflow" });
+  }
+});
+
 app.get("/api/scaffold/templates", async () => ({
   templates: listScaffoldTemplates(db).map((template) => ({
     id: template.id,
@@ -1812,8 +1910,12 @@ app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
     }
   }
   const specialistApproval = typeof approval.actionType === "string" && approval.actionType.startsWith("SPECIALIST_");
-  if (!specialistApproval && !policyApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
-  if (approval.taskRoundId && !specialistApproval && !policyApproval) {
+  const gitApproval = approval.actionType === "GIT_MERGE";
+  if (gitApproval) {
+    audit(parsed.data.decision === "APPROVED" ? "GIT_MERGE_APPROVED" : "GIT_MERGE_REJECTED", `Git merge ${parsed.data.decision.toLowerCase()}`, { taskId: approval.taskId, payload: { approvalId: approval.id } });
+  }
+  if (!specialistApproval && !policyApproval && !gitApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  if (approval.taskRoundId && !specialistApproval && !policyApproval && !gitApproval) {
     updateTaskRound(db, approval.taskRoundId, {
       status: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
       nextRequiredAction: parsed.data.decision === "APPROVED" ? "APPLY_PROPOSALS" : "CONTINUE_CHAT",

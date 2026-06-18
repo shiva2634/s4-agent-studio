@@ -52,6 +52,7 @@ export function registerOrReactivateProject(db: Database.Database, input: { id: 
     db.prepare("UPDATE projects SET name=?,root_path=?,status='ACTIVE',deregistered_at=NULL,deregistered_by=NULL,updated_at=? WHERE id=?")
       .run(input.name, rootPath, input.now, existing.id);
     ensureDefaultProjectSecurityPolicy(db, existing.id, input.now);
+    ensureDefaultProjectGitSettings(db, existing.id, input.now);
     audit("PROJECT_REACTIVATED", `Project ${input.name} reactivated`, {
       projectId: existing.id,
       payload: { projectId: existing.id, projectName: input.name, normalizedRootPath: rootPath, previousStatus: existing.status, newStatus: "ACTIVE", timestamp: input.now }
@@ -62,6 +63,7 @@ export function registerOrReactivateProject(db: Database.Database, input: { id: 
   db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
     .run(input.id, input.name, rootPath, "ACTIVE", input.now, input.now);
   ensureDefaultProjectSecurityPolicy(db, input.id, input.now);
+  ensureDefaultProjectGitSettings(db, input.id, input.now);
   audit("PROJECT_CREATED", `Project ${input.name} registered`, { projectId: input.id, payload: { rootPath } });
   return { id: input.id, name: input.name, rootPath, status: "ACTIVE" as const, reactivated: false };
 }
@@ -78,6 +80,15 @@ export function ensureDefaultProjectSecurityPolicy(db: Database.Database, projec
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(`policy-${projectId}`, projectId, "standard-governed", 1, 0, 1, 1, "{}", "{}", '{"adapterOnly":true,"maxCallsPerTask":8}', '{"maxEstimatedCostUsd":0}', now, now);
   db.prepare("UPDATE projects SET permission_profile_id=COALESCE(NULLIF(permission_profile_id,''),'standard-governed') WHERE id=?").run(projectId);
+}
+
+export function ensureDefaultProjectGitSettings(db: Database.Database, projectId: string, now: string) {
+  if (!hasTable(db, "project_git_settings")) return;
+  const worktreeRoot = path.resolve(process.env.S4_WORKTREE_ROOT ?? "./worktrees");
+  db.prepare(`INSERT OR IGNORE INTO project_git_settings
+    (id,project_id,default_branch,merge_strategy,worktree_root_path,branch_mode_enabled,worktree_mode_enabled,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(`git-settings-${projectId}`, projectId, "main", "no-ff", worktreeRoot, 1, 1, now, now);
 }
 
 export function deregisterProject(db: Database.Database, projectId: string, timestamp: string, audit: ProjectAuditWriter) {

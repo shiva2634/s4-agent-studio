@@ -114,6 +114,94 @@ export function initializeDatabaseOn(database: Database.Database) {
       pattern_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS project_git_settings (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL UNIQUE,
+      default_branch TEXT NOT NULL DEFAULT 'main',
+      merge_strategy TEXT NOT NULL DEFAULT 'no-ff' CHECK(merge_strategy IN ('fast-forward','no-ff','squash')),
+      worktree_root_path TEXT NOT NULL,
+      branch_mode_enabled INTEGER NOT NULL DEFAULT 1,
+      worktree_mode_enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS task_git_workflows (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL UNIQUE,
+      project_id TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK(mode IN ('DIRECT','BRANCH','WORKTREE')),
+      status TEXT NOT NULL,
+      base_branch TEXT,
+      base_commit TEXT,
+      branch_name TEXT,
+      worktree_path TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS task_branches (
+      id TEXT PRIMARY KEY,
+      task_git_workflow_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      branch_name TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      base_commit TEXT NOT NULL,
+      head_commit TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, branch_name),
+      FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS task_worktrees (
+      id TEXT PRIMARY KEY,
+      task_git_workflow_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      branch_name TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      cleaned_at TEXT,
+      FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS release_candidates (
+      id TEXT PRIMARY KEY,
+      task_git_workflow_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      branch_name TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      base_commit TEXT NOT NULL,
+      head_commit TEXT NOT NULL,
+      diff_summary TEXT NOT NULL,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      check_results_json TEXT NOT NULL DEFAULT '[]',
+      merge_strategy TEXT NOT NULL DEFAULT 'no-ff',
+      approval_id TEXT,
+      status TEXT NOT NULL,
+      blocked_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS git_workflow_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      task_id TEXT,
+      task_git_workflow_id TEXT,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -942,6 +1030,97 @@ export function initializeDatabaseOn(database: Database.Database) {
     pattern_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS project_git_settings (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    merge_strategy TEXT NOT NULL DEFAULT 'no-ff' CHECK(merge_strategy IN ('fast-forward','no-ff','squash')),
+    worktree_root_path TEXT NOT NULL,
+    branch_mode_enabled INTEGER NOT NULL DEFAULT 1,
+    worktree_mode_enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS task_git_workflows (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('DIRECT','BRANCH','WORKTREE')),
+    status TEXT NOT NULL,
+    base_branch TEXT,
+    base_commit TEXT,
+    branch_name TEXT,
+    worktree_path TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS task_branches (
+    id TEXT PRIMARY KEY,
+    task_git_workflow_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    head_commit TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, branch_name),
+    FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS task_worktrees (
+    id TEXT PRIMARY KEY,
+    task_git_workflow_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    worktree_path TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    cleaned_at TEXT,
+    FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS release_candidates (
+    id TEXT PRIMARY KEY,
+    task_git_workflow_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    head_commit TEXT NOT NULL,
+    diff_summary TEXT NOT NULL,
+    changed_files_json TEXT NOT NULL DEFAULT '[]',
+    check_results_json TEXT NOT NULL DEFAULT '[]',
+    merge_strategy TEXT NOT NULL DEFAULT 'no-ff',
+    approval_id TEXT,
+    status TEXT NOT NULL,
+    blocked_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(task_git_workflow_id) REFERENCES task_git_workflows(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS git_workflow_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    task_git_workflow_id TEXT,
+    event_type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  )`);
+  database.exec("CREATE INDEX IF NOT EXISTS idx_task_git_workflows_task ON task_git_workflows(task_id, status)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_release_candidates_task ON release_candidates(task_id, status, created_at DESC)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_git_workflow_events_task ON git_workflow_events(task_id, created_at DESC)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_permission_decisions_project ON permission_decisions(project_id, created_at DESC)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_sandbox_events_project ON sandbox_events(project_id, created_at DESC)");
 
@@ -1123,6 +1302,11 @@ function seedPermissionProfiles(db: Database.Database, timestamp: string) {
     (id,project_id,permission_profile_id,sandbox_enabled,network_enabled,provider_calls_enabled,secrets_blocked,command_policy_json,file_policy_json,provider_policy_json,cost_policy_json,created_at,updated_at)
     SELECT 'policy-' || id,id,COALESCE(permission_profile_id,'standard-governed'),1,0,1,1,'{}','{}','{"adapterOnly":true,"maxCallsPerTask":8}','{"maxEstimatedCostUsd":0}',?,?
     FROM projects`).run(timestamp, timestamp);
+  const worktreeRoot = path.resolve(process.env.S4_WORKTREE_ROOT ?? "./worktrees");
+  db.prepare(`INSERT OR IGNORE INTO project_git_settings
+    (id,project_id,default_branch,merge_strategy,worktree_root_path,branch_mode_enabled,worktree_mode_enabled,created_at,updated_at)
+    SELECT 'git-settings-' || id,id,'main','no-ff',?,1,1,?,?
+    FROM projects`).run(worktreeRoot, timestamp, timestamp);
   db.prepare("UPDATE projects SET permission_profile_id='standard-governed' WHERE permission_profile_id IS NULL OR permission_profile_id=''").run();
 }
 

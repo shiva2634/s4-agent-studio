@@ -42,6 +42,11 @@ export const PermissionDecisionTestSchema = z.object({
   provider: z.string().trim().max(100).optional()
 });
 
+export const CreateTaskGitWorkflowSchema = z.object({
+  mode: z.enum(["BRANCH", "WORKTREE"]),
+  worktreeName: z.string().trim().min(1).max(120).optional()
+});
+
 export const ChatRequestSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1).optional(),
