@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { MediaStudioError } from "./media-studio.js";
 import { taskAssignmentHistory } from "./specialist-orchestration.js";
+import { sanitizeForPolicy } from "./security-policy.js";
 
 export type TaskRoundStatus =
   | "PLANNING"
@@ -344,7 +345,7 @@ export function listTaskHistory(db: Database.Database, taskId: string) {
   const state = getTaskState(db, taskId);
   const assignments = taskAssignmentHistory(db, taskId);
   const scaffoldJob = scaffoldJobForTask(db, taskId);
-  return {
+  const history = {
     task: {
       id: state.task.id,
       projectId: state.task.projectId,
@@ -388,6 +389,7 @@ export function listTaskHistory(db: Database.Database, taskId: string) {
     })),
     assignments
   };
+  return JSON.parse(sanitizeForPolicy(db, JSON.stringify(history), { projectId: state.task.projectId, taskId, source: "task-history" }));
 }
 
 function safePlan(value: string) {

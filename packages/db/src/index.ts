@@ -15,12 +15,104 @@ export function initializeDatabaseOn(database: Database.Database) {
       name TEXT NOT NULL,
       root_path TEXT NOT NULL UNIQUE,
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','PAUSED','ARCHIVED','DEREGISTERED')),
+      permission_profile_id TEXT NOT NULL DEFAULT 'standard-governed',
       paused_at TEXT,
       archived_at TEXT,
       deregistered_at TEXT,
       deregistered_by TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS permission_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      defaults_json TEXT NOT NULL,
+      risk_level TEXT NOT NULL DEFAULT 'medium',
+      requires_approval INTEGER NOT NULL DEFAULT 0,
+      is_builtin INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS project_security_policies (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL UNIQUE,
+      permission_profile_id TEXT NOT NULL DEFAULT 'standard-governed',
+      sandbox_enabled INTEGER NOT NULL DEFAULT 1,
+      network_enabled INTEGER NOT NULL DEFAULT 0,
+      provider_calls_enabled INTEGER NOT NULL DEFAULT 1,
+      secrets_blocked INTEGER NOT NULL DEFAULT 1,
+      command_policy_json TEXT NOT NULL DEFAULT '{}',
+      file_policy_json TEXT NOT NULL DEFAULT '{}',
+      provider_policy_json TEXT NOT NULL DEFAULT '{}',
+      cost_policy_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(permission_profile_id) REFERENCES permission_profiles(id)
+    );
+    CREATE TABLE IF NOT EXISTS network_allowlist (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      host TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','DISABLED')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, host),
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS security_policy_change_requests (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      requested_profile_id TEXT NOT NULL,
+      previous_profile_id TEXT NOT NULL,
+      approval_id TEXT,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS permission_decisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      task_id TEXT,
+      agent_id TEXT,
+      action TEXT NOT NULL,
+      resource TEXT,
+      decision TEXT NOT NULL CHECK(decision IN ('ALLOW','DENY','APPROVAL_REQUIRED')),
+      risk_class TEXT NOT NULL DEFAULT 'safe-read-only',
+      reason TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS command_policy_decisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      task_id TEXT,
+      command TEXT NOT NULL,
+      risk_class TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sandbox_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      task_id TEXT,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS secret_redaction_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      task_id TEXT,
+      source TEXT NOT NULL,
+      pattern_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
@@ -552,6 +644,9 @@ export function initializeDatabaseOn(database: Database.Database) {
   if (!projectColumns.some((column) => column.name === "deregistered_by")) {
     database.exec("ALTER TABLE projects ADD COLUMN deregistered_by TEXT");
   }
+  if (!projectColumns.some((column) => column.name === "permission_profile_id")) {
+    database.exec("ALTER TABLE projects ADD COLUMN permission_profile_id TEXT NOT NULL DEFAULT 'standard-governed'");
+  }
 
   const mediaBriefColumns = database.prepare("PRAGMA table_info(media_video_briefs)").all() as Array<{ name: string }>;
   if (!mediaBriefColumns.some((column) => column.name === "status")) {
@@ -756,6 +851,99 @@ export function initializeDatabaseOn(database: Database.Database) {
   )`);
   database.exec("CREATE INDEX IF NOT EXISTS idx_scaffold_jobs_task ON scaffold_jobs(task_id, status, created_at DESC)");
   database.exec("CREATE INDEX IF NOT EXISTS idx_scaffold_files_job ON scaffold_files(scaffold_job_id, status)");
+  database.exec(`CREATE TABLE IF NOT EXISTS permission_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    defaults_json TEXT NOT NULL,
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    is_builtin INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS project_security_policies (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    permission_profile_id TEXT NOT NULL DEFAULT 'standard-governed',
+    sandbox_enabled INTEGER NOT NULL DEFAULT 1,
+    network_enabled INTEGER NOT NULL DEFAULT 0,
+    provider_calls_enabled INTEGER NOT NULL DEFAULT 1,
+    secrets_blocked INTEGER NOT NULL DEFAULT 1,
+    command_policy_json TEXT NOT NULL DEFAULT '{}',
+    file_policy_json TEXT NOT NULL DEFAULT '{}',
+    provider_policy_json TEXT NOT NULL DEFAULT '{}',
+    cost_policy_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY(permission_profile_id) REFERENCES permission_profiles(id)
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS network_allowlist (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','DISABLED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, host),
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS security_policy_change_requests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    requested_profile_id TEXT NOT NULL,
+    previous_profile_id TEXT NOT NULL,
+    approval_id TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS permission_decisions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    agent_id TEXT,
+    action TEXT NOT NULL,
+    resource TEXT,
+    decision TEXT NOT NULL CHECK(decision IN ('ALLOW','DENY','APPROVAL_REQUIRED')),
+    risk_class TEXT NOT NULL DEFAULT 'safe-read-only',
+    reason TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS command_policy_decisions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    command TEXT NOT NULL,
+    risk_class TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS sandbox_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    event_type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS secret_redaction_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    source TEXT NOT NULL,
+    pattern_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  )`);
+  database.exec("CREATE INDEX IF NOT EXISTS idx_permission_decisions_project ON permission_decisions(project_id, created_at DESC)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_sandbox_events_project ON sandbox_events(project_id, created_at DESC)");
 
   database.exec(`CREATE TABLE IF NOT EXISTS media_scene_versions (
     id TEXT PRIMARY KEY,
@@ -874,6 +1062,7 @@ export function initializeDatabaseOn(database: Database.Database) {
   database.exec("CREATE INDEX IF NOT EXISTS idx_media_comfy_workflows_project ON media_comfy_workflows(media_project_id, workflow_type, is_active)");
 
   const now = new Date().toISOString();
+  seedPermissionProfiles(database, now);
   seedMediaTemplates(database, now);
   seedScaffoldTemplates(database, now);
   const insertAgent = database.prepare(`INSERT OR IGNORE INTO agents
@@ -887,6 +1076,54 @@ export function initializeDatabaseOn(database: Database.Database) {
 
 export function initializeDatabase() {
   initializeDatabaseOn(db);
+}
+
+function seedPermissionProfiles(db: Database.Database, timestamp: string) {
+  const insert = db.prepare(`INSERT OR REPLACE INTO permission_profiles
+    (id,name,description,defaults_json,risk_level,requires_approval,is_builtin,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`);
+  const profiles = [
+    {
+      id: "locked-down",
+      name: "Locked down",
+      description: "Read-only inspection with network disabled and provider calls disabled.",
+      defaults: { sandboxEnabled: true, networkEnabled: false, providerCallsEnabled: false, secretsBlocked: true, commandClasses: ["safe-read-only"], readOnly: true },
+      risk: "low",
+      approval: 0
+    },
+    {
+      id: "standard-governed",
+      name: "Standard governed",
+      description: "Default governed development policy with proposals, approved npm scripts, provider adapters, and no ambient network.",
+      defaults: { sandboxEnabled: true, networkEnabled: false, providerCallsEnabled: true, secretsBlocked: true, commandClasses: ["safe-read-only", "test-check", "build-typecheck"] },
+      risk: "medium",
+      approval: 0
+    },
+    {
+      id: "advanced-development",
+      name: "Advanced development",
+      description: "Broader development mode for package installs and migrations after explicit approval.",
+      defaults: { sandboxEnabled: true, networkEnabled: false, providerCallsEnabled: true, secretsBlocked: true, commandClasses: ["safe-read-only", "test-check", "build-typecheck", "package-install", "migration-database"] },
+      risk: "high",
+      approval: 1
+    },
+    {
+      id: "emergency-recovery",
+      name: "Emergency recovery",
+      description: "Temporary recovery profile for rollback and recovery actions after explicit approval.",
+      defaults: { sandboxEnabled: true, networkEnabled: false, providerCallsEnabled: true, secretsBlocked: true, commandClasses: ["safe-read-only", "test-check", "build-typecheck"], emergencyRecovery: true },
+      risk: "critical",
+      approval: 1
+    }
+  ];
+  for (const profile of profiles) {
+    insert.run(profile.id, profile.name, profile.description, JSON.stringify(profile.defaults), profile.risk, profile.approval, 1, timestamp, timestamp);
+  }
+  db.prepare(`INSERT OR IGNORE INTO project_security_policies
+    (id,project_id,permission_profile_id,sandbox_enabled,network_enabled,provider_calls_enabled,secrets_blocked,command_policy_json,file_policy_json,provider_policy_json,cost_policy_json,created_at,updated_at)
+    SELECT 'policy-' || id,id,COALESCE(permission_profile_id,'standard-governed'),1,0,1,1,'{}','{}','{"adapterOnly":true,"maxCallsPerTask":8}','{"maxEstimatedCostUsd":0}',?,?
+    FROM projects`).run(timestamp, timestamp);
+  db.prepare("UPDATE projects SET permission_profile_id='standard-governed' WHERE permission_profile_id IS NULL OR permission_profile_id=''").run();
 }
 
 function seedMediaTemplates(db: Database.Database, timestamp: string) {

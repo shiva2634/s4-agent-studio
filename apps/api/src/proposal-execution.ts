@@ -10,6 +10,7 @@ import { runAvailableChecks, runProjectCheck, type CheckAction } from "./command
 import { getCurrentTaskRound, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 import { classifyProposalRole, detectProposalConflicts } from "./specialist-orchestration.js";
 import { markScaffoldApplied, markScaffoldRecovered, markScaffoldRolledBack } from "./scaffold-engine.js";
+import { assertProjectActiveForPolicy, assertTaskOwnedRollbackFiles } from "./security-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -167,6 +168,7 @@ function assertApprovalCoversProposals(approval: { riskLevel: string; decidedAt:
 export async function applyTaskProposals(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
+  assertProjectActiveForPolicy(db, task.projectId, { action: "PROPOSAL_APPLY", taskId: task.id, now, audit });
   const currentRound = getCurrentTaskRound(db, taskId);
   const approval = getApprovedApproval(db, task, currentRound?.id ?? null);
   if (!approval) throw new Error("An approved task approval is required before applying proposals");
@@ -233,7 +235,7 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
     throw error;
   }
 
-  const checkResults = await runAvailableChecks(task.rootPath);
+  const checkResults = await runAvailableChecks(task.rootPath, ["TYPECHECK", "LINT", "TEST", "BUILD"], { db, projectId: task.projectId, taskId: task.id, now, audit });
   const checksOk = checkResults.every((result) => result.ok);
   const finalStatus = checksOk ? "COMPLETED" : "FAILED_VALIDATION";
   for (const item of staged) {
@@ -266,8 +268,9 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
 export async function runTaskChecks(db: Database.Database, taskId: string, now: string, action?: CheckAction) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
+  assertProjectActiveForPolicy(db, task.projectId, { action: "COMMAND", taskId: task.id, now });
   const currentRound = getCurrentTaskRound(db, taskId);
-  const results = action ? [await runProjectCheck(task.rootPath, action)] : await runAvailableChecks(task.rootPath);
+  const results = action ? [await runProjectCheck(task.rootPath, action, { db, projectId: task.projectId, taskId: task.id, now })] : await runAvailableChecks(task.rootPath, ["TYPECHECK", "LINT", "TEST", "BUILD"], { db, projectId: task.projectId, taskId: task.id, now });
   const ok = results.every((result) => result.ok);
   insertTaskExecution(db, {
     id: randomUUID(),
@@ -338,6 +341,7 @@ export async function rollbackTask(db: Database.Database, taskId: string, now: s
   const currentRound = getCurrentTaskRound(db, taskId);
   const changes = db.prepare("SELECT proposal_id AS proposalId,file_path AS filePath,before_content AS beforeContent,after_hash AS afterHash FROM applied_file_changes WHERE task_id=? ORDER BY created_at DESC").all(task.id) as Array<{ proposalId: string; filePath: string; beforeContent: string | null; afterHash: string | null }>;
   if (!changes.length) throw new Error("No applied changes to roll back");
+  assertTaskOwnedRollbackFiles(db, { taskId: task.id, projectId: task.projectId, filePaths: changes.map((change) => change.filePath), now, audit });
   for (const change of changes) {
     const target = validateProposalPath(task.rootPath, change.filePath);
     const currentContent = await readTextIfExists(target.absolutePath);
@@ -379,6 +383,7 @@ export async function rollbackTask(db: Database.Database, taskId: string, now: s
 export async function recoverTaskExecution(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
   const task = getTask(db, taskId);
   if (!task) throw new Error("Task not found");
+  assertProjectActiveForPolicy(db, task.projectId, { action: "RECOVERY", taskId: task.id, now, audit });
   const currentRound = getCurrentTaskRound(db, taskId);
   const latestExecution = (hasColumn(db, "task_executions", "task_round_id")
     ? db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,status,git_checkpoint_json AS gitCheckpointJson,check_results_json AS checkResultsJson,error,created_at AS createdAt,updated_at AS updatedAt FROM task_executions WHERE task_id=? ORDER BY created_at DESC LIMIT 1")
@@ -397,7 +402,7 @@ export async function recoverTaskExecution(db: Database.Database, taskId: string
     if (currentHash !== expectedHash) throw new Error(`Cannot recover because file content no longer matches the applied proposal: ${proposal.filePath}`);
   }
 
-  const checkResults = await runAvailableChecks(task.rootPath);
+  const checkResults = await runAvailableChecks(task.rootPath, ["TYPECHECK", "LINT", "TEST", "BUILD"], { db, projectId: task.projectId, taskId: task.id, now, audit });
   const checksOk = checkResults.every((result) => result.ok);
   const finalStatus = checksOk ? "COMPLETED" : "FAILED_VALIDATION";
   const gitCheckpoint = latestExecution.gitCheckpointJson ?? null;

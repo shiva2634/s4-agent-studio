@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -29,6 +29,7 @@ import { MediaGenerationWorker, getGenerationJob, loadGenerationWorkerConfig } f
 import { buildTaskContext, createTaskRound, getCurrentTaskRound, listTaskHistory, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments, listSpecialistAgents, reassignTaskAssignment, updateAssignmentLifecycle, type SpecialistAssignmentAction } from "./specialist-orchestration.js";
 import { ScaffoldError, createScaffoldJob, generateScaffoldProposals, getScaffoldJob, listScaffoldTemplates, previewScaffoldTemplate } from "./scaffold-engine.js";
+import { PermissionDeniedError, assertFilePermission, assertNetworkAllowed, assertProjectActiveForPolicy, assertProviderAllowed, classifyCommandRisk, getProjectSecurityPolicy, listPermissionEvents, listPermissionProfiles, requestProjectPolicyChange, resolveProjectPolicyApproval, sanitizeForPolicy } from "./security-policy.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -45,8 +46,10 @@ const now = () => new Date().toISOString();
 const mediaProviderTasks = ["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"] as const;
 
 function audit(eventType: string, summary: string, values: { projectId?: string; taskId?: string; agentId?: string; payload?: unknown } = {}) {
+  const cleanSummary = sanitizeForPolicy(db, summary, { projectId: values.projectId, taskId: values.taskId, source: "audit-summary" });
+  const cleanPayload = values.payload ? JSON.parse(sanitizeForPolicy(db, JSON.stringify(values.payload), { projectId: values.projectId, taskId: values.taskId, source: "audit-payload" })) : null;
   db.prepare(`INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, now());
+    .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, cleanSummary, cleanPayload ? JSON.stringify(cleanPayload) : null, now());
 }
 
 function parsePayload(value: string) {
@@ -1131,6 +1134,63 @@ app.post("/api/projects", async (request, reply) => {
   }
 });
 
+app.get("/api/permission-profiles", async () => ({ profiles: listPermissionProfiles(db) }));
+
+app.get("/api/projects/:projectId/security-policy", async (request: any, reply) => {
+  try {
+    const policy = getProjectSecurityPolicy(db, request.params.projectId);
+    return {
+      project: { id: policy.project.id, name: policy.project.name, status: policy.project.status },
+      permissionProfileId: policy.permissionProfileId,
+      profileName: policy.profileName,
+      sandboxEnabled: policy.sandboxEnabled,
+      networkEnabled: policy.networkEnabled,
+      providerCallsEnabled: policy.providerCallsEnabled,
+      secretsBlocked: policy.secretsBlocked,
+      providerPolicy: policy.providerPolicy,
+      costPolicy: policy.costPolicy,
+      networkAllowlist: db.prepare("SELECT id,host,reason,status,created_at AS createdAt FROM network_allowlist WHERE project_id=? ORDER BY host").all(request.params.projectId)
+    };
+  } catch (error) {
+    return reply.status(404).send({ error: error instanceof Error ? error.message : "Security policy not found" });
+  }
+});
+
+app.post("/api/projects/:projectId/security-policy/change-requests", async (request: any, reply) => {
+  const parsed = PolicyChangeRequestSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid policy change request", details: parsed.error.flatten() });
+  try {
+    const result = requestProjectPolicyChange(db, { id: nanoid(), approvalId: nanoid(), projectId: request.params.projectId, profileId: parsed.data.profileId, reason: parsed.data.reason, now: now(), audit });
+    return reply.status(result.approvalRequired ? 202 : 200).send(result);
+  } catch (error) {
+    if (error instanceof PermissionDeniedError) return reply.status(403).send({ error: error.message });
+    return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to request policy change" });
+  }
+});
+
+app.get("/api/projects/:projectId/permission-events", async (request: any) => ({ events: listPermissionEvents(db, request.params.projectId) }));
+
+app.post("/api/projects/:projectId/permissions/test", async (request: any, reply) => {
+  const parsed = PermissionDecisionTestSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid permission test", details: parsed.error.flatten() });
+  try {
+    const project = db.prepare("SELECT id,root_path AS rootPath FROM projects WHERE id=?").get(request.params.projectId) as { id: string; rootPath: string } | undefined;
+    if (!project) return reply.status(404).send({ error: "Project not found" });
+    if (parsed.data.action === "FILE_READ" || parsed.data.action === "FILE_PROPOSAL") assertFilePermission(db, { projectId: project.id, rootPath: project.rootPath, filePath: parsed.data.filePath ?? "package.json", action: parsed.data.action, now: now(), audit });
+    else if (parsed.data.action === "NETWORK_ACCESS") assertNetworkAllowed(db, { projectId: project.id, host: parsed.data.host ?? "", now: now(), audit });
+    else if (parsed.data.action === "COMMAND") {
+      const riskClass = classifyCommandRisk(parsed.data.command ?? "");
+      if (riskClass === "destructive" || riskClass === "network") throw new PermissionDeniedError(`${riskClass} commands are blocked`);
+    } else if (parsed.data.action === "PROVIDER_CALL") {
+      const providerConfig = loadProviderConfig();
+      assertProviderAllowed(db, { projectId: project.id, provider: parsed.data.provider ?? providerConfig.provider, configured: providerConfig.configured, now: now(), audit });
+    }
+    return { decision: "ALLOW" };
+  } catch (error) {
+    return reply.status(error instanceof PermissionDeniedError && error.decision === "APPROVAL_REQUIRED" ? 202 : 403).send({ decision: error instanceof PermissionDeniedError ? error.decision : "DENY", error: error instanceof Error ? error.message : "Permission denied" });
+  }
+});
+
 app.get("/api/scaffold/templates", async () => ({
   templates: listScaffoldTemplates(db).map((template) => ({
     id: template.id,
@@ -1243,18 +1303,23 @@ app.post("/api/projects/:projectId/archive", async (request: any, reply) => {
 });
 
 app.get("/api/projects/:projectId/tree", async (request: any, reply) => {
-  const project = db.prepare("SELECT root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
+  const project = db.prepare("SELECT id,root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
   if (!project) return reply.status(404).send({ error: "Project not found" });
-  try { return { entries: await listProjectTree(project.rootPath, request.query?.path ?? ".", 2) }; }
+  try {
+    assertFilePermission(db, { projectId: project.id, rootPath: project.rootPath, filePath: request.query?.path && request.query.path !== "." ? request.query.path : "package.json", action: "FILE_READ", now: now(), audit });
+    return { entries: await listProjectTree(project.rootPath, request.query?.path ?? ".", 2) };
+  }
   catch (error) { return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to inspect project" }); }
 });
 
 app.get("/api/projects/:projectId/file", async (request: any, reply) => {
-  const project = db.prepare("SELECT root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
+  const project = db.prepare("SELECT id,root_path AS rootPath FROM projects WHERE id=? AND status='ACTIVE'").get(request.params.projectId) as any;
   if (!project) return reply.status(404).send({ error: "Project not found" });
   try {
+    assertFilePermission(db, { projectId: project.id, rootPath: project.rootPath, filePath: request.query.path, action: "FILE_READ", now: now(), audit });
     assertReadableProjectFilePath(project.rootPath, request.query.path);
-    return { path: request.query.path, content: await readProjectFile(project.rootPath, request.query.path) };
+    const content = await readProjectFile(project.rootPath, request.query.path);
+    return { path: request.query.path, content: sanitizeForPolicy(db, content, { projectId: project.id, source: "file-read", now: now(), audit }) };
   }
   catch (error) { return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to read file" }); }
 });
@@ -1358,6 +1423,7 @@ app.post("/api/chat", async (request, reply) => {
     const taskContext = buildTaskContext(db, taskId);
     if (!planningOnly) {
       try {
+        assertProviderAllowed(db, { projectId: project.id, taskId, provider: providerConfig.provider, configured: providerConfig.configured, now: timestamp, audit });
         const provider = createAiProvider(providerConfig);
         const input = await buildCodeProposalInput(project.rootPath, project.name, parsed.data.message, inspection, analysis, {
           maximumFiles: providerConfig.maxProposalFiles,
@@ -1417,7 +1483,7 @@ app.post("/api/chat", async (request, reply) => {
         db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
           .run(approvalId, taskId, taskRound.id, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: specialistPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), specialistRiskLevel, "PENDING", timestamp);
         updateTaskRound(db, taskRound.id, { status: "AWAITING_APPROVAL", proposalCount: insertedProposals.length, nextRequiredAction: "APPROVE_PROPOSALS", now: timestamp });
-        const responseText = [
+        const responseText = sanitizeForPolicy(db, [
           `I inspected ${project.name} and generated code proposals for review.`,
           "",
           `Provider: ${providerConfig.provider}`,
@@ -1432,13 +1498,13 @@ app.post("/api/chat", async (request, reply) => {
           "",
           "Warnings:",
           ...(output.warnings.length ? output.warnings.map((warning) => `- ${warning}`) : ["- None"])
-        ].join("\n");
+        ].join("\n"), { projectId: project.id, taskId, source: "chat-response", now: timestamp, audit });
         db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
           .run(nanoid(), conversationId, "agent", responseText, now());
         audit("CODE_PROPOSAL_CREATED", `Code proposals created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: specialistRiskLevel, provider: providerConfig.provider, model: providerConfig.model, proposalCount: insertedProposals.length, assignmentCount: assignments.length } });
         return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: specialistRiskLevel, approvalRequired: true, plan: specialistPlan, nextStep: "AWAITING_APPROVAL" };
       } catch (error) {
-        const sanitizedError = sanitizeProviderError(error);
+        const sanitizedError = sanitizeForPolicy(db, sanitizeProviderError(error), { projectId: project.id, taskId, source: "provider-error", now: timestamp, audit });
         const failedPlan = { ...mutationPlan, providerError: sanitizedError };
         db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
           .run(failedPlan.summary, parsed.data.message, "FAILED", analysis.riskLevel, JSON.stringify(failedPlan), failedPlan.acceptanceCriteria.join("\n"), failedPlan.rollback, timestamp, taskId);
@@ -1512,7 +1578,7 @@ app.post("/api/chat", async (request, reply) => {
 });
 
 app.get("/api/conversations/:conversationId/messages", async (request: any) => ({
-  messages: db.prepare("SELECT id,sender,content,created_at AS createdAt FROM messages WHERE conversation_id=? ORDER BY created_at").all(request.params.conversationId)
+  messages: (db.prepare("SELECT id,sender,content,created_at AS createdAt FROM messages WHERE conversation_id=? ORDER BY created_at").all(request.params.conversationId) as Array<{ id: string; sender: string; content: string; createdAt: string }>).map((message) => ({ ...message, content: sanitizeForPolicy(db, message.content, { source: "conversation-message" }) }))
 }));
 
 app.get("/api/tasks", async (request: any) => ({
@@ -1524,8 +1590,13 @@ app.get("/api/tasks", async (request: any) => ({
 }));
 
 app.get("/api/approvals", async () => ({
-  approvals: db.prepare(`SELECT a.id,a.task_id AS taskId,a.action_type AS actionType,a.summary,a.payload_json AS payloadJson,a.risk_level AS riskLevel,a.status,a.created_at AS createdAt,t.title,p.name AS projectName
-    FROM approvals a JOIN tasks t ON t.id=a.task_id JOIN projects p ON p.id=t.project_id ORDER BY CASE a.status WHEN 'PENDING' THEN 0 ELSE 1 END,a.created_at DESC`).all()
+  approvals: (db.prepare(`SELECT a.id,a.task_id AS taskId,a.action_type AS actionType,a.summary,a.payload_json AS payloadJson,a.risk_level AS riskLevel,a.status,a.created_at AS createdAt,t.title,p.name AS projectName,p.id AS projectId
+    FROM approvals a JOIN tasks t ON t.id=a.task_id JOIN projects p ON p.id=t.project_id ORDER BY CASE a.status WHEN 'PENDING' THEN 0 ELSE 1 END,a.created_at DESC`).all() as any[]).map((approval) => ({
+      ...approval,
+      summary: sanitizeForPolicy(db, approval.summary, { projectId: approval.projectId, taskId: approval.taskId, source: "approval-summary" }),
+      payloadJson: sanitizeForPolicy(db, approval.payloadJson, { projectId: approval.projectId, taskId: approval.taskId, source: "approval-payload" }),
+      projectId: undefined
+    }))
 }));
 
 app.post("/api/proposals", async (request, reply) => {
@@ -1536,6 +1607,7 @@ app.post("/api/proposals", async (request, reply) => {
   if (!task) return reply.status(404).send({ error: "Task not found" });
   try {
     const currentRound = getCurrentTaskRound(db, task.id);
+    assertFilePermission(db, { projectId: task.projectId, rootPath: task.rootPath, filePath: parsed.data.filePath, action: "FILE_PROPOSAL", operation: parsed.data.operation, proposedContent: parsed.data.proposedContent, taskId: task.id, now: now(), audit });
     const proposal = await insertProposal(db, {
       id: nanoid(),
       taskId: task.id,
@@ -1641,9 +1713,14 @@ app.post("/api/proposals/:proposalId/reject", async (request: any, reply) => {
 app.post("/api/task-assignments/:assignmentId/:action", async (request: any, reply) => {
   const action = request.params.action as SpecialistAssignmentAction;
   if (!["pause", "resume", "retry", "cancel"].includes(action)) return reply.status(400).send({ error: "Invalid assignment action" });
-  const assignment = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,role,risk_level AS riskLevel FROM task_assignments WHERE id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string } | undefined;
+  const assignment = db.prepare("SELECT ta.id,ta.task_id AS taskId,ta.task_round_id AS taskRoundId,ta.role,ta.risk_level AS riskLevel,t.project_id AS projectId FROM task_assignments ta JOIN tasks t ON t.id=ta.task_id WHERE ta.id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string; projectId: string } | undefined;
   if (!assignment) return reply.status(404).send({ error: "Specialist assignment not found" });
   const timestamp = now();
+  try {
+    assertProjectActiveForPolicy(db, assignment.projectId, { action: "SPECIALIST_ACTION", taskId: assignment.taskId, now: timestamp, audit });
+  } catch (error) {
+    return reply.status(403).send({ error: error instanceof Error ? error.message : "Specialist action blocked" });
+  }
   if (action === "retry" && (assignment.riskLevel === "high" || assignment.riskLevel === "critical")) {
     const approvalId = createSpecialistApproval({
       taskId: assignment.taskId,
@@ -1670,9 +1747,14 @@ app.post("/api/task-assignments/:assignmentId/:action", async (request: any, rep
 app.post("/api/task-assignments/:assignmentId/reassign", async (request: any, reply) => {
   const specialistAgentId = typeof request.body?.specialistAgentId === "string" ? request.body.specialistAgentId : "";
   if (!specialistAgentId) return reply.status(400).send({ error: "Replacement specialist agent is required" });
-  const assignment = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,role,risk_level AS riskLevel FROM task_assignments WHERE id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string } | undefined;
+  const assignment = db.prepare("SELECT ta.id,ta.task_id AS taskId,ta.task_round_id AS taskRoundId,ta.role,ta.risk_level AS riskLevel,t.project_id AS projectId FROM task_assignments ta JOIN tasks t ON t.id=ta.task_id WHERE ta.id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string; projectId: string } | undefined;
   if (!assignment) return reply.status(404).send({ error: "Specialist assignment not found" });
   const timestamp = now();
+  try {
+    assertProjectActiveForPolicy(db, assignment.projectId, { action: "SPECIALIST_ACTION", taskId: assignment.taskId, now: timestamp, audit });
+  } catch (error) {
+    return reply.status(403).send({ error: error instanceof Error ? error.message : "Specialist reassignment blocked" });
+  }
   if (assignment.riskLevel === "high" || assignment.riskLevel === "critical") {
     const approvalId = createSpecialistApproval({
       taskId: assignment.taskId,
@@ -1712,6 +1794,7 @@ app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
   if (approval.status !== "PENDING") return reply.status(409).send({ error: "Approval is already decided" });
   const decidedAt = now();
   db.prepare("UPDATE approvals SET status=?,decision_note=?,decided_at=? WHERE id=?").run(parsed.data.decision, parsed.data.note ?? null, decidedAt, approval.id);
+  const policyApproval = resolveProjectPolicyApproval(db, approval.id, parsed.data.decision, decidedAt, audit);
   const payload = parsePayload(approval.payloadJson);
   const assignmentAction = payload.assignmentAction as { type?: string; assignmentId?: string; specialistAgentId?: string } | undefined;
   if (assignmentAction?.assignmentId && parsed.data.decision === "APPROVED") {
@@ -1729,8 +1812,8 @@ app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
     }
   }
   const specialistApproval = typeof approval.actionType === "string" && approval.actionType.startsWith("SPECIALIST_");
-  if (!specialistApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
-  if (approval.taskRoundId && !specialistApproval) {
+  if (!specialistApproval && !policyApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  if (approval.taskRoundId && !specialistApproval && !policyApproval) {
     updateTaskRound(db, approval.taskRoundId, {
       status: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
       nextRequiredAction: parsed.data.decision === "APPROVED" ? "APPLY_PROPOSALS" : "CONTINUE_CHAT",

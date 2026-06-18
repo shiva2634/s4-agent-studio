@@ -51,6 +51,7 @@ export function registerOrReactivateProject(db: Database.Database, input: { id: 
   if (existing?.status === "DEREGISTERED") {
     db.prepare("UPDATE projects SET name=?,root_path=?,status='ACTIVE',deregistered_at=NULL,deregistered_by=NULL,updated_at=? WHERE id=?")
       .run(input.name, rootPath, input.now, existing.id);
+    ensureDefaultProjectSecurityPolicy(db, existing.id, input.now);
     audit("PROJECT_REACTIVATED", `Project ${input.name} reactivated`, {
       projectId: existing.id,
       payload: { projectId: existing.id, projectName: input.name, normalizedRootPath: rootPath, previousStatus: existing.status, newStatus: "ACTIVE", timestamp: input.now }
@@ -60,8 +61,23 @@ export function registerOrReactivateProject(db: Database.Database, input: { id: 
 
   db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
     .run(input.id, input.name, rootPath, "ACTIVE", input.now, input.now);
+  ensureDefaultProjectSecurityPolicy(db, input.id, input.now);
   audit("PROJECT_CREATED", `Project ${input.name} registered`, { projectId: input.id, payload: { rootPath } });
   return { id: input.id, name: input.name, rootPath, status: "ACTIVE" as const, reactivated: false };
+}
+
+function hasTable(db: Database.Database, table: string) {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) as { name: string } | undefined;
+  return Boolean(row);
+}
+
+export function ensureDefaultProjectSecurityPolicy(db: Database.Database, projectId: string, now: string) {
+  if (!hasTable(db, "project_security_policies")) return;
+  db.prepare(`INSERT OR IGNORE INTO project_security_policies
+    (id,project_id,permission_profile_id,sandbox_enabled,network_enabled,provider_calls_enabled,secrets_blocked,command_policy_json,file_policy_json,provider_policy_json,cost_policy_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(`policy-${projectId}`, projectId, "standard-governed", 1, 0, 1, 1, "{}", "{}", '{"adapterOnly":true,"maxCallsPerTask":8}', '{"maxEstimatedCostUsd":0}', now, now);
+  db.prepare("UPDATE projects SET permission_profile_id=COALESCE(NULLIF(permission_profile_id,''),'standard-governed') WHERE id=?").run(projectId);
 }
 
 export function deregisterProject(db: Database.Database, projectId: string, timestamp: string, audit: ProjectAuditWriter) {

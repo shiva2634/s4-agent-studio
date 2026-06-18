@@ -53,6 +53,16 @@ export function isSecretPath(filePath: string) {
   return normalized.split("/").some((segment) => blockedBasenames.some((pattern) => pattern.test(segment)));
 }
 
+function containsLiteralSecret(value: string | null | undefined) {
+  if (!value) return false;
+  return [
+    /Bearer\s+[A-Za-z0-9._~+/=-]+/i,
+    /api[_-]?key["']?\s*[:=]\s*["']?[^"',\s]+/i,
+    /(?:secret|token|password|credential)["']?\s*[:=]\s*["']?[^"',\s]+/i,
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/i
+  ].some((pattern) => pattern.test(value));
+}
+
 export function validateProposalPath(rootPath: string, requestedPath: string) {
   const normalized = requestedPath.replaceAll("\\", "/");
   if (path.isAbsolute(requestedPath) || /^[a-zA-Z]:\//.test(normalized)) throw new Error("Proposed file path must be relative to the selected project");
@@ -124,6 +134,10 @@ function weakensTests(input: ChangeProposalInput) {
 }
 
 function assertProposalAuthorAllowed(db: Database.Database, input: ChangeProposalInput) {
+  const normalizedPath = input.filePath.replaceAll("\\", "/");
+  const pathParts = normalizedPath.split("/").filter(Boolean);
+  if (pathParts.some((part) => blockedSegments.has(part))) throw new Error("Proposed file path targets a blocked project directory");
+  if (isSecretPath(normalizedPath)) throw new Error("Secret files cannot be proposed or read");
   if (hasTable(db, "projects")) {
     const projectHasStatus = hasColumn(db, "projects", "status");
     const project = projectHasStatus
@@ -143,6 +157,7 @@ function assertProposalAuthorAllowed(db: Database.Database, input: ChangeProposa
       throw new Error("Weakening, deleting, skipping, or disabling tests requires explicit high-risk approval");
     }
   }
+  if (containsLiteralSecret(input.proposedContent)) throw new Error("Proposal contains a literal secret-like value");
 }
 
 export async function buildProposal(input: ChangeProposalInput) {

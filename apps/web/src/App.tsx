@@ -43,6 +43,9 @@ type ComfyStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: numbe
 type LongCatStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
 type ScaffoldTemplate = { id: string; name: string; description: string; projectType: string; defaultFolders: string[]; packageScripts: Record<string,string>; recommendedSpecialistAgents: string[]; riskLevel: string; allowedOperations: string[]; requiredApprovals: string[]; starterFileCount: number; isBuiltin: number };
 type ScaffoldJob = { id: string; templateId: string; taskId: string; targetProjectName: string; targetRootPath: string; mode: "CREATE_PROJECT"|"ADD_MODULE"; status: string; riskLevel: string; planningOnly: boolean; approvalId: string | null; plan: { steps?: string[]; starterFiles?: Array<{ path: string; bytes: number }> }; files: Array<{ proposalId: string | null; relativePath: string; operation: string; status: string }> };
+type PermissionProfile = { id: string; name: string; description: string; riskLevel: string; requiresApproval: 0 | 1 };
+type SecurityPolicy = { permissionProfileId: string; profileName: string; sandboxEnabled: boolean; networkEnabled: boolean; providerCallsEnabled: boolean; secretsBlocked: boolean; providerPolicy: Record<string,unknown>; costPolicy: Record<string,unknown>; networkAllowlist: Array<{ host: string; status: string }> };
+type PermissionEvent = { id: string; action: string; resource: string | null; decision: string; riskClass: string; reason: string; createdAt: string };
 const API = "http://127.0.0.1:4310";
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -102,21 +105,28 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [scaffoldModuleName, setScaffoldModuleName] = useState("");
   const [scaffoldPlanningOnly, setScaffoldPlanningOnly] = useState(false);
   const [scaffoldJob, setScaffoldJob] = useState<ScaffoldJob | null>(null);
+  const [permissionProfiles, setPermissionProfiles] = useState<PermissionProfile[]>([]);
+  const [securityPolicy, setSecurityPolicy] = useState<SecurityPolicy | null>(null);
+  const [permissionEvents, setPermissionEvents] = useState<PermissionEvent[]>([]);
+  const [policyProfileId, setPolicyProfileId] = useState("standard-governed");
+  const [policyReason, setPolicyReason] = useState("Project permission profile update");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
-    const [boot, approvalData, taskData, providerData, auditData, scaffoldData] = await Promise.all([
+    const [boot, approvalData, taskData, providerData, auditData, scaffoldData, profileData] = await Promise.all([
       fetch(`${API}/api/bootstrap`).then(r => r.json()),
       fetch(`${API}/api/approvals`).then(r => r.json()),
       fetch(`${API}/api/tasks`).then(r => r.json()),
       fetch(`${API}/api/providers/status`).then(r => r.json()),
       fetch(`${API}/api/audit`).then(r => r.json()),
-      fetch(`${API}/api/scaffold/templates`).then(r => r.json())
+      fetch(`${API}/api/scaffold/templates`).then(r => r.json()),
+      fetch(`${API}/api/permission-profiles`).then(r => r.json())
     ]);
     setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
     setAuditEvents(auditData.events);
     setScaffoldTemplates(scaffoldData.templates ?? []);
+    setPermissionProfiles(profileData.profiles ?? []);
     if (!selectedScaffoldTemplateId && scaffoldData.templates?.length) setSelectedScaffoldTemplateId(scaffoldData.templates[0].id);
     const preferredProjectId = boot.projects.some((project: Project) => project.id === projectId) ? projectId : boot.projects[0]?.id ?? "";
     const scopedTasks = taskData.tasks.filter((task: Task) => task.projectId === preferredProjectId);
@@ -152,6 +162,14 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     }
     void loadTaskDetails(selectedTaskId);
   }, [selectedTaskId]);
+  useEffect(() => {
+    if (!projectId) {
+      setSecurityPolicy(null);
+      setPermissionEvents([]);
+      return;
+    }
+    void loadSecurityPolicy(projectId);
+  }, [projectId]);
 
   const pending = useMemo(() => approvals.filter(a => a.status === "PENDING"), [approvals]);
   const selectedProject = projects.find(project => project.id === projectId);
@@ -191,6 +209,22 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
       setTaskHistory(await historyResponse.json());
     } else {
       setTaskHistory(undefined);
+    }
+  }
+
+  async function loadSecurityPolicy(nextProjectId: string) {
+    const [policyResponse, eventsResponse] = await Promise.all([
+      fetch(`${API}/api/projects/${nextProjectId}/security-policy`),
+      fetch(`${API}/api/projects/${nextProjectId}/permission-events`)
+    ]);
+    if (policyResponse.ok) {
+      const data = await policyResponse.json();
+      setSecurityPolicy(data);
+      setPolicyProfileId(data.permissionProfileId);
+    }
+    if (eventsResponse.ok) {
+      const data = await eventsResponse.json();
+      setPermissionEvents(data.events ?? []);
     }
   }
 
@@ -343,6 +377,20 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     await refresh();
   }
 
+  async function requestPolicyChange() {
+    if (!selectedProject) return;
+    setError("");
+    const response = await fetch(`${API}/api/projects/${selectedProject.id}/security-policy/change-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ profileId: policyProfileId, reason: policyReason }) });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to request policy change");
+      return;
+    }
+    setNotice(data.approvalRequired ? "Security policy change requires human approval." : "Security policy changed.");
+    await refresh();
+    await loadSecurityPolicy(selectedProject.id);
+  }
+
   const checkpointExecution = execution?.checkpointExecution ?? execution?.executions.find((entry) => entry.gitCheckpoint);
   const latestExecution = execution?.latestExecution ?? execution?.executions[0];
   const rollbackAvailable = execution?.rollbackAvailable ?? Boolean(checkpointExecution?.rollbackAvailable);
@@ -358,6 +406,8 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{const nextProjectId=e.target.value;const nextTask=tasks.find(task=>task.projectId===nextProjectId&&["PLANNING","AWAITING_APPROVAL","APPROVED","RUNNING","TESTING"].includes(task.status)) ?? tasks.find(task=>task.projectId===nextProjectId) ?? null;setProjectId(nextProjectId);setConversationId(undefined);setProposals([]);setExecution(undefined);setSelectedTaskId(nextTask?.id ?? null);setTaskHistory(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog(selectedProject.status==="PAUSED"?"resume":"pause");setProjectMenuOpen(false);}}>{selectedProject.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("archive");setProjectMenuOpen(false);}}>Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
         <h3>Project management</h3>
         {manageableProjects.length ? manageableProjects.map(project => <div key={project.id} className="mini"><span>{project.name}</span><small>{project.status}</small><div className="decision wrap">{getProjectManagementActions(project.status).map(action => <button key={action} onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog(action==="Resume Project"?"resume":action==="Pause Project"?"pause":action==="Archive Project"?"archive":"deregister");}}>{action}</button>)}</div></div>) : <p className="muted">No manageable projects.</p>}
+        <h3>Sandbox policy</h3>
+        {securityPolicy?<div className="policy-panel"><div className="row"><span>Profile</span><strong>{securityPolicy.profileName}</strong></div><div className="policy-grid"><span>Sandbox</span><strong>{securityPolicy.sandboxEnabled?"on":"off"}</strong><span>Network</span><strong>{securityPolicy.networkEnabled?"allowlisted":"blocked"}</strong><span>Secrets</span><strong>{securityPolicy.secretsBlocked?"blocked":"allowed"}</strong><span>Providers</span><strong>{securityPolicy.providerCallsEnabled?"adapter only":"blocked"}</strong></div><label>Change profile<select value={policyProfileId} onChange={e=>setPolicyProfileId(e.target.value)}>{permissionProfiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}{profile.requiresApproval?" (approval)":""}</option>)}</select></label><label>Reason<input value={policyReason} onChange={e=>setPolicyReason(e.target.value)} /></label><button className="secondary" onClick={()=>void requestPolicyChange()}>Request policy change</button>{permissionEvents.length?<div className="decision-history">{permissionEvents.slice(0,4).map(event=><small key={event.id} className={event.decision.toLowerCase()}>{event.decision}: {event.action.replaceAll("_"," ")} - {event.reason}</small>)}</div>:<small className="muted">No policy decisions yet.</small>}</div>:<p className="muted">Select a project to view sandbox policy.</p>}
         <h3>Create new project</h3>
         <div className="scaffold-panel">
           <label>Template<select value={selectedScaffoldTemplate?.id ?? ""} onChange={e=>setSelectedScaffoldTemplateId(e.target.value)}>{scaffoldTemplates.map(template=><option key={template.id} value={template.id}>{template.name}</option>)}</select></label>

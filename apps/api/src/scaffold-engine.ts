@@ -3,7 +3,8 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import type { ScaffoldJobMode } from "@s4/shared";
 import { hashContent, insertProposal, validateProposalPath } from "./change-proposals.js";
-import { normalizeProjectRoot } from "./project-registration.js";
+import { ensureDefaultProjectSecurityPolicy, normalizeProjectRoot } from "./project-registration.js";
+import { assertFilePermission, assertWorkspaceTargetAllowed } from "./security-policy.js";
 import { createTaskRound, updateTaskRound } from "./task-workflow.js";
 import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments } from "./specialist-orchestration.js";
 
@@ -145,11 +146,13 @@ function reserveTargetProject(db: Database.Database, input: { projectName: strin
   if (existing?.status === "DEREGISTERED") {
     db.prepare("UPDATE projects SET name=?,root_path=?,status='PAUSED',deregistered_at=NULL,deregistered_by=NULL,updated_at=? WHERE id=?")
       .run(input.projectName, input.targetRootPath, input.now, existing.id);
+    ensureDefaultProjectSecurityPolicy(db, existing.id, input.now);
     return existing.id;
   }
   const projectId = nanoid();
   db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
     .run(projectId, input.projectName, input.targetRootPath, "PAUSED", input.now, input.now);
+  ensureDefaultProjectSecurityPolicy(db, projectId, input.now);
   return projectId;
 }
 
@@ -199,6 +202,7 @@ export function createScaffoldJob(db: Database.Database, input: {
     const relativeName = assertRelativeName(input.targetDirectoryName ?? slugify(input.projectName), "Target directory");
     targetRootPath = path.resolve(workspace.rootPath, relativeName);
     assertInside(workspace.rootPath, targetRootPath);
+    assertWorkspaceTargetAllowed(db, { workspaceRootPath: workspace.rootPath, targetRootPath, now: input.now, audit: input.audit });
     projectId = reserveTargetProject(db, { projectName: input.projectName, targetRootPath, now: input.now });
     targetProjectId = projectId;
     workspaceRootId = workspace.id;
@@ -249,6 +253,7 @@ export async function generateScaffoldProposals(db: Database.Database, jobId: st
   assertSafeTemplateFiles(job.targetRootPath, files);
   const insertedProposals = [];
   for (const file of files) {
+    assertFilePermission(db, { projectId: job.projectId, rootPath: job.targetRootPath, filePath: file.path, action: "FILE_PROPOSAL", operation: "CREATE", proposedContent: file.content, taskId: job.taskId, now: input.now, audit: input.audit });
     const proposal = await insertProposal(db, {
       id: input.createId?.() ?? nanoid(),
       taskId: job.taskId,

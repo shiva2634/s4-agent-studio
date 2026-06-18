@@ -5,6 +5,7 @@ export const TaskStatusSchema = z.enum([
   "PAUSED", "TESTING", "FAILED", "FAILED_VALIDATION", "COMPLETED", "CANCELLED", "ROLLED_BACK"
 ]);
 export const RiskLevelSchema = z.enum(["low", "medium", "high", "critical"]);
+export const PermissionProfileIdSchema = z.enum(["locked-down", "standard-governed", "advanced-development", "emergency-recovery"]);
 
 export const CreateProjectSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -26,6 +27,19 @@ export const CreateScaffoldJobSchema = z.object({
 
 export const GenerateScaffoldProposalsSchema = z.object({
   planningOnly: z.boolean().optional()
+});
+
+export const PolicyChangeRequestSchema = z.object({
+  profileId: PermissionProfileIdSchema,
+  reason: z.string().trim().min(3).max(2_000)
+});
+
+export const PermissionDecisionTestSchema = z.object({
+  action: z.enum(["FILE_READ", "FILE_PROPOSAL", "PROPOSAL_APPLY", "COMMAND", "SCAFFOLD_PROPOSAL", "SPECIALIST_ACTION", "ROLLBACK", "RECOVERY", "PROVIDER_CALL", "NETWORK_ACCESS", "SECRET_ACCESS"]),
+  filePath: z.string().trim().max(500).optional(),
+  command: z.string().trim().max(1_000).optional(),
+  host: z.string().trim().max(255).optional(),
+  provider: z.string().trim().max(100).optional()
 });
 
 export const ChatRequestSchema = z.object({
