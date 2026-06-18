@@ -17,6 +17,32 @@ type TableSection = {
   rows: string[][];
 };
 
+type AssignmentStatus =
+  | "Assigned"
+  | "In Development"
+  | "Testing"
+  | "Production Readiness"
+  | "Waiting Manager Approval"
+  | "Approved for Deployment"
+  | "Deployed";
+
+type ProjectAssignment = {
+  projectName: string;
+  clientCompany: string;
+  currentStage: AssignmentStatus;
+  assignedManager: string;
+  assignedTeamLeader: string;
+  frontendDeveloper: string;
+  backendDeveloper: string;
+  testingDeveloper: string;
+  productionReadinessDeveloper: string;
+  managerApprovalStatus: string;
+  deploymentApprovalStatus: string;
+  riskLevel: "Low" | "Medium" | "High";
+  deadline: string;
+  activeStep: number;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -30,6 +56,7 @@ const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
 const sidebarSections = [
   { id: "company-dashboard", label: "Company Dashboard" },
   { id: "project-operations", label: "Project Operations" },
+  { id: "project-assignment-control", label: "Project Assignment Control" },
   { id: "client-management", label: "Client Management" },
   { id: "approvals", label: "Approvals Control Centre" },
   { id: "support-desk", label: "Support Desk" },
@@ -52,15 +79,92 @@ const dashboardCards: MetricCard[] = [
 ];
 
 const workflowSteps = [
-  "Admin",
+  "Admin assigns project",
   "Manager",
   "Team Leader",
-  "Frontend Developer",
-  "Backend Developer",
-  "Testing / QA Developer",
-  "Final Production Readiness Developer",
-  "Manager final deployment approval"
+  "Developer 1 Frontend",
+  "Developer 2 Backend",
+  "Developer 3 Testing / QA",
+  "Developer 4 Final Production Readiness",
+  "Manager final approval",
+  "Deployment approval"
 ];
+
+const assignmentWorkflowSteps = [
+  "Admin",
+  "Manager",
+  "TL",
+  "Frontend",
+  "Backend",
+  "Testing",
+  "Production Readiness",
+  "Manager Approval",
+  "Deployment"
+];
+
+const assignmentStatusBadges: AssignmentStatus[] = [
+  "Assigned",
+  "In Development",
+  "Testing",
+  "Production Readiness",
+  "Waiting Manager Approval",
+  "Approved for Deployment",
+  "Deployed"
+];
+
+const projectAssignments: ProjectAssignment[] = [
+  {
+    projectName: "Automation Studio Client Workspace",
+    clientCompany: "Alpha Industries",
+    currentStage: "In Development",
+    assignedManager: "Aarav",
+    assignedTeamLeader: "Meera",
+    frontendDeveloper: "Developer 1 - Frontend",
+    backendDeveloper: "Developer 2 - Backend",
+    testingDeveloper: "Developer 3 - Testing / QA",
+    productionReadinessDeveloper: "Developer 4 - Production Readiness",
+    managerApprovalStatus: "Not ready",
+    deploymentApprovalStatus: "Blocked until manager approval",
+    riskLevel: "Medium",
+    deadline: "Placeholder deadline",
+    activeStep: 4
+  },
+  {
+    projectName: "Support Desk Upgrade",
+    clientCompany: "Beta Retail",
+    currentStage: "Waiting Manager Approval",
+    assignedManager: "Nisha",
+    assignedTeamLeader: "Karan",
+    frontendDeveloper: "Developer 1 - Frontend",
+    backendDeveloper: "Developer 2 - Backend",
+    testingDeveloper: "Developer 3 - Testing / QA",
+    productionReadinessDeveloper: "Developer 4 - Production Readiness",
+    managerApprovalStatus: "Pending manager approval",
+    deploymentApprovalStatus: "Waiting",
+    riskLevel: "High",
+    deadline: "Placeholder deadline",
+    activeStep: 8
+  },
+  {
+    projectName: "Client Portal Foundation",
+    clientCompany: "Gamma Services",
+    currentStage: "Approved for Deployment",
+    assignedManager: "Rohan",
+    assignedTeamLeader: "Isha",
+    frontendDeveloper: "Developer 1 - Frontend",
+    backendDeveloper: "Developer 2 - Backend",
+    testingDeveloper: "Developer 3 - Testing / QA",
+    productionReadinessDeveloper: "Developer 4 - Production Readiness",
+    managerApprovalStatus: "Approved by manager",
+    deploymentApprovalStatus: "Approved placeholder",
+    riskLevel: "Low",
+    deadline: "Placeholder deadline",
+    activeStep: 9
+  }
+];
+
+const pendingManagerApprovals = projectAssignments.filter(assignment => assignment.currentStage === "Waiting Manager Approval");
+const productionReadinessCompleted = projectAssignments.filter(assignment => ["Waiting Manager Approval", "Approved for Deployment", "Deployed"].includes(assignment.currentStage));
 
 const tableSections: TableSection[] = [
   {
@@ -253,6 +357,84 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
                   <strong>{step}</strong>
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section className="business-section assignment-control-section" id="project-assignment-control">
+            <div className="business-section-heading">
+              <span>Static mock workflow data. No assignment persistence or deployment action is connected.</span>
+              <h2>Project Assignment Control</h2>
+            </div>
+            <div className="role-boundary-notice">
+              <strong>Role boundary</strong>
+              <p>Only authorized internal Shrinika Technologies admins, managers, team leaders, and delivery members can access assignment workflows.</p>
+            </div>
+            <div className="assignment-status-strip" aria-label="Mock assignment statuses">
+              {assignmentStatusBadges.map(status => <span className="assignment-status-badge" key={status}>{status}</span>)}
+            </div>
+            <div className="assignment-card-grid">
+              {projectAssignments.map(assignment => (
+                <article className="assignment-control-card" key={assignment.projectName}>
+                  <div className="assignment-card-header">
+                    <div>
+                      <span>{assignment.clientCompany}</span>
+                      <h3>{assignment.projectName}</h3>
+                    </div>
+                    <div className={`assignment-risk ${assignment.riskLevel.toLowerCase()}`}>{assignment.riskLevel} risk</div>
+                  </div>
+                  <div className="assignment-current-stage">
+                    <span>Current stage</span>
+                    <strong>{assignment.currentStage}</strong>
+                    <small>{assignment.deadline}</small>
+                  </div>
+                  <div className="assignment-detail-grid">
+                    <div><span>Assigned Manager</span><strong>{assignment.assignedManager}</strong></div>
+                    <div><span>Assigned Team Leader</span><strong>{assignment.assignedTeamLeader}</strong></div>
+                    <div><span>Frontend Developer</span><strong>{assignment.frontendDeveloper}</strong></div>
+                    <div><span>Backend Developer</span><strong>{assignment.backendDeveloper}</strong></div>
+                    <div><span>Testing / QA Developer</span><strong>{assignment.testingDeveloper}</strong></div>
+                    <div><span>Final Production Readiness Developer</span><strong>{assignment.productionReadinessDeveloper}</strong></div>
+                    <div><span>Manager final approval</span><strong>{assignment.managerApprovalStatus}</strong></div>
+                    <div><span>Deployment approval</span><strong>{assignment.deploymentApprovalStatus}</strong></div>
+                  </div>
+                  <div className="assignment-tracker" aria-label={`${assignment.projectName} workflow tracker`}>
+                    {assignmentWorkflowSteps.map((step, index) => {
+                      const stepNumber = index + 1;
+                      const state = stepNumber < assignment.activeStep ? "complete" : stepNumber === assignment.activeStep ? "active" : "pending";
+                      return (
+                        <div className={`assignment-tracker-step ${state}`} key={step}>
+                          <span>{stepNumber}</span>
+                          <strong>{step}</strong>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="manager-approval-panel">
+              <div className="business-section-heading">
+                <span>Manager approval panel</span>
+                <h2>Final Approval Control</h2>
+              </div>
+              <div className="approval-panel-grid">
+                <article>
+                  <span>Pending manager approvals</span>
+                  <strong>{pendingManagerApprovals.length}</strong>
+                  {pendingManagerApprovals.map(assignment => <small key={assignment.projectName}>{assignment.projectName}</small>)}
+                </article>
+                <article>
+                  <span>Production readiness completed</span>
+                  <strong>{productionReadinessCompleted.length}</strong>
+                  {productionReadinessCompleted.map(assignment => <small key={assignment.projectName}>{assignment.projectName}</small>)}
+                </article>
+                <article>
+                  <span>Deployment approval</span>
+                  <strong>Placeholder only</strong>
+                  <button type="button" disabled>Approve deployment</button>
+                  <small>Final deployment approval must be given by the Manager.</small>
+                </article>
+              </div>
             </div>
           </section>
 
