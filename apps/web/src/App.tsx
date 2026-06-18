@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { BusinessControlCentre } from "./BusinessControlCentre";
 import { getProjectManagementActions } from "./project-management.js";
 
 type Project = { id: string; name: string; rootPath: string; status?: string };
@@ -88,11 +89,12 @@ export function App() {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
   };
+  if (path === "/business-control-centre" || path === "/admin") return <BusinessControlCentre navigate={navigate} />;
   if (path.startsWith("/media-studio")) return <MediaStudio path={path} navigate={navigate} />;
-  return <DeveloperWorkspace />;
+  return <DeveloperWorkspace navigate={navigate} />;
 }
 
-function DeveloperWorkspace() {
+function DeveloperWorkspace({ navigate }: { navigate: (path: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [manageableProjects, setManageableProjects] = useState<ManagedProject[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -579,7 +581,7 @@ function DeveloperWorkspace() {
         {projects.length ? <select value={projectId} onChange={event => selectProject(event.target.value)}>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select> : <span className="muted">No project registered</span>}
         {selectedProject && <span className={`project-status ${(selectedProject.status ?? "ACTIVE").toLowerCase()}`}>{selectedProject.status ?? "ACTIVE"}</span>}
       </div>
-      <div className="top-actions"><span className="status-dot"/> API {providerStatus?.status ?? "connected"}<label className="theme-select">Theme<select value={theme} onChange={event=>setTheme(event.target.value as AppTheme)} aria-label="App Studio theme">{APP_THEME_OPTIONS.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}</select></label><select defaultValue="guided" aria-label="App Studio mode"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div>
+      <div className="top-actions"><button className="top-link" onClick={()=>navigate("/business-control-centre")}>Business Control Centre</button><span className="status-dot"/> API {providerStatus?.status ?? "connected"}<label className="theme-select">Theme<select value={theme} onChange={event=>setTheme(event.target.value as AppTheme)} aria-label="App Studio theme">{APP_THEME_OPTIONS.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}</select></label><select defaultValue="guided" aria-label="App Studio mode"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div>
     </header>
     <div className="workspace-grid app-dashboard-grid">
       <aside className="sidebar app-sidebar">
