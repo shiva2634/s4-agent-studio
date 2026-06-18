@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { MediaStudioError } from "./media-studio.js";
+import { taskAssignmentHistory } from "./specialist-orchestration.js";
 
 export type TaskRoundStatus =
   | "PLANNING"
@@ -134,6 +135,7 @@ export type TaskContextSummary = {
   approvedDecisions: Array<{ id: string; actionType: string; status: string; summary: string; decidedAt: string | null }>;
   checkFailures: Array<{ executionId: string; status: string; checkResultsJson: string | null; error: string | null; createdAt: string }>;
   priorProposals: Array<{ id: string; roundNumber: number; filePath: string; operation: string; status: string; reason: string }>;
+  assignments: ReturnType<typeof taskAssignmentHistory>;
 };
 
 export type TaskRoundInput = {
@@ -328,12 +330,14 @@ export function buildTaskContext(db: Database.Database, taskId: string) {
     })),
     approvedDecisions: approvals.map((approval) => ({ id: approval.id, actionType: approval.actionType, status: approval.status, summary: approval.summary, decidedAt: approval.decidedAt })),
     checkFailures: checkFailures.map((execution) => ({ executionId: execution.id, status: execution.status, checkResultsJson: execution.checkResultsJson, error: execution.error, createdAt: execution.createdAt })),
-    priorProposals
+    priorProposals,
+    assignments: taskAssignmentHistory(db, taskId)
   } satisfies TaskContextSummary;
 }
 
 export function listTaskHistory(db: Database.Database, taskId: string) {
   const state = getTaskState(db, taskId);
+  const assignments = taskAssignmentHistory(db, taskId);
   return {
     task: {
       id: state.task.id,
@@ -350,7 +354,10 @@ export function listTaskHistory(db: Database.Database, taskId: string) {
       currentRoundNumber: state.latestRound?.roundNumber ?? null,
       currentRoundStatus: state.latestRound?.status ?? null,
       recoveryAvailable: state.recoveryAvailable,
-      recoveryStatus: state.latestRound?.recoveryStatus ?? (state.latestExecution?.status === "APPLYING" ? "INTERRUPTED" : state.latestExecution?.status === "ROLLED_BACK" ? "RECOVERED" : null)
+      recoveryStatus: state.latestRound?.recoveryStatus ?? (state.latestExecution?.status === "APPLYING" ? "INTERRUPTED" : state.latestExecution?.status === "ROLLED_BACK" ? "RECOVERED" : null),
+      coordinatorPlan: safePlan(state.task.planJson),
+      assignmentCount: assignments.length,
+      nextRequiredActionDetail: nextActionDetail(state.nextRequiredAction, assignments)
     },
     rounds: state.rounds.map((round) => ({
       id: round.id,
@@ -371,8 +378,26 @@ export function listTaskHistory(db: Database.Database, taskId: string) {
       proposals: round.proposals.map((proposal) => ({ id: proposal.id, filePath: proposal.filePath, operation: proposal.operation, status: proposal.status, reason: proposal.reason, createdAt: proposal.createdAt, updatedAt: proposal.updatedAt })),
       approvals: round.approvals.map((approval) => ({ id: approval.id, actionType: approval.actionType, summary: approval.summary, status: approval.status, riskLevel: approval.riskLevel, createdAt: approval.createdAt, decidedAt: approval.decidedAt, decisionNote: approval.decisionNote })),
       executions: round.executions.map((execution) => ({ id: execution.id, status: execution.status, checkResultsJson: execution.checkResultsJson, error: execution.error, createdAt: execution.createdAt, updatedAt: execution.updatedAt }))
-    }))
+    })),
+    assignments
   };
+}
+
+function safePlan(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function nextActionDetail(nextRequiredAction: string, assignments: ReturnType<typeof taskAssignmentHistory>) {
+  const blocked = assignments.filter((assignment) => assignment.status === "BLOCKED" || assignment.conflictState === "CONFLICT");
+  if (blocked.length) return `Review ${blocked.length} blocked specialist assignment(s) before applying proposals.`;
+  const pending = assignments.filter((assignment) => assignment.status === "PENDING" || assignment.status === "READY" || assignment.status === "RETRY_REQUIRED");
+  if (pending.length) return `Resolve ${pending.length} specialist assignment(s), then ${nextRequiredAction.replaceAll("_", " ").toLowerCase()}.`;
+  return nextRequiredAction.replaceAll("_", " ");
 }
 
 export function summarizeTaskState(db: Database.Database, taskId: string) {

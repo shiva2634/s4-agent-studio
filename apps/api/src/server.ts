@@ -27,6 +27,7 @@ import { externalProviderStatusResponse, loadLtxConfig, loadOviConfig, testExter
 import { listGenerationStatusHistory } from "./media-generation-history.js";
 import { MediaGenerationWorker, getGenerationJob, loadGenerationWorkerConfig } from "./media-generation-worker.js";
 import { buildTaskContext, createTaskRound, getCurrentTaskRound, listTaskHistory, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
+import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments, listSpecialistAgents, reassignTaskAssignment, updateAssignmentLifecycle, type SpecialistAssignmentAction } from "./specialist-orchestration.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -45,6 +46,21 @@ const mediaProviderTasks = ["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"] as const;
 function audit(eventType: string, summary: string, values: { projectId?: string; taskId?: string; agentId?: string; payload?: unknown } = {}) {
   db.prepare(`INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, summary, values.payload ? JSON.stringify(values.payload) : null, now());
+}
+
+function parsePayload(value: string) {
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function createSpecialistApproval(input: { taskId: string; taskRoundId: string | null; actionType: string; summary: string; payload: unknown; riskLevel: string; timestamp: string }) {
+  const approvalId = nanoid();
+  db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(approvalId, input.taskId, input.taskRoundId, input.actionType, input.summary, JSON.stringify(input.payload), input.riskLevel, "PENDING", input.timestamp);
+  return approvalId;
 }
 
 const generationWorker = new MediaGenerationWorker(db, audit, loadGenerationWorkerConfig());
@@ -69,8 +85,12 @@ app.get("/api/bootstrap", async () => ({
   product: "App Studio",
   projects: listActiveProjects(db),
   manageableProjects: listManageableProjects(db),
-  agents: db.prepare("SELECT id,name,role,purpose,status,project_id AS projectId FROM agents ORDER BY created_at").all(),
+  agents: db.prepare("SELECT id,name,role,purpose,instructions,status,project_id AS projectId,capabilities_json AS capabilitiesJson,allowed_tools_json AS allowedToolsJson FROM agents ORDER BY created_at").all(),
   pendingApprovals: db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status='PENDING'").get()
+}));
+
+app.get("/api/specialist-agents", async (request: any) => ({
+  agents: listSpecialistAgents(db, typeof request.query?.projectId === "string" ? request.query.projectId : null)
 }));
 
 app.get("/api/media/providers", async () => ({ providers: mediaProviderRegistry }));
@@ -1301,17 +1321,33 @@ app.post("/api/chat", async (request, reply) => {
           throw error;
         }
         mutationPlan.proposals = insertedProposals;
+        const assignments = decomposeSpecialistAssignments(db, {
+          taskId,
+          taskRoundId: taskRound.id,
+          projectId: project.id,
+          planSummary: mutationPlan.summary,
+          planSteps: mutationPlan.steps,
+          proposals: insertedProposals.map((proposal) => ({ ...proposal, taskRoundId: taskRound.id, agentId: null })),
+          riskLevel: analysis.riskLevel,
+          now: timestamp,
+          audit
+        });
+        const ownership = attachSpecialistProposalOwnership(db, { taskId, taskRoundId: taskRound.id, now: timestamp });
+        const specialistRiskLevel = assignments.some((assignment) => assignment.role === "DATABASE") ? "high" : analysis.riskLevel;
+        const specialistPlan = { ...mutationPlan, specialistAssignments: assignments.map((assignment) => ({ id: assignment.id, role: assignment.role, status: assignment.status, priority: assignment.priority, riskLevel: assignment.riskLevel })), proposalOwnership: ownership };
         db.prepare("UPDATE tasks SET plan_json=?,updated_at=? WHERE id=?").run(JSON.stringify({ ...mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), timestamp, taskId);
+        db.prepare("UPDATE tasks SET risk_level=?,plan_json=?,updated_at=? WHERE id=?").run(specialistRiskLevel, JSON.stringify({ ...specialistPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), timestamp, taskId);
         const approvalId = nanoid();
         db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-          .run(approvalId, taskId, taskRound.id, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), analysis.riskLevel, "PENDING", timestamp);
+          .run(approvalId, taskId, taskRound.id, "CHANGE_PROPOSAL", `Approve generated proposals for: ${mutationPlan.summary}`, JSON.stringify({ plan: specialistPlan, provider: { provider: providerConfig.provider, model: providerConfig.model } }), specialistRiskLevel, "PENDING", timestamp);
         updateTaskRound(db, taskRound.id, { status: "AWAITING_APPROVAL", proposalCount: insertedProposals.length, nextRequiredAction: "APPROVE_PROPOSALS", now: timestamp });
         const responseText = [
           `I inspected ${project.name} and generated code proposals for review.`,
           "",
           `Provider: ${providerConfig.provider}`,
           `Model: ${providerConfig.model}`,
-          `Risk level: ${analysis.riskLevel}`,
+          `Risk level: ${specialistRiskLevel}`,
+          `Specialist assignments: ${assignments.length}`,
           "Approval required: Yes.",
           "No files were modified.",
           "",
@@ -1323,8 +1359,8 @@ app.post("/api/chat", async (request, reply) => {
         ].join("\n");
         db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
           .run(nanoid(), conversationId, "agent", responseText, now());
-        audit("CODE_PROPOSAL_CREATED", `Code proposals created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, provider: providerConfig.provider, model: providerConfig.model, proposalCount: insertedProposals.length } });
-        return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: true, plan: mutationPlan, nextStep: "AWAITING_APPROVAL" };
+        audit("CODE_PROPOSAL_CREATED", `Code proposals created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: specialistRiskLevel, provider: providerConfig.provider, model: providerConfig.model, proposalCount: insertedProposals.length, assignmentCount: assignments.length } });
+        return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: specialistRiskLevel, approvalRequired: true, plan: specialistPlan, nextStep: "AWAITING_APPROVAL" };
       } catch (error) {
         const sanitizedError = sanitizeProviderError(error);
         const failedPlan = { ...mutationPlan, providerError: sanitizedError };
@@ -1341,15 +1377,28 @@ app.post("/api/chat", async (request, reply) => {
 
     db.prepare("UPDATE tasks SET title=?,objective=?,status=?,risk_level=?,plan_json=?,acceptance_criteria=?,rollback_plan=?,updated_at=? WHERE id=?")
       .run(mutationPlan.summary, parsed.data.message, "AWAITING_APPROVAL", analysis.riskLevel, JSON.stringify(mutationPlan), mutationPlan.acceptanceCriteria.join("\n"), mutationPlan.rollback, timestamp, taskId);
+    const assignments = decomposeSpecialistAssignments(db, {
+      taskId,
+      taskRoundId: taskRound.id,
+      projectId: project.id,
+      planSummary: mutationPlan.summary,
+      planSteps: mutationPlan.steps,
+      proposals: [],
+      riskLevel: analysis.riskLevel,
+      now: timestamp,
+      audit
+    });
+    const planningPlan = { ...mutationPlan, specialistAssignments: assignments.map((assignment) => ({ id: assignment.id, role: assignment.role, status: assignment.status, priority: assignment.priority, riskLevel: assignment.riskLevel })) };
+    db.prepare("UPDATE tasks SET plan_json=?,updated_at=? WHERE id=?").run(JSON.stringify(planningPlan), timestamp, taskId);
     const approvalId = nanoid();
     db.prepare(`INSERT INTO approvals (id,task_id,task_round_id,action_type,summary,payload_json,risk_level,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-      .run(approvalId, taskId, taskRound.id, "PLANNING_ONLY", `Approve plan for: ${mutationPlan.summary}`, JSON.stringify({ plan: mutationPlan }), analysis.riskLevel, "PENDING", timestamp);
+      .run(approvalId, taskId, taskRound.id, "PLANNING_ONLY", `Approve plan for: ${mutationPlan.summary}`, JSON.stringify({ plan: planningPlan }), analysis.riskLevel, "PENDING", timestamp);
     updateTaskRound(db, taskRound.id, { status: "AWAITING_APPROVAL", nextRequiredAction: "APPROVE_PROPOSALS", now: timestamp });
     const responseText = formatPlanningOnlyResponse(project.name, analysis);
     db.prepare("INSERT INTO messages (id,conversation_id,sender,content,created_at) VALUES (?,?,?,?,?)")
       .run(nanoid(), conversationId, "agent", responseText, now());
-    audit(planningOnly ? "PLANNING_ONLY_CREATED" : "CODE_PROPOSAL_PENDING_PROVIDER", `Plan created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, inspection, analysis } });
-    return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: analysis.approvalRequired, plan: mutationPlan, nextStep: "AWAITING_APPROVAL" };
+    audit(planningOnly ? "PLANNING_ONLY_CREATED" : "CODE_PROPOSAL_PENDING_PROVIDER", `Plan created for ${project.name}`, { projectId: project.id, taskId, agentId: "developer", payload: { riskLevel: analysis.riskLevel, inspection, analysis, assignmentCount: assignments.length } });
+    return { conversationId, taskId, approvalId, agent: "Developer Agent", response: responseText, riskLevel: analysis.riskLevel, approvalRequired: analysis.approvalRequired, plan: planningPlan, nextStep: "AWAITING_APPROVAL" };
   }
 
   const plan = createPlan(parsed.data.message, riskLevel);
@@ -1431,8 +1480,11 @@ app.post("/api/proposals", async (request, reply) => {
 });
 
 app.get("/api/tasks/:taskId/proposals", async (request: any) => ({
-  proposals: db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,file_path AS filePath,operation,original_content_hash AS originalContentHash,reason,status,created_at AS createdAt,updated_at AS updatedAt
-    FROM change_proposals WHERE task_id=? ORDER BY created_at`).all(request.params.taskId)
+  proposals: db.prepare(`SELECT cp.id,cp.task_id AS taskId,cp.task_round_id AS taskRoundId,cp.agent_id AS agentId,cp.task_assignment_id AS taskAssignmentId,cp.file_path AS filePath,cp.operation,cp.original_content_hash AS originalContentHash,cp.reason,cp.status,cp.created_at AS createdAt,cp.updated_at AS updatedAt,a.name AS ownerName,a.role AS ownerRole,ta.conflict_state AS conflictState
+    FROM change_proposals cp
+    LEFT JOIN agents a ON a.id=cp.agent_id
+    LEFT JOIN task_assignments ta ON ta.id=cp.task_assignment_id
+    WHERE cp.task_id=? ORDER BY cp.created_at`).all(request.params.taskId)
 }));
 
 app.get("/api/proposals/:proposalId/diff", async (request: any, reply) => {
@@ -1510,6 +1562,64 @@ app.post("/api/proposals/:proposalId/reject", async (request: any, reply) => {
   return { status: "REJECTED" };
 });
 
+app.post("/api/task-assignments/:assignmentId/:action", async (request: any, reply) => {
+  const action = request.params.action as SpecialistAssignmentAction;
+  if (!["pause", "resume", "retry", "cancel"].includes(action)) return reply.status(400).send({ error: "Invalid assignment action" });
+  const assignment = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,role,risk_level AS riskLevel FROM task_assignments WHERE id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string } | undefined;
+  if (!assignment) return reply.status(404).send({ error: "Specialist assignment not found" });
+  const timestamp = now();
+  if (action === "retry" && (assignment.riskLevel === "high" || assignment.riskLevel === "critical")) {
+    const approvalId = createSpecialistApproval({
+      taskId: assignment.taskId,
+      taskRoundId: assignment.taskRoundId,
+      actionType: "SPECIALIST_RETRY",
+      summary: `Approve retry for ${assignment.role} specialist assignment`,
+      payload: { assignmentAction: { type: "retry", assignmentId: assignment.id } },
+      riskLevel: assignment.riskLevel,
+      timestamp
+    });
+    audit("SPECIALIST_RETRY_APPROVAL_REQUIRED", `Retry requires approval for ${assignment.role}`, { taskId: assignment.taskId, payload: { assignmentId: assignment.id, approvalId } });
+    return reply.status(202).send({ approvalRequired: true, approvalId });
+  }
+  try {
+    const updated = updateAssignmentLifecycle(db, assignment.id, action, timestamp);
+    audit("SPECIALIST_ASSIGNMENT_LIFECYCLE", `${assignment.role} assignment ${action}`, { taskId: assignment.taskId, payload: { assignmentId: assignment.id, action } });
+    return { assignment: updated };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to update specialist assignment" });
+  }
+});
+
+app.post("/api/task-assignments/:assignmentId/reassign", async (request: any, reply) => {
+  const specialistAgentId = typeof request.body?.specialistAgentId === "string" ? request.body.specialistAgentId : "";
+  if (!specialistAgentId) return reply.status(400).send({ error: "Replacement specialist agent is required" });
+  const assignment = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,role,risk_level AS riskLevel FROM task_assignments WHERE id=?").get(request.params.assignmentId) as { id: string; taskId: string; taskRoundId: string | null; role: string; riskLevel: string } | undefined;
+  if (!assignment) return reply.status(404).send({ error: "Specialist assignment not found" });
+  const timestamp = now();
+  if (assignment.riskLevel === "high" || assignment.riskLevel === "critical") {
+    const approvalId = createSpecialistApproval({
+      taskId: assignment.taskId,
+      taskRoundId: assignment.taskRoundId,
+      actionType: "SPECIALIST_REASSIGN",
+      summary: `Approve reassignment for ${assignment.role} specialist assignment`,
+      payload: { assignmentAction: { type: "reassign", assignmentId: assignment.id, specialistAgentId } },
+      riskLevel: assignment.riskLevel,
+      timestamp
+    });
+    audit("SPECIALIST_REASSIGN_APPROVAL_REQUIRED", `Reassignment requires approval for ${assignment.role}`, { taskId: assignment.taskId, payload: { assignmentId: assignment.id, approvalId, specialistAgentId } });
+    return reply.status(202).send({ approvalRequired: true, approvalId });
+  }
+  try {
+    const updated = reassignTaskAssignment(db, assignment.id, specialistAgentId, timestamp);
+    audit("SPECIALIST_ASSIGNMENT_REASSIGNED", `${assignment.role} assignment reassigned`, { taskId: assignment.taskId, payload: { assignmentId: assignment.id, specialistAgentId } });
+    return { assignment: updated };
+  } catch (error) {
+    if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to reassign specialist assignment" });
+  }
+});
+
 app.post("/api/tasks/:taskId/proposals/apply", async (request: any, reply) => {
   try {
     return await applyTaskProposals(db, request.params.taskId, now(), audit);
@@ -1521,13 +1631,30 @@ app.post("/api/tasks/:taskId/proposals/apply", async (request: any, reply) => {
 app.post("/api/approvals/:approvalId/decision", async (request: any, reply) => {
   const parsed = ApprovalActionSchema.safeParse(request.body);
   if (!parsed.success) return reply.status(400).send({ error: "Invalid decision" });
-  const approval = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
+  const approval = db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId,action_type AS actionType,payload_json AS payloadJson,status FROM approvals WHERE id=?").get(request.params.approvalId) as any;
   if (!approval) return reply.status(404).send({ error: "Approval not found" });
   if (approval.status !== "PENDING") return reply.status(409).send({ error: "Approval is already decided" });
   const decidedAt = now();
   db.prepare("UPDATE approvals SET status=?,decision_note=?,decided_at=? WHERE id=?").run(parsed.data.decision, parsed.data.note ?? null, decidedAt, approval.id);
-  db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
-  if (approval.taskRoundId) {
+  const payload = parsePayload(approval.payloadJson);
+  const assignmentAction = payload.assignmentAction as { type?: string; assignmentId?: string; specialistAgentId?: string } | undefined;
+  if (assignmentAction?.assignmentId && parsed.data.decision === "APPROVED") {
+    try {
+      if (assignmentAction.type === "retry") {
+        updateAssignmentLifecycle(db, assignmentAction.assignmentId, "retry", decidedAt);
+        audit("SPECIALIST_ASSIGNMENT_RETRY_APPROVED", "Specialist assignment retry approved", { taskId: approval.taskId, payload: { assignmentId: assignmentAction.assignmentId, approvalId: approval.id } });
+      } else if (assignmentAction.type === "reassign" && assignmentAction.specialistAgentId) {
+        reassignTaskAssignment(db, assignmentAction.assignmentId, assignmentAction.specialistAgentId, decidedAt);
+        audit("SPECIALIST_ASSIGNMENT_REASSIGN_APPROVED", "Specialist assignment reassignment approved", { taskId: approval.taskId, payload: { assignmentId: assignmentAction.assignmentId, specialistAgentId: assignmentAction.specialistAgentId, approvalId: approval.id } });
+      }
+    } catch (error) {
+      if (error instanceof MediaStudioError) return reply.status(error.statusCode).send({ error: error.message });
+      return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to apply specialist approval" });
+    }
+  }
+  const specialistApproval = typeof approval.actionType === "string" && approval.actionType.startsWith("SPECIALIST_");
+  if (!specialistApproval) db.prepare("UPDATE tasks SET status=?,updated_at=? WHERE id=?").run(parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED", decidedAt, approval.taskId);
+  if (approval.taskRoundId && !specialistApproval) {
     updateTaskRound(db, approval.taskRoundId, {
       status: parsed.data.decision === "APPROVED" ? "APPROVED" : "CANCELLED",
       nextRequiredAction: parsed.data.decision === "APPROVED" ? "APPLY_PROPOSALS" : "CONTINUE_CHAT",

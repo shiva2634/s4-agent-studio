@@ -13,6 +13,8 @@ export type ChangeProposalInput = {
   id: string;
   taskId: string;
   taskRoundId?: string | null;
+  agentId?: string | null;
+  taskAssignmentId?: string | null;
   projectId: string;
   rootPath: string;
   filePath: string;
@@ -96,6 +98,45 @@ function hasColumn(db: Database.Database, table: string, column: string) {
   return columns.some((entry) => entry.name === column);
 }
 
+function hasTable(db: Database.Database, table: string) {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) as { name: string } | undefined;
+  return Boolean(row);
+}
+
+function isTestPath(filePath: string) {
+  const normalized = filePath.toLowerCase();
+  return normalized.includes("__tests__") || normalized.includes("/test/") || normalized.includes("/tests/") || normalized.includes(".test.") || normalized.includes(".spec.") || normalized.endsWith(".test.ts") || normalized.endsWith(".spec.ts") || normalized.endsWith(".test.tsx") || normalized.endsWith(".spec.tsx");
+}
+
+function weakensTests(input: ChangeProposalInput) {
+  if (!isTestPath(input.filePath)) return false;
+  if (input.operation === "DELETE") return true;
+  const proposed = input.proposedContent ?? "";
+  return /\b(?:describe|it|test)\.skip\b/.test(proposed) || /\b(?:xit|xtest)\s*\(/.test(proposed) || /\.only\s*\(/.test(proposed) || /skip(?:ped)?\s+test/i.test(proposed) || /disable(?:d)?\s+test/i.test(proposed);
+}
+
+function assertProposalAuthorAllowed(db: Database.Database, input: ChangeProposalInput) {
+  if (hasTable(db, "projects")) {
+    const projectHasStatus = hasColumn(db, "projects", "status");
+    const project = projectHasStatus
+      ? db.prepare("SELECT id,status FROM projects WHERE id=?").get(input.projectId) as { id: string; status: string } | undefined
+      : db.prepare("SELECT id FROM projects WHERE id=?").get(input.projectId) as { id: string } | undefined;
+    if (projectHasStatus && project && "status" in project && project.status !== "ACTIVE") throw new Error("Specialists may inspect and propose only for active registered projects");
+  }
+  if (input.agentId && hasTable(db, "agents")) {
+    const agent = db.prepare("SELECT id,role,project_id AS projectId,status FROM agents WHERE id=?").get(input.agentId) as { id: string; role: string; projectId: string | null; status: string } | undefined;
+    if (!agent || agent.status !== "ACTIVE") throw new Error("Specialist agent is not active");
+    if (agent.projectId && agent.projectId !== input.projectId) throw new Error("Specialist agent is not assigned to this project");
+    if (agent.role === "SECURITY_REVIEW" || agent.role === "FINAL_REVIEW") throw new Error("Read-only specialist agents cannot generate mutation proposals");
+  }
+  if (weakensTests(input) && hasTable(db, "tasks") && hasColumn(db, "tasks", "risk_level")) {
+    const task = db.prepare("SELECT risk_level AS riskLevel FROM tasks WHERE id=?").get(input.taskId) as { riskLevel: string } | undefined;
+    if (task && task.riskLevel !== "high" && task.riskLevel !== "critical") {
+      throw new Error("Weakening, deleting, skipping, or disabling tests requires explicit high-risk approval");
+    }
+  }
+}
+
 export async function buildProposal(input: ChangeProposalInput) {
   const { absolutePath, relativePath } = validateProposalPath(input.rootPath, input.filePath);
   const originalContent = await readExistingContent(input.rootPath, relativePath);
@@ -120,10 +161,12 @@ export async function buildProposal(input: ChangeProposalInput) {
 }
 
 export async function insertProposal(db: Database.Database, input: ChangeProposalInput) {
+  assertProposalAuthorAllowed(db, input);
   const proposal = await buildProposal(input);
   const hasTaskRoundColumn = hasColumn(db, "change_proposals", "task_round_id");
+  const hasAgentColumn = hasColumn(db, "change_proposals", "agent_id");
   const duplicate = hasTaskRoundColumn
-    ? db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,file_path AS filePath,operation,original_content_hash AS originalContentHash,proposed_content AS proposedContent,reason,status,created_at AS createdAt,updated_at AS updatedAt
+    ? db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,agent_id AS agentId,file_path AS filePath,operation,original_content_hash AS originalContentHash,proposed_content AS proposedContent,reason,status,created_at AS createdAt,updated_at AS updatedAt
       FROM change_proposals WHERE task_id=? AND COALESCE(task_round_id,'')=COALESCE(?, '') AND file_path=? AND operation=? AND COALESCE(original_content_hash,'')=COALESCE(?, '') AND COALESCE(proposed_content,'')=COALESCE(?, '')
       ORDER BY created_at DESC LIMIT 1`).get(proposal.taskId, input.taskRoundId ?? null, proposal.filePath, proposal.operation, proposal.originalContentHash, proposal.proposedContent) as { id: string } | undefined
     : db.prepare(`SELECT id,task_id AS taskId,file_path AS filePath,operation,original_content_hash AS originalContentHash,proposed_content AS proposedContent,reason,status,created_at AS createdAt,updated_at AS updatedAt
@@ -131,10 +174,17 @@ export async function insertProposal(db: Database.Database, input: ChangeProposa
       ORDER BY created_at DESC LIMIT 1`).get(proposal.taskId, proposal.filePath, proposal.operation, proposal.originalContentHash, proposal.proposedContent) as { id: string } | undefined;
   if (duplicate) return { ...proposal, id: duplicate.id };
   if (hasTaskRoundColumn) {
-    db.prepare(`INSERT INTO change_proposals
-      (id,task_id,task_round_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(proposal.id, proposal.taskId, input.taskRoundId ?? null, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+    if (hasAgentColumn && hasColumn(db, "change_proposals", "task_assignment_id")) {
+      db.prepare(`INSERT INTO change_proposals
+        (id,task_id,task_round_id,agent_id,task_assignment_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(proposal.id, proposal.taskId, input.taskRoundId ?? null, input.agentId ?? null, input.taskAssignmentId ?? null, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+    } else {
+      db.prepare(`INSERT INTO change_proposals
+        (id,task_id,task_round_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(proposal.id, proposal.taskId, input.taskRoundId ?? null, proposal.projectId, proposal.filePath, proposal.operation, proposal.originalContent, proposal.originalContentHash, proposal.proposedContent, proposal.unifiedDiff, proposal.reason, "PENDING", proposal.now, proposal.now);
+    }
   } else {
     db.prepare(`INSERT INTO change_proposals
       (id,task_id,project_id,file_path,operation,original_content,original_content_hash,proposed_content,unified_diff,reason,status,created_at,updated_at)

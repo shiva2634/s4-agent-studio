@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { hashContent, validateProposalPath, type AuditWriter } from "./change-proposals.js";
 import { runAvailableChecks, runProjectCheck, type CheckAction } from "./command-runner.js";
 import { getCurrentTaskRound, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
+import { classifyProposalRole, detectProposalConflicts } from "./specialist-orchestration.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +22,9 @@ type ProposalRow = {
   originalContentHash: string | null;
   proposedContent: string | null;
   status: string;
+  createdAt: string;
+  taskAssignmentId?: string | null;
+  agentId?: string | null;
 };
 
 type TaskRow = { id: string; projectId: string; rootPath: string; status: string };
@@ -111,31 +115,52 @@ function getTask(db: Database.Database, taskId: string) {
 
 function getApprovedApproval(db: Database.Database, task: TaskRow, taskRoundId?: string | null) {
   const hasTaskRoundColumn = hasColumn(db, "approvals", "task_round_id");
+  const hasRiskColumn = hasColumn(db, "approvals", "risk_level");
+  const columns = `id,task_id AS taskId${hasTaskRoundColumn ? ",task_round_id AS taskRoundId" : ""},${hasRiskColumn ? "risk_level AS riskLevel," : "'low' AS riskLevel,"}decided_at AS decidedAt,created_at AS createdAt`;
   if (taskRoundId && hasTaskRoundColumn) {
-    return db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId FROM approvals WHERE task_id=? AND task_round_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1").get(task.id, taskRoundId) as { id: string; taskId: string; taskRoundId: string | null } | undefined;
+    return db.prepare(`SELECT ${columns} FROM approvals WHERE task_id=? AND task_round_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1`).get(task.id, taskRoundId) as { id: string; taskId: string; taskRoundId?: string | null; riskLevel: string; decidedAt: string | null; createdAt: string } | undefined;
   }
-  return hasTaskRoundColumn
-    ? db.prepare("SELECT id,task_id AS taskId,task_round_id AS taskRoundId FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1").get(task.id) as { id: string; taskId: string; taskRoundId: string | null } | undefined
-    : db.prepare("SELECT id,task_id AS taskId FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY created_at DESC LIMIT 1").get(task.id) as { id: string; taskId: string; taskRoundId: string | null } | undefined;
+  return db.prepare(`SELECT ${columns} FROM approvals WHERE task_id=? AND status='APPROVED' ORDER BY decided_at DESC,created_at DESC LIMIT 1`).get(task.id) as { id: string; taskId: string; taskRoundId?: string | null; riskLevel: string; decidedAt: string | null; createdAt: string } | undefined;
 }
 
 function getApprovedProposals(db: Database.Database, task: TaskRow, taskRoundId?: string | null) {
   const hasTaskRoundColumn = hasColumn(db, "change_proposals", "task_round_id");
+  const ownershipColumns = `${hasColumn(db, "change_proposals", "agent_id") ? ",agent_id AS agentId" : ""}${hasColumn(db, "change_proposals", "task_assignment_id") ? ",task_assignment_id AS taskAssignmentId" : ""}`;
   if (taskRoundId && hasTaskRoundColumn) {
     return db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,project_id AS projectId,file_path AS filePath,operation,
-    original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+    original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status,created_at AS createdAt${ownershipColumns}
     FROM change_proposals WHERE task_id=? AND task_round_id=? AND status='APPROVED' ORDER BY created_at`)
       .all(task.id, taskRoundId) as ProposalRow[];
   }
   return hasTaskRoundColumn
     ? db.prepare(`SELECT id,task_id AS taskId,task_round_id AS taskRoundId,project_id AS projectId,file_path AS filePath,operation,
-      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status,created_at AS createdAt${ownershipColumns}
       FROM change_proposals WHERE task_id=? AND project_id=? AND status='APPROVED' ORDER BY created_at`)
       .all(task.id, task.projectId) as ProposalRow[]
     : db.prepare(`SELECT id,task_id AS taskId,project_id AS projectId,file_path AS filePath,operation,
-      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status
+      original_content AS originalContent,original_content_hash AS originalContentHash,proposed_content AS proposedContent,status,created_at AS createdAt${ownershipColumns}
       FROM change_proposals WHERE task_id=? AND project_id=? AND status='APPROVED' ORDER BY created_at`)
       .all(task.id, task.projectId) as ProposalRow[];
+}
+
+function isWeakeningTestProposal(proposal: ProposalRow) {
+  const normalized = proposal.filePath.toLowerCase().replaceAll("\\", "/");
+  const isTest = normalized.includes("__tests__") || normalized.includes("/test/") || normalized.includes("/tests/") || normalized.includes(".test.") || normalized.includes(".spec.");
+  if (!isTest) return false;
+  if (proposal.operation === "DELETE") return true;
+  const proposed = proposal.proposedContent ?? "";
+  return /\b(?:describe|it|test)\.skip\b/.test(proposed) || /\b(?:xit|xtest)\s*\(/.test(proposed) || /\.only\s*\(/.test(proposed) || /skip(?:ped)?\s+test/i.test(proposed) || /disable(?:d)?\s+test/i.test(proposed);
+}
+
+function assertApprovalCoversProposals(approval: { riskLevel: string; decidedAt: string | null; createdAt: string }, proposals: ProposalRow[]) {
+  const approvalTime = approval.decidedAt ?? approval.createdAt;
+  if (approvalTime && proposals.some((proposal) => proposal.createdAt > approvalTime)) {
+    throw new Error("Fresh human approval is required for this proposal round");
+  }
+  const needsHighRisk = proposals.some((proposal) => classifyProposalRole(proposal.filePath, proposal.operation) === "DATABASE" || isWeakeningTestProposal(proposal));
+  if (needsHighRisk && approval.riskLevel !== "high" && approval.riskLevel !== "critical") {
+    throw new Error("High-risk human approval is required before applying database or test-weakening proposals");
+  }
 }
 
 export async function applyTaskProposals(db: Database.Database, taskId: string, now: string, audit: AuditWriter) {
@@ -144,8 +169,11 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
   const currentRound = getCurrentTaskRound(db, taskId);
   const approval = getApprovedApproval(db, task, currentRound?.id ?? null);
   if (!approval) throw new Error("An approved task approval is required before applying proposals");
+  const conflicts = detectProposalConflicts(db, task.id, currentRound?.id ?? null);
+  if (conflicts.length) throw new Error(`Conflicting specialist proposals require review before apply: ${conflicts.map((conflict) => conflict.filePath).join(", ")}`);
   const proposals = getApprovedProposals(db, task, currentRound?.id ?? null);
   if (!proposals.length) throw new Error("No approved proposals to apply");
+  assertApprovalCoversProposals(approval, proposals);
   if (proposals.some((proposal) => proposal.operation === "DELETE")) throw new Error("DELETE proposals are disabled");
 
   const staged = [];
