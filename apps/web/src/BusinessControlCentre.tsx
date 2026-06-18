@@ -43,6 +43,29 @@ type ProjectAssignment = {
   activeStep: number;
 };
 
+type WorkspaceOverview = {
+  name: string;
+  type: string;
+  accessLevel: string;
+  ownerAdmin: string;
+  status: string;
+  notes: string;
+};
+
+type DepartmentOverview = {
+  name: string;
+  purpose: string;
+  responsibleRole: string;
+  employeeCount: string;
+  activeWork: string;
+  status: string;
+};
+
+type RoleHierarchyItem = {
+  role: string;
+  description: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -55,6 +78,10 @@ const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
 
 const sidebarSections = [
   { id: "company-dashboard", label: "Company Dashboard" },
+  { id: "company-workspaces", label: "Company / Workspaces" },
+  { id: "department-structure", label: "Department Structure" },
+  { id: "role-hierarchy", label: "Role Hierarchy" },
+  { id: "access-boundary", label: "Access Boundary" },
   { id: "project-operations", label: "Project Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control" },
   { id: "client-management", label: "Client Management" },
@@ -68,14 +95,114 @@ const sidebarSections = [
 ];
 
 const dashboardCards: MetricCard[] = [
-  { label: "Active projects", value: "12", note: "Placeholder portfolio count", tone: "neutral" },
-  { label: "Active clients", value: "8", note: "Mock client visibility only", tone: "neutral" },
-  { label: "Pending approvals", value: "5", note: "Awaiting internal review", tone: "warning" },
-  { label: "Open support tickets", value: "17", note: "Sample support queue", tone: "warning" },
+  { label: "Parent company", value: "Shrinika Technologies", note: "Owner organization", tone: "neutral" },
+  { label: "Main Admin / Owner", value: "Shrinika", note: "Primary admin authority", tone: "success" },
+  { label: "Internal operator", value: "Shiva", note: "Founder builder / system guardian", tone: "success" },
+  { label: "Internal companies/workspaces", value: "5", note: "Placeholder structure count", tone: "neutral" },
+  { label: "Active departments", value: "11", note: "Mock department map", tone: "neutral" },
   { label: "Active employees", value: "42", note: "HRMS placeholder", tone: "success" },
-  { label: "Running agent tasks", value: "9", note: "Agent operations sample", tone: "neutral" },
-  { label: "System health", value: "Stable", note: "No live probes connected", tone: "success" },
-  { label: "Monthly revenue", value: "TBD", note: "Finance placeholder only", tone: "neutral" }
+  { label: "Active managers", value: "3", note: "Mock manager count", tone: "neutral" },
+  { label: "Active team leaders", value: "3", note: "Mock team leader count", tone: "neutral" },
+  { label: "Active developers", value: "12", note: "Frontend, backend, QA, readiness", tone: "neutral" },
+  { label: "Active projects", value: "12", note: "Placeholder portfolio count", tone: "neutral" },
+  { label: "Pending manager approvals", value: "1", note: "Static approval workload", tone: "warning" },
+  { label: "System health", value: "Stable", note: "No live probes connected", tone: "success" }
+];
+
+const workspaceOverview: WorkspaceOverview[] = [
+  {
+    name: "Shrinika Technologies",
+    type: "Parent Company",
+    accessLevel: "Owner / internal governance",
+    ownerAdmin: "Shrinika",
+    status: "Active",
+    notes: "Top-level company identity and admin authority."
+  },
+  {
+    name: "Shrinika Automation Studio",
+    type: "Internal Automation Workspace",
+    accessLevel: "Internal employees and approved operators",
+    ownerAdmin: "Shrinika",
+    status: "Active placeholder",
+    notes: "Combined internal workspace for multiple company operations."
+  },
+  {
+    name: "App Studio",
+    type: "Internal Development Workspace",
+    accessLevel: "Internal builders only",
+    ownerAdmin: "Shrinika / Shiva",
+    status: "Active",
+    notes: "Developer Agent, sandbox, Git workflow, readiness, missions, and scaffold controls."
+  },
+  {
+    name: "Business Control Centre",
+    type: "Internal Operations Workspace",
+    accessLevel: "Internal admins, managers, and operators",
+    ownerAdmin: "Shrinika",
+    status: "MVP shell",
+    notes: "Administrative dashboard for operations, approvals, roles, departments, and audit visibility."
+  },
+  {
+    name: "Customer Website & Support",
+    type: "External customer-facing system placeholder",
+    accessLevel: "Customers, leads, visitors, support contacts",
+    ownerAdmin: "Future customer systems team",
+    status: "Separate surface",
+    notes: "Customers use this path, email, support, and future Client Portal instead of App Studio."
+  }
+];
+
+const departments: DepartmentOverview[] = [
+  { name: "Admin & Governance", purpose: "Company controls, permissions, policy, and admin oversight.", responsibleRole: "Main Admin / Company Admin", employeeCount: "Placeholder", activeWork: "Governance queue", status: "Active" },
+  { name: "Project Operations", purpose: "Project intake, assignment, handoffs, and delivery visibility.", responsibleRole: "Manager", employeeCount: "Placeholder", activeWork: "12 projects", status: "Active" },
+  { name: "Development", purpose: "Frontend and backend implementation delivery.", responsibleRole: "Team Leader", employeeCount: "Placeholder", activeWork: "Development tasks", status: "Active" },
+  { name: "Testing / QA", purpose: "Validation, bug review, regression checks, and release confidence.", responsibleRole: "Testing / QA Developer", employeeCount: "Placeholder", activeWork: "QA queue", status: "Active" },
+  { name: "Production Readiness", purpose: "Final readiness, deployment preparation, and release checks.", responsibleRole: "Final Production Readiness Developer", employeeCount: "Placeholder", activeWork: "Readiness reviews", status: "Active" },
+  { name: "HR", purpose: "Employee records, staffing, roles, and internal people operations.", responsibleRole: "HR", employeeCount: "Placeholder", activeWork: "HRMS placeholder", status: "Placeholder" },
+  { name: "Finance & Billing", purpose: "Billing visibility, payment follow-ups, and finance oversight.", responsibleRole: "Finance Admin", employeeCount: "Placeholder", activeWork: "Finance placeholders", status: "Placeholder" },
+  { name: "Customer Support", purpose: "Support queue handling through customer-facing channels.", responsibleRole: "Support Manager", employeeCount: "Placeholder", activeWork: "17 tickets", status: "Active placeholder" },
+  { name: "Agent Operations", purpose: "Agent task visibility, coordination, and operational supervision.", responsibleRole: "Agent Supervisor", employeeCount: "Placeholder", activeWork: "9 agent tasks", status: "Active" },
+  { name: "Audit & Compliance", purpose: "Audit trails, compliance review, and sensitive action visibility.", responsibleRole: "Auditor", employeeCount: "Placeholder", activeWork: "Audit review", status: "Active" },
+  { name: "Cloud / Deployment", purpose: "Deployment approvals, cloud readiness, and release operations.", responsibleRole: "Manager / Cloud Operator", employeeCount: "Placeholder", activeWork: "Deployment placeholders", status: "Future integration" }
+];
+
+const roleHierarchy: RoleHierarchyItem[] = [
+  { role: "Shrinika", description: "Main Admin / Owner Admin" },
+  { role: "Shiva", description: "Founder Builder / Internal Operator / System Guardian" },
+  { role: "Company Admin", description: "Company-level administration and governance" },
+  { role: "Manager", description: "Project ownership, approvals, and final deployment approval" },
+  { role: "Team Leader", description: "Delivery coordination and team execution" },
+  { role: "Frontend Developer", description: "Frontend implementation" },
+  { role: "Backend Developer", description: "Backend implementation" },
+  { role: "Testing / QA Developer", description: "Testing, QA, and release validation" },
+  { role: "Final Production Readiness Developer", description: "Final production readiness checks" },
+  { role: "HR", description: "Employee and people operations" },
+  { role: "Finance Admin", description: "Finance and billing oversight" },
+  { role: "Support Manager", description: "Customer support operations" },
+  { role: "Agent Supervisor", description: "Agent operations supervision" },
+  { role: "Auditor", description: "Audit and compliance review" }
+];
+
+const internalAccessRoles = [
+  "Shrinika",
+  "Shiva",
+  "Admin",
+  "Manager",
+  "Team Leader",
+  "Developers",
+  "HR",
+  "Finance",
+  "Support",
+  "Agent Operators",
+  "Auditors"
+];
+
+const externalAccessRoles = [
+  "Customers",
+  "Leads",
+  "Website visitors",
+  "Client Portal users",
+  "Email/support contacts"
 ];
 
 const workflowSteps = [
@@ -343,6 +470,94 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
                 <p>{card.note}</p>
               </article>
             ))}
+          </section>
+
+          <section className="business-section" id="company-workspaces">
+            <div className="business-section-heading">
+              <span>Mock company and workspace map. Customer systems remain separate from internal tools.</span>
+              <h2>Company / Workspace Overview</h2>
+            </div>
+            <div className="workspace-overview-grid">
+              {workspaceOverview.map(workspace => (
+                <article className="workspace-overview-card" key={workspace.name}>
+                  <div>
+                    <span>{workspace.type}</span>
+                    <h3>{workspace.name}</h3>
+                  </div>
+                  <div className="workspace-meta-grid">
+                    <div><span>Access level</span><strong>{workspace.accessLevel}</strong></div>
+                    <div><span>Owner/admin</span><strong>{workspace.ownerAdmin}</strong></div>
+                    <div><span>Status</span><strong>{workspace.status}</strong></div>
+                  </div>
+                  <p>{workspace.notes}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="business-section" id="department-structure">
+            <div className="business-section-heading">
+              <span>Static department map for Shrinika Technologies operations.</span>
+              <h2>Department Structure</h2>
+            </div>
+            <div className="department-grid">
+              {departments.map(department => (
+                <article className="department-card" key={department.name}>
+                  <div className="department-card-header">
+                    <h3>{department.name}</h3>
+                    <span>{department.status}</span>
+                  </div>
+                  <p>{department.purpose}</p>
+                  <div className="department-meta-grid">
+                    <div><span>Responsible role</span><strong>{department.responsibleRole}</strong></div>
+                    <div><span>Employees</span><strong>{department.employeeCount}</strong></div>
+                    <div><span>Active projects/tasks</span><strong>{department.activeWork}</strong></div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="business-section" id="role-hierarchy">
+            <div className="business-section-heading">
+              <span>Internal authority and delivery ladder.</span>
+              <h2>Role Hierarchy</h2>
+            </div>
+            <div className="role-ladder" aria-label="Shrinika Technologies internal role hierarchy">
+              {roleHierarchy.map((item, index) => (
+                <article className="role-ladder-item" key={item.role}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <div>
+                    <strong>{item.role}</strong>
+                    <small>{item.description}</small>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="business-section access-boundary-section" id="access-boundary">
+            <div className="business-section-heading">
+              <span>Internal systems and customer-facing systems must stay separated.</span>
+              <h2>Access Boundary</h2>
+            </div>
+            <div className="access-boundary-grid">
+              <article className="access-list-card internal">
+                <span>Internal access</span>
+                <h3>Allowed internal roles</h3>
+                <div>{internalAccessRoles.map(role => <strong key={role}>{role}</strong>)}</div>
+              </article>
+              <article className="access-list-card external">
+                <span>External access</span>
+                <h3>Customer-facing roles and contacts</h3>
+                <div>{externalAccessRoles.map(role => <strong key={role}>{role}</strong>)}</div>
+              </article>
+              <article className="access-rule-card">
+                <span>Important rule</span>
+                <strong>Customers must not access App Studio or Business Control Centre.</strong>
+                <p>Customers, leads, website visitors, Client Portal users, and email/support contacts must use the separate customer website, email, support systems, and future Client Portal.</p>
+              </article>
+            </div>
           </section>
 
           <section className="business-section workflow-section">
