@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
 import { db } from "@s4/db";
-import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
+import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, CreateAgentSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
 import { createPlan } from "./planner.js";
 import { inspectProject } from "./project-inspection.js";
@@ -28,6 +28,7 @@ import { listGenerationStatusHistory } from "./media-generation-history.js";
 import { MediaGenerationWorker, getGenerationJob, loadGenerationWorkerConfig } from "./media-generation-worker.js";
 import { buildTaskContext, createTaskRound, getCurrentTaskRound, listTaskHistory, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 import { attachSpecialistProposalOwnership, decomposeSpecialistAssignments, listSpecialistAgents, reassignTaskAssignment, updateAssignmentLifecycle, type SpecialistAssignmentAction } from "./specialist-orchestration.js";
+import { ScaffoldError, createScaffoldJob, generateScaffoldProposals, getScaffoldJob, listScaffoldTemplates, previewScaffoldTemplate } from "./scaffold-engine.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -1127,6 +1128,81 @@ app.post("/api/projects", async (request, reply) => {
   } catch (error) {
     if (error instanceof ProjectRegistrationError) return reply.status(error.statusCode).send({ error: error.message });
     return reply.status(500).send({ error: "Unable to register project" });
+  }
+});
+
+app.get("/api/scaffold/templates", async () => ({
+  templates: listScaffoldTemplates(db).map((template) => ({
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    projectType: template.projectType,
+    defaultFolders: template.defaultFolders,
+    packageScripts: template.packageScripts,
+    recommendedSpecialistAgents: template.recommendedSpecialistAgents,
+    riskLevel: template.riskLevel,
+    allowedOperations: template.allowedOperations,
+    requiredApprovals: template.requiredApprovals,
+    starterFileCount: template.starterFiles.length,
+    isBuiltin: template.isBuiltin
+  }))
+}));
+
+app.get("/api/scaffold/templates/:templateId/preview", async (request: any, reply) => {
+  try {
+    return previewScaffoldTemplate(db, request.params.templateId);
+  } catch (error) {
+    if (error instanceof ScaffoldError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to preview scaffold template" });
+  }
+});
+
+app.post("/api/scaffold/jobs", async (request: any, reply) => {
+  const parsed = CreateScaffoldJobSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid scaffold job", details: parsed.error.flatten() });
+  try {
+    const job = createScaffoldJob(db, { id: nanoid(), ...parsed.data, now: now(), audit });
+    return reply.status(201).send({ job });
+  } catch (error) {
+    if (error instanceof ScaffoldError) {
+      audit("SCAFFOLD_BLOCKED", error.message, { payload: { request: parsed.data } });
+      return reply.status(error.statusCode).send({ error: error.message });
+    }
+    return reply.status(500).send({ error: "Unable to create scaffold job" });
+  }
+});
+
+app.post("/api/scaffold/jobs/:jobId/proposals", async (request: any, reply) => {
+  const parsed = GenerateScaffoldProposalsSchema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: "Invalid scaffold proposal request", details: parsed.error.flatten() });
+  try {
+    return { job: await generateScaffoldProposals(db, request.params.jobId, { now: now(), audit, planningOnly: parsed.data.planningOnly }) };
+  } catch (error) {
+    if (error instanceof ScaffoldError) {
+      audit("SCAFFOLD_BLOCKED", error.message, { payload: { jobId: request.params.jobId } });
+      return reply.status(error.statusCode).send({ error: error.message });
+    }
+    return reply.status(500).send({ error: "Unable to generate scaffold proposals" });
+  }
+});
+
+app.get("/api/scaffold/jobs/:jobId", async (request: any, reply) => {
+  try {
+    return { job: getScaffoldJob(db, request.params.jobId) };
+  } catch (error) {
+    if (error instanceof ScaffoldError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(500).send({ error: "Unable to load scaffold job" });
+  }
+});
+
+app.post("/api/scaffold/jobs/:jobId/apply", async (request: any, reply) => {
+  try {
+    const job = getScaffoldJob(db, request.params.jobId);
+    const result = await applyTaskProposals(db, job.taskId, now(), audit);
+    return { job: getScaffoldJob(db, request.params.jobId), result };
+  } catch (error) {
+    if (error instanceof ScaffoldError) return reply.status(error.statusCode).send({ error: error.message });
+    return reply.status(409).send({ error: error instanceof Error ? error.message : "Unable to apply scaffold proposals" });
   }
 });
 

@@ -137,6 +137,69 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(task_round_id) REFERENCES task_rounds(id) ON DELETE CASCADE,
       FOREIGN KEY(specialist_agent_id) REFERENCES agents(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS workspace_root_config (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      root_path TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','DISABLED')),
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS scaffold_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      project_type TEXT NOT NULL,
+      default_folders_json TEXT NOT NULL DEFAULT '[]',
+      package_scripts_json TEXT NOT NULL DEFAULT '{}',
+      starter_files_json TEXT NOT NULL DEFAULT '[]',
+      recommended_specialist_agents_json TEXT NOT NULL DEFAULT '[]',
+      risk_level TEXT NOT NULL DEFAULT 'medium',
+      allowed_operations_json TEXT NOT NULL DEFAULT '["CREATE"]',
+      required_approvals_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      is_builtin INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS scaffold_jobs (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      task_round_id TEXT,
+      project_id TEXT NOT NULL,
+      target_project_id TEXT,
+      target_project_name TEXT NOT NULL,
+      target_root_path TEXT NOT NULL,
+      workspace_root_id TEXT,
+      mode TEXT NOT NULL CHECK(mode IN ('CREATE_PROJECT','ADD_MODULE')),
+      status TEXT NOT NULL,
+      risk_level TEXT NOT NULL,
+      planning_only INTEGER NOT NULL DEFAULT 0,
+      approval_id TEXT,
+      plan_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(template_id) REFERENCES scaffold_templates(id),
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_id) REFERENCES projects(id),
+      FOREIGN KEY(target_project_id) REFERENCES projects(id)
+    );
+    CREATE TABLE IF NOT EXISTS scaffold_files (
+      id TEXT PRIMARY KEY,
+      scaffold_job_id TEXT NOT NULL,
+      proposal_id TEXT,
+      relative_path TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      content_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'PROPOSED',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(scaffold_job_id) REFERENCES scaffold_jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY(proposal_id) REFERENCES change_proposals(id) ON DELETE SET NULL
+    );
     CREATE TABLE IF NOT EXISTS task_executions (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -412,6 +475,8 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_applied_file_changes_task ON applied_file_changes(task_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_task_assignments_task ON task_assignments(task_id, status, priority, created_at);
+    CREATE INDEX IF NOT EXISTS idx_scaffold_jobs_task ON scaffold_jobs(task_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_scaffold_files_job ON scaffold_files(scaffold_job_id, status);
     CREATE TABLE IF NOT EXISTS task_rounds (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -632,6 +697,66 @@ export function initializeDatabaseOn(database: Database.Database) {
     )`);
   }
 
+  database.exec(`CREATE TABLE IF NOT EXISTS workspace_root_config (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','DISABLED')),
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scaffold_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    project_type TEXT NOT NULL,
+    default_folders_json TEXT NOT NULL DEFAULT '[]',
+    package_scripts_json TEXT NOT NULL DEFAULT '{}',
+    starter_files_json TEXT NOT NULL DEFAULT '[]',
+    recommended_specialist_agents_json TEXT NOT NULL DEFAULT '[]',
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    allowed_operations_json TEXT NOT NULL DEFAULT '["CREATE"]',
+    required_approvals_json TEXT NOT NULL DEFAULT '[]',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scaffold_jobs (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_round_id TEXT,
+    project_id TEXT NOT NULL,
+    target_project_id TEXT,
+    target_project_name TEXT NOT NULL,
+    target_root_path TEXT NOT NULL,
+    workspace_root_id TEXT,
+    mode TEXT NOT NULL CHECK(mode IN ('CREATE_PROJECT','ADD_MODULE')),
+    status TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    planning_only INTEGER NOT NULL DEFAULT 0,
+    approval_id TEXT,
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+  )`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scaffold_files (
+    id TEXT PRIMARY KEY,
+    scaffold_job_id TEXT NOT NULL,
+    proposal_id TEXT,
+    relative_path TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    content_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'PROPOSED',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  database.exec("CREATE INDEX IF NOT EXISTS idx_scaffold_jobs_task ON scaffold_jobs(task_id, status, created_at DESC)");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_scaffold_files_job ON scaffold_files(scaffold_job_id, status)");
+
   database.exec(`CREATE TABLE IF NOT EXISTS media_scene_versions (
     id TEXT PRIMARY KEY,
     media_project_id TEXT NOT NULL,
@@ -750,6 +875,7 @@ export function initializeDatabaseOn(database: Database.Database) {
 
   const now = new Date().toISOString();
   seedMediaTemplates(database, now);
+  seedScaffoldTemplates(database, now);
   const insertAgent = database.prepare(`INSERT OR IGNORE INTO agents
     (id,name,role,purpose,instructions,status,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`);
@@ -776,6 +902,125 @@ function seedMediaTemplates(db: Database.Database, timestamp: string) {
     { title: "Explanation", durationSeconds: 20, prompt: "Explain the mechanism clearly with neutral visuals.", dialogue: "Focus on the factors, tradeoffs, and assumptions that matter.", assetLabel: "Explanation visual" },
     { title: "Risk reminder", durationSeconds: 15, prompt: "Close with visible disclaimer and conservative next step.", dialogue: "Review the risks, verify details, and make the choice that fits your situation.", assetLabel: "Disclaimer visual" }
   ]), "Use neutral language. Do not imply guaranteed outcomes. Include disclaimer text in prompt and render.", JSON.stringify({ placement: "lower-third", style: "plain-high-contrast" }), JSON.stringify({ musicVolume: 0.15, narrationVolume: 1, duckMusicUnderNarration: true }), JSON.stringify({ requireDisclaimer: true, disclaimerMode: "required" }), 1, timestamp, timestamp);
+}
+
+function seedScaffoldTemplates(db: Database.Database, timestamp: string) {
+  const workspaceRoot = path.resolve(process.env.S4_WORKSPACE_ROOT ?? "./workspaces");
+  db.prepare(`INSERT OR IGNORE INTO workspace_root_config (id,name,root_path,status,is_default,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?)`).run("default-local-workspace", "Local development workspace", workspaceRoot, "ACTIVE", 1, timestamp, timestamp);
+  const insert = db.prepare(`INSERT OR REPLACE INTO scaffold_templates
+    (id,name,description,project_type,default_folders_json,package_scripts_json,starter_files_json,recommended_specialist_agents_json,risk_level,allowed_operations_json,required_approvals_json,metadata_json,is_builtin,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const templates = [
+    {
+      id: "nextjs-web-app",
+      name: "Next.js web app",
+      description: "Governed Next.js application scaffold with app router, TypeScript, lint, and test placeholders.",
+      projectType: "web",
+      folders: ["app", "src/components", "tests"],
+      scripts: { dev: "next dev", build: "next build", typecheck: "tsc --noEmit", lint: "next lint", test: "node --test tests/*.test.mjs" },
+      specialists: ["PRODUCT_PLANNER", "FRONTEND", "TESTING_SPECIALIST", "SECURITY_REVIEW", "FINAL_REVIEW"],
+      risk: "medium",
+      files: [
+        ["package.json", packageJson("nextjs-web-app", { dev: "next dev", build: "next build", typecheck: "tsc --noEmit", lint: "next lint", test: "node --test tests/*.test.mjs" }, { next: "latest", react: "latest", "react-dom": "latest" }, { typescript: "latest" })],
+        ["tsconfig.json", JSON.stringify({ compilerOptions: { target: "ES2022", lib: ["dom", "dom.iterable", "es2022"], strict: true, noEmit: true, module: "ESNext", moduleResolution: "Bundler", jsx: "preserve" }, include: ["next-env.d.ts", "**/*.ts", "**/*.tsx"] }, null, 2) + "\n"],
+        ["app/page.tsx", "export default function Home() {\n  return <main><h1>App Studio Project</h1><p>Governed Next.js scaffold.</p></main>;\n}\n"],
+        ["app/layout.tsx", "import './globals.css';\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return <html lang=\"en\"><body>{children}</body></html>;\n}\n"],
+        ["app/globals.css", "body { margin: 0; font-family: system-ui, sans-serif; }\nmain { min-height: 100vh; display: grid; place-items: center; }\n"],
+        ["tests/smoke.test.mjs", "import assert from 'node:assert/strict';\n\nassert.equal(1, 1);\n"]
+      ]
+    },
+    {
+      id: "node-fastify-api",
+      name: "Node/Fastify API",
+      description: "Strict TypeScript Fastify API scaffold with health route and node:test smoke test.",
+      projectType: "api",
+      folders: ["src", "tests"],
+      scripts: { dev: "tsx watch src/server.ts", build: "tsc -p tsconfig.json", typecheck: "tsc -p tsconfig.json --noEmit", test: "node --import tsx --test \"tests/**/*.test.ts\"" },
+      specialists: ["PRODUCT_PLANNER", "BACKEND", "TESTING_SPECIALIST", "SECURITY_REVIEW", "FINAL_REVIEW"],
+      risk: "medium",
+      files: [
+        ["package.json", packageJson("fastify-api", { dev: "tsx watch src/server.ts", build: "tsc -p tsconfig.json", typecheck: "tsc -p tsconfig.json --noEmit", test: "node --import tsx --test \"tests/**/*.test.ts\"" }, { fastify: "latest" }, { tsx: "latest", typescript: "latest" })],
+        ["tsconfig.json", JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, outDir: "dist" }, include: ["src", "tests"] }, null, 2) + "\n"],
+        ["src/server.ts", "import Fastify from 'fastify';\n\nexport function buildServer() {\n  const app = Fastify({ logger: true });\n  app.get('/health', async () => ({ status: 'ok' }));\n  return app;\n}\n\nif (process.env.NODE_ENV !== 'test') {\n  const app = buildServer();\n  await app.listen({ host: '127.0.0.1', port: Number(process.env.PORT ?? 3000) });\n}\n"],
+        ["tests/health.test.ts", "import assert from 'node:assert/strict';\nimport { test } from 'node:test';\nimport { buildServer } from '../src/server.js';\n\ntest('health route', async () => {\n  const app = buildServer();\n  const response = await app.inject('/health');\n  assert.equal(response.statusCode, 200);\n  await app.close();\n});\n"]
+      ]
+    },
+    {
+      id: "full-stack-web-api",
+      name: "Full-stack app with web + API",
+      description: "Workspace scaffold with separate web and API packages.",
+      projectType: "full-stack",
+      folders: ["apps/web/src", "apps/api/src", "tests"],
+      scripts: { dev: "npm run dev -w web", build: "npm run build --workspaces --if-present", typecheck: "npm run typecheck --workspaces --if-present", test: "npm run test --workspaces --if-present" },
+      specialists: ["PRODUCT_PLANNER", "FRONTEND", "BACKEND", "TESTING_SPECIALIST", "SECURITY_REVIEW", "FINAL_REVIEW"],
+      risk: "high",
+      files: [
+        ["package.json", packageJson("full-stack-app", { dev: "npm run dev -w web", build: "npm run build --workspaces --if-present", typecheck: "npm run typecheck --workspaces --if-present", test: "npm run test --workspaces --if-present" }, {}, {}, { workspaces: ["apps/*"] })],
+        ["apps/web/package.json", packageJson("web", { dev: "vite --host 127.0.0.1", build: "tsc --noEmit", typecheck: "tsc --noEmit", test: "node --test ../../tests/*.test.mjs" }, { "@vitejs/plugin-react": "latest", vite: "latest", react: "latest", "react-dom": "latest" }, { typescript: "latest" })],
+        ["apps/web/src/main.tsx", "import React from 'react';\nimport { createRoot } from 'react-dom/client';\n\ncreateRoot(document.getElementById('root')!).render(<main>Full-stack web app</main>);\n"],
+        ["apps/web/index.html", "<div id=\"root\"></div><script type=\"module\" src=\"/src/main.tsx\"></script>\n"],
+        ["apps/api/package.json", packageJson("api", { dev: "tsx watch src/server.ts", build: "tsc --noEmit", typecheck: "tsc --noEmit", test: "node --test ../../tests/*.test.mjs" }, { fastify: "latest" }, { tsx: "latest", typescript: "latest" })],
+        ["apps/api/src/server.ts", "import Fastify from 'fastify';\n\nexport const api = Fastify();\napi.get('/health', async () => ({ status: 'ok' }));\n"],
+        ["tests/smoke.test.mjs", "import assert from 'node:assert/strict';\nassert.ok(true);\n"]
+      ]
+    },
+    {
+      id: "static-landing-page",
+      name: "Static landing page",
+      description: "No-build static site scaffold with accessible HTML, CSS, and smoke test.",
+      projectType: "static",
+      folders: ["src", "tests"],
+      scripts: { typecheck: "node tests/smoke.mjs", test: "node tests/smoke.mjs", build: "node tests/smoke.mjs" },
+      specialists: ["PRODUCT_PLANNER", "FRONTEND", "TESTING_SPECIALIST", "FINAL_REVIEW"],
+      risk: "low",
+      files: [
+        ["package.json", packageJson("static-landing-page", { typecheck: "node tests/smoke.mjs", test: "node tests/smoke.mjs", build: "node tests/smoke.mjs" })],
+        ["index.html", "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><link rel=\"stylesheet\" href=\"src/styles.css\"><title>Landing Page</title></head><body><main><h1>Landing Page</h1><p>Governed static scaffold.</p></main></body></html>\n"],
+        ["src/styles.css", "body { margin: 0; font-family: system-ui, sans-serif; color: #111827; background: #f8fafc; }\nmain { min-height: 100vh; display: grid; place-items: center; text-align: center; }\n"],
+        ["tests/smoke.mjs", "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nassert.ok(fs.existsSync('index.html'));\n"]
+      ]
+    },
+    {
+      id: "internal-tool-admin",
+      name: "Internal tool/admin app",
+      description: "Operational admin UI scaffold with restrained styling and test placeholder.",
+      projectType: "internal-tool",
+      folders: ["src", "tests"],
+      scripts: { dev: "vite --host 127.0.0.1", build: "tsc --noEmit", typecheck: "tsc --noEmit", test: "node --test tests/*.test.mjs" },
+      specialists: ["PRODUCT_PLANNER", "FRONTEND", "BACKEND", "TESTING_SPECIALIST", "SECURITY_REVIEW", "FINAL_REVIEW"],
+      risk: "medium",
+      files: [
+        ["package.json", packageJson("internal-admin-tool", { dev: "vite --host 127.0.0.1", build: "tsc --noEmit", typecheck: "tsc --noEmit", test: "node --test tests/*.test.mjs" }, { "@vitejs/plugin-react": "latest", vite: "latest", react: "latest", "react-dom": "latest" }, { typescript: "latest" })],
+        ["index.html", "<div id=\"root\"></div><script type=\"module\" src=\"/src/main.tsx\"></script>\n"],
+        ["src/main.tsx", "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport './styles.css';\n\ncreateRoot(document.getElementById('root')!).render(<main><h1>Admin Workspace</h1><section><button>Review Queue</button><button>Run Report</button></section></main>);\n"],
+        ["src/styles.css", "body { margin: 0; font-family: system-ui, sans-serif; background: #f4f4f5; color: #18181b; }\nmain { padding: 24px; }\nsection { display: flex; gap: 8px; }\nbutton { border: 1px solid #a1a1aa; background: white; padding: 8px 10px; }\n"],
+        ["tests/smoke.test.mjs", "import assert from 'node:assert/strict';\nassert.equal(1, 1);\n"]
+      ]
+    },
+    {
+      id: "empty-governed-project",
+      name: "Empty governed project",
+      description: "Minimal governed workspace with README and package scripts ready for future proposals.",
+      projectType: "empty",
+      folders: [],
+      scripts: { typecheck: "node tests/smoke.mjs", test: "node tests/smoke.mjs" },
+      specialists: ["PRODUCT_PLANNER", "SECURITY_REVIEW", "FINAL_REVIEW"],
+      risk: "low",
+      files: [
+        ["package.json", packageJson("empty-governed-project", { typecheck: "node tests/smoke.mjs", test: "node tests/smoke.mjs" })],
+        ["README.md", "# Governed Project\n\nCreated through App Studio scaffold proposals.\n"],
+        ["tests/smoke.mjs", "import assert from 'node:assert/strict';\nassert.ok(true);\n"]
+      ]
+    }
+  ];
+  for (const template of templates) {
+    insert.run(template.id, template.name, template.description, template.projectType, JSON.stringify(template.folders), JSON.stringify(template.scripts), JSON.stringify(template.files.map(([filePath, content]) => ({ path: filePath, content }))), JSON.stringify(template.specialists), template.risk, JSON.stringify(["CREATE"]), JSON.stringify(["HUMAN_APPROVAL"]), JSON.stringify({ version: 1 }), 1, timestamp, timestamp);
+  }
+}
+
+function packageJson(name: string, scripts: Record<string, string>, dependencies: Record<string, string> = {}, devDependencies: Record<string, string> = {}, extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ name, version: "0.1.0", private: true, type: "module", scripts, dependencies, devDependencies, ...extra }, null, 2) + "\n";
 }
 
 function seedSpecialistAgents(database: Database.Database, timestamp: string) {

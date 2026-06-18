@@ -160,6 +160,11 @@ function hasTaskRoundsTable(db: Database.Database) {
   return Boolean(row);
 }
 
+function hasTable(db: Database.Database, table: string) {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) as { name: string } | undefined;
+  return Boolean(row);
+}
+
 function getTaskRounds(db: Database.Database, taskId: string) {
   if (!hasTaskRoundsTable(db)) return [];
   return db.prepare(`SELECT id,task_id AS taskId,round_number AS roundNumber,round_type AS roundType,status,summary,user_message AS userMessage,context_json AS contextJson,approval_required AS approvalRequired,proposal_count AS proposalCount,next_required_action AS nextRequiredAction,check_results_json AS checkResultsJson,failure_summary AS failureSummary,recovery_available AS recoveryAvailable,recovery_status AS recoveryStatus,recovery_outcome AS recoveryOutcome,created_at AS createdAt,updated_at AS updatedAt,completed_at AS completedAt
@@ -338,6 +343,7 @@ export function buildTaskContext(db: Database.Database, taskId: string) {
 export function listTaskHistory(db: Database.Database, taskId: string) {
   const state = getTaskState(db, taskId);
   const assignments = taskAssignmentHistory(db, taskId);
+  const scaffoldJob = scaffoldJobForTask(db, taskId);
   return {
     task: {
       id: state.task.id,
@@ -357,7 +363,8 @@ export function listTaskHistory(db: Database.Database, taskId: string) {
       recoveryStatus: state.latestRound?.recoveryStatus ?? (state.latestExecution?.status === "APPLYING" ? "INTERRUPTED" : state.latestExecution?.status === "ROLLED_BACK" ? "RECOVERED" : null),
       coordinatorPlan: safePlan(state.task.planJson),
       assignmentCount: assignments.length,
-      nextRequiredActionDetail: nextActionDetail(state.nextRequiredAction, assignments)
+      nextRequiredActionDetail: nextActionDetail(state.nextRequiredAction, assignments),
+      scaffoldJob
     },
     rounds: state.rounds.map((round) => ({
       id: round.id,
@@ -398,6 +405,17 @@ function nextActionDetail(nextRequiredAction: string, assignments: ReturnType<ty
   const pending = assignments.filter((assignment) => assignment.status === "PENDING" || assignment.status === "READY" || assignment.status === "RETRY_REQUIRED");
   if (pending.length) return `Resolve ${pending.length} specialist assignment(s), then ${nextRequiredAction.replaceAll("_", " ").toLowerCase()}.`;
   return nextRequiredAction.replaceAll("_", " ");
+}
+
+function scaffoldJobForTask(db: Database.Database, taskId: string) {
+  if (!hasTable(db, "scaffold_jobs")) return null;
+  const job = db.prepare(`SELECT id,template_id AS templateId,task_id AS taskId,project_id AS projectId,target_project_id AS targetProjectId,target_project_name AS targetProjectName,target_root_path AS targetRootPath,mode,status,risk_level AS riskLevel,planning_only AS planningOnly,approval_id AS approvalId,plan_json AS planJson,created_at AS createdAt,updated_at AS updatedAt,completed_at AS completedAt
+    FROM scaffold_jobs WHERE task_id=? ORDER BY created_at DESC LIMIT 1`).get(taskId) as any;
+  if (!job) return null;
+  const files = hasTable(db, "scaffold_files")
+    ? db.prepare("SELECT proposal_id AS proposalId,relative_path AS relativePath,operation,status FROM scaffold_files WHERE scaffold_job_id=? ORDER BY relative_path").all(job.id)
+    : [];
+  return { ...job, planningOnly: Boolean(job.planningOnly), plan: safePlan(job.planJson), files };
 }
 
 export function summarizeTaskState(db: Database.Database, taskId: string) {

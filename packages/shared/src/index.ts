@@ -11,6 +11,23 @@ export const CreateProjectSchema = z.object({
   rootPath: z.string().trim().min(1).max(500)
 });
 
+export const ScaffoldJobModeSchema = z.enum(["CREATE_PROJECT", "ADD_MODULE"]);
+
+export const CreateScaffoldJobSchema = z.object({
+  templateId: z.string().trim().min(1).max(120),
+  projectName: z.string().trim().min(2).max(100),
+  targetDirectoryName: z.string().trim().min(1).max(120).optional(),
+  workspaceRootId: z.string().trim().min(1).max(120).optional(),
+  mode: ScaffoldJobModeSchema.default("CREATE_PROJECT"),
+  existingProjectId: z.string().trim().min(1).optional(),
+  moduleName: z.string().trim().min(1).max(120).optional(),
+  planningOnly: z.boolean().optional()
+});
+
+export const GenerateScaffoldProposalsSchema = z.object({
+  planningOnly: z.boolean().optional()
+});
+
 export const ChatRequestSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1).optional(),
@@ -295,6 +312,9 @@ export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 export type RiskLevel = z.infer<typeof RiskLevelSchema>;
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 export type ProposalOperation = z.infer<typeof ProposalOperationSchema>;
+export type ScaffoldJobMode = z.infer<typeof ScaffoldJobModeSchema>;
+export type CreateScaffoldJob = z.infer<typeof CreateScaffoldJobSchema>;
+export type GenerateScaffoldProposals = z.infer<typeof GenerateScaffoldProposalsSchema>;
 export type CreateMediaProject = z.infer<typeof CreateMediaProjectSchema>;
 export type MediaChatMessage = z.infer<typeof MediaChatMessageSchema>;
 export type MediaSceneStatus = z.infer<typeof MediaSceneStatusSchema>;

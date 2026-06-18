@@ -92,6 +92,9 @@ function createLegacyTaskDb() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES ('project-legacy','Legacy Project','/tmp/legacy-task','ACTIVE','created','created');
+    INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,objective,status,risk_level,plan_json,created_at,updated_at)
+      VALUES ('task-legacy','project-legacy',NULL,'developer','Legacy Task','Preserve this row','PLANNING','low','{}','created','created');
   `);
   return db;
 }
@@ -172,6 +175,20 @@ describe("database initialization", () => {
       const roundColumns = db.prepare("PRAGMA table_info(task_rounds)").all() as Array<{ name: string }>;
       assert.ok(roundColumns.some((column) => column.name === "round_number"));
       assert.ok(roundColumns.some((column) => column.name === "next_required_action"));
+
+      const scaffoldJobColumns = db.prepare("PRAGMA table_info(scaffold_jobs)").all() as Array<{ name: string }>;
+      assert.ok(scaffoldJobColumns.some((column) => column.name === "target_root_path"));
+      assert.ok(scaffoldJobColumns.some((column) => column.name === "approval_id"));
+
+      const templateCount = db.prepare("SELECT COUNT(*) AS count FROM scaffold_templates").get() as { count: number };
+      assert.equal(templateCount.count, 6);
+
+      const workspaceRoot = db.prepare("SELECT status FROM workspace_root_config WHERE id='default-local-workspace'").get() as { status: string };
+      assert.equal(workspaceRoot.status, "ACTIVE");
+
+      const legacyTask = db.prepare("SELECT title,status FROM tasks WHERE id='task-legacy'").get() as { title: string; status: string };
+      assert.equal(legacyTask.title, "Legacy Task");
+      assert.equal(legacyTask.status, "PLANNING");
     } finally {
       db.close();
     }

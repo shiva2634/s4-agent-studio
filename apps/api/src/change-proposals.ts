@@ -103,6 +103,14 @@ function hasTable(db: Database.Database, table: string) {
   return Boolean(row);
 }
 
+function isReservedScaffoldTarget(db: Database.Database, input: ChangeProposalInput) {
+  if (!hasTable(db, "scaffold_jobs")) return false;
+  const row = db.prepare(`SELECT id FROM scaffold_jobs
+    WHERE task_id=? AND target_project_id=? AND mode='CREATE_PROJECT' AND status IN ('PLANNED','AWAITING_APPROVAL','PROPOSALS_GENERATED')
+    LIMIT 1`).get(input.taskId, input.projectId) as { id: string } | undefined;
+  return Boolean(row);
+}
+
 function isTestPath(filePath: string) {
   const normalized = filePath.toLowerCase();
   return normalized.includes("__tests__") || normalized.includes("/test/") || normalized.includes("/tests/") || normalized.includes(".test.") || normalized.includes(".spec.") || normalized.endsWith(".test.ts") || normalized.endsWith(".spec.ts") || normalized.endsWith(".test.tsx") || normalized.endsWith(".spec.tsx");
@@ -121,7 +129,7 @@ function assertProposalAuthorAllowed(db: Database.Database, input: ChangeProposa
     const project = projectHasStatus
       ? db.prepare("SELECT id,status FROM projects WHERE id=?").get(input.projectId) as { id: string; status: string } | undefined
       : db.prepare("SELECT id FROM projects WHERE id=?").get(input.projectId) as { id: string } | undefined;
-    if (projectHasStatus && project && "status" in project && project.status !== "ACTIVE") throw new Error("Specialists may inspect and propose only for active registered projects");
+    if (projectHasStatus && project && "status" in project && project.status !== "ACTIVE" && !isReservedScaffoldTarget(db, input)) throw new Error("Specialists may inspect and propose only for active registered projects");
   }
   if (input.agentId && hasTable(db, "agents")) {
     const agent = db.prepare("SELECT id,role,project_id AS projectId,status FROM agents WHERE id=?").get(input.agentId) as { id: string; role: string; projectId: string | null; status: string } | undefined;

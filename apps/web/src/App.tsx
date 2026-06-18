@@ -8,7 +8,7 @@ type Approval = { id: string; summary: string; riskLevel: string; status: string
 type Task = { id: string; projectId: string; title: string; status: string; riskLevel: string; projectName: string; attemptCount: number; correctionRounds: number; nextRequiredAction: string; currentRoundNumber: number | null; currentRoundStatus: string | null; recoveryAvailable: boolean };
 type TaskHistoryRound = { id: string; roundNumber: number; roundType: string; status: string; summary: string; userMessage: string; proposalCount: number; approvalRequired: boolean; nextRequiredAction: string; recoveryAvailable: boolean; recoveryStatus: string | null; recoveryOutcome: string | null; createdAt: string; updatedAt: string; completedAt: string | null; proposals: Array<{ id: string; filePath: string; operation: string; status: string; reason: string }>; approvals: Array<{ id: string; actionType: string; summary: string; status: string }>; executions: Array<{ id: string; status: string; checkResultsJson: string | null; error: string | null }> };
 type SpecialistAssignment = { id: string; taskId: string; taskRoundId: string | null; specialistAgentId: string; role: string; priority: number; status: string; attempts: number; completionOrder: number | null; conflictState: string; riskLevel: string; canMutate: 0 | 1; agent: { id: string; name: string; role: string } | null; dependencyAssignmentIds: string[]; output: { summary?: string; proposals?: Array<{ id: string; filePath: string; operation: string; reason: string }>; readOnly?: boolean; riskLevel?: string; tests?: string[]; rollbackGuidance?: string | null }; findings: { notes?: string[]; conflicts?: unknown[] }; reviewDecisions: Array<{ verdict?: string; notes?: string }>; conflicts: Array<{ filePath: string; proposalId: string; agentId: string | null }> };
-type TaskHistory = { task: { id: string; projectId: string; projectName: string; title: string; objective: string; status: string; riskLevel: string; conversationId: string | null; attemptCount: number; correctionRounds: number; nextRequiredAction: string; nextRequiredActionDetail?: string; currentRoundNumber: number | null; currentRoundStatus: string | null; recoveryAvailable: boolean; recoveryStatus: string | null; assignmentCount?: number; coordinatorPlan?: { steps?: string[]; specialistAssignments?: Array<{ id: string; role: string; status: string; priority: number; riskLevel: string }>; proposalOwnership?: unknown[] } }; rounds: TaskHistoryRound[]; assignments: SpecialistAssignment[] };
+type TaskHistory = { task: { id: string; projectId: string; projectName: string; title: string; objective: string; status: string; riskLevel: string; conversationId: string | null; attemptCount: number; correctionRounds: number; nextRequiredAction: string; nextRequiredActionDetail?: string; currentRoundNumber: number | null; currentRoundStatus: string | null; recoveryAvailable: boolean; recoveryStatus: string | null; assignmentCount?: number; coordinatorPlan?: { steps?: string[]; specialistAssignments?: Array<{ id: string; role: string; status: string; priority: number; riskLevel: string }>; proposalOwnership?: unknown[] }; scaffoldJob?: ScaffoldJob | null }; rounds: TaskHistoryRound[]; assignments: SpecialistAssignment[] };
 type Proposal = { id: string; taskId: string; filePath: string; operation: string; reason: string; status: string; agentId?: string | null; taskAssignmentId?: string | null; ownerName?: string | null; ownerRole?: string | null; conflictState?: string | null };
 type ProviderStatus = { configured: boolean; provider: string; baseUrlHostname: string; model: string; status: string; lastTestedAt: string | null; sanitizedError: string | null };
 type GitCheckpoint = { available: boolean; branch: string | null; head: string | null; checkpointRef: string | null; dirty: boolean; warning: string | null };
@@ -41,6 +41,8 @@ type MediaTemplate = { id: string; name: string; templateType: "PROMO"|"PRESENTE
 type FfmpegStatus = { available: boolean; ffmpegPath: string; ffprobePath: string; ffmpeg: { available: boolean }; ffprobe: { available: boolean } };
 type ComfyStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
 type LongCatStatus = { enabled: boolean; baseUrlHostname: string; timeoutMs: number; status?: string; lastTestedAt?: string; sanitizedError?: string };
+type ScaffoldTemplate = { id: string; name: string; description: string; projectType: string; defaultFolders: string[]; packageScripts: Record<string,string>; recommendedSpecialistAgents: string[]; riskLevel: string; allowedOperations: string[]; requiredApprovals: string[]; starterFileCount: number; isBuiltin: number };
+type ScaffoldJob = { id: string; templateId: string; taskId: string; targetProjectName: string; targetRootPath: string; mode: "CREATE_PROJECT"|"ADD_MODULE"; status: string; riskLevel: string; planningOnly: boolean; approvalId: string | null; plan: { steps?: string[]; starterFiles?: Array<{ path: string; bytes: number }> }; files: Array<{ proposalId: string | null; relativePath: string; operation: string; status: string }> };
 const API = "http://127.0.0.1:4310";
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -92,19 +94,30 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const [projectLifecycleDialog, setProjectLifecycleDialog] = useState<"pause" | "resume" | "archive" | "deregister" | null>(null);
   const [projectLifecycleTargetId, setProjectLifecycleTargetId] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [scaffoldTemplates, setScaffoldTemplates] = useState<ScaffoldTemplate[]>([]);
+  const [selectedScaffoldTemplateId, setSelectedScaffoldTemplateId] = useState("");
+  const [scaffoldMode, setScaffoldMode] = useState<"CREATE_PROJECT" | "ADD_MODULE">("CREATE_PROJECT");
+  const [scaffoldProjectName, setScaffoldProjectName] = useState("");
+  const [scaffoldTargetDirectory, setScaffoldTargetDirectory] = useState("");
+  const [scaffoldModuleName, setScaffoldModuleName] = useState("");
+  const [scaffoldPlanningOnly, setScaffoldPlanningOnly] = useState(false);
+  const [scaffoldJob, setScaffoldJob] = useState<ScaffoldJob | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
-    const [boot, approvalData, taskData, providerData, auditData] = await Promise.all([
+    const [boot, approvalData, taskData, providerData, auditData, scaffoldData] = await Promise.all([
       fetch(`${API}/api/bootstrap`).then(r => r.json()),
       fetch(`${API}/api/approvals`).then(r => r.json()),
       fetch(`${API}/api/tasks`).then(r => r.json()),
       fetch(`${API}/api/providers/status`).then(r => r.json()),
-      fetch(`${API}/api/audit`).then(r => r.json())
+      fetch(`${API}/api/audit`).then(r => r.json()),
+      fetch(`${API}/api/scaffold/templates`).then(r => r.json())
     ]);
     setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
     setAuditEvents(auditData.events);
+    setScaffoldTemplates(scaffoldData.templates ?? []);
+    if (!selectedScaffoldTemplateId && scaffoldData.templates?.length) setSelectedScaffoldTemplateId(scaffoldData.templates[0].id);
     const preferredProjectId = boot.projects.some((project: Project) => project.id === projectId) ? projectId : boot.projects[0]?.id ?? "";
     const scopedTasks = taskData.tasks.filter((task: Task) => task.projectId === preferredProjectId);
     const nextTask = scopedTasks.find((task: Task) => task.id === selectedTaskId) ?? scopedTasks.find((task: Task) => ["PLANNING", "AWAITING_APPROVAL", "APPROVED", "RUNNING", "TESTING"].includes(task.status)) ?? scopedTasks[0] ?? null;
@@ -147,6 +160,8 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
   const selectedTask = scopedTasks.find(t => t.id === selectedTaskId) ?? activeTask ?? scopedTasks[0] ?? null;
   const lifecycleTarget = manageableProjects.find(project => project.id === projectLifecycleTargetId) ?? selectedProject ?? null;
   const lifecycleAffectsSelectedProject = Boolean(lifecycleTarget && selectedProject && lifecycleTarget.id === selectedProject.id);
+  const selectedScaffoldTemplate = scaffoldTemplates.find(template => template.id === selectedScaffoldTemplateId) ?? scaffoldTemplates[0] ?? null;
+  const currentScaffoldJob = scaffoldJob ?? taskHistory?.task.scaffoldJob ?? null;
 
   async function refreshAndReselectProject() {
     await refresh();
@@ -281,6 +296,53 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
     setProviderStatus(data);
   }
 
+  async function createScaffoldJob() {
+    if (!selectedScaffoldTemplate) return;
+    setError("");
+    const response = await fetch(`${API}/api/scaffold/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        templateId: selectedScaffoldTemplate.id,
+        projectName: scaffoldProjectName.trim() || "App Studio Project",
+        targetDirectoryName: scaffoldTargetDirectory.trim() || undefined,
+        mode: scaffoldMode,
+        existingProjectId: scaffoldMode === "ADD_MODULE" ? selectedProject?.id : undefined,
+        moduleName: scaffoldMode === "ADD_MODULE" ? scaffoldModuleName.trim() || undefined : undefined,
+        planningOnly: scaffoldPlanningOnly
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to create scaffold job");
+      return;
+    }
+    setScaffoldJob(data.job);
+    setSelectedTaskId(data.job.taskId);
+    setNotice("Scaffold job created. No files have been written.");
+    await refresh();
+  }
+
+  async function generateScaffoldProposals() {
+    if (!currentScaffoldJob) return;
+    setError("");
+    const response = await fetch(`${API}/api/scaffold/jobs/${currentScaffoldJob.id}/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ planningOnly: scaffoldPlanningOnly })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error ?? "Unable to generate scaffold proposals");
+      return;
+    }
+    setScaffoldJob(data.job);
+    setSelectedTaskId(data.job.taskId);
+    setNotice(data.job.planningOnly ? "Scaffold planning completed without file proposals." : "Scaffold proposals generated and awaiting approval.");
+    await loadTaskDetails(data.job.taskId);
+    await refresh();
+  }
+
   const checkpointExecution = execution?.checkpointExecution ?? execution?.executions.find((entry) => entry.gitCheckpoint);
   const latestExecution = execution?.latestExecution ?? execution?.executions[0];
   const rollbackAvailable = execution?.rollbackAvailable ?? Boolean(checkpointExecution?.rollbackAvailable);
@@ -296,6 +358,17 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         {projects.length ? <div className="project-picker"><select value={projectId} onChange={e=>{const nextProjectId=e.target.value;const nextTask=tasks.find(task=>task.projectId===nextProjectId&&["PLANNING","AWAITING_APPROVAL","APPROVED","RUNNING","TESTING"].includes(task.status)) ?? tasks.find(task=>task.projectId===nextProjectId) ?? null;setProjectId(nextProjectId);setConversationId(undefined);setProposals([]);setExecution(undefined);setSelectedTaskId(nextTask?.id ?? null);setTaskHistory(undefined);setProjectMenuOpen(false);}}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="project-actions"><button className="secondary" onClick={()=>setProjectMenuOpen(open=>!open)} disabled={!selectedProject}>Project actions</button>{projectMenuOpen&&selectedProject&&<div className="project-menu"><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog(selectedProject.status==="PAUSED"?"resume":"pause");setProjectMenuOpen(false);}}>{selectedProject.status==="PAUSED"?"Resume Project":"Pause Project"}</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("archive");setProjectMenuOpen(false);}}>Archive Project</button><button onClick={()=>{setProjectLifecycleTargetId(selectedProject.id);setProjectLifecycleDialog("deregister");setProjectMenuOpen(false);}}>De-register Project</button></div>}</div></div> : <p className="muted">No projects registered.</p>}
         <h3>Project management</h3>
         {manageableProjects.length ? manageableProjects.map(project => <div key={project.id} className="mini"><span>{project.name}</span><small>{project.status}</small><div className="decision wrap">{getProjectManagementActions(project.status).map(action => <button key={action} onClick={()=>{setProjectLifecycleTargetId(project.id);setProjectLifecycleDialog(action==="Resume Project"?"resume":action==="Pause Project"?"pause":action==="Archive Project"?"archive":"deregister");}}>{action}</button>)}</div></div>) : <p className="muted">No manageable projects.</p>}
+        <h3>Create new project</h3>
+        <div className="scaffold-panel">
+          <label>Template<select value={selectedScaffoldTemplate?.id ?? ""} onChange={e=>setSelectedScaffoldTemplateId(e.target.value)}>{scaffoldTemplates.map(template=><option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
+          {selectedScaffoldTemplate&&<div className="template-preview"><strong>{selectedScaffoldTemplate.projectType}</strong><small>{selectedScaffoldTemplate.description}</small><div className="row"><span>Risk</span><span className={`risk ${selectedScaffoldTemplate.riskLevel}`}>{selectedScaffoldTemplate.riskLevel}</span></div><small>Folders: {selectedScaffoldTemplate.defaultFolders.join(", ") || "none"}</small><small>Files: {selectedScaffoldTemplate.starterFileCount}</small><small>Scripts: {Object.keys(selectedScaffoldTemplate.packageScripts).join(", ") || "none"}</small><small>Specialists: {selectedScaffoldTemplate.recommendedSpecialistAgents.join(", ") || "Coordinator only"}</small><small>Approvals: {selectedScaffoldTemplate.requiredApprovals.join(", ")}</small></div>}
+          <label>Flow<select value={scaffoldMode} onChange={e=>setScaffoldMode(e.target.value as "CREATE_PROJECT" | "ADD_MODULE")}><option value="CREATE_PROJECT">Create project from template</option><option value="ADD_MODULE">Add module to selected project</option></select></label>
+          <label>Project name<input value={scaffoldProjectName} onChange={e=>setScaffoldProjectName(e.target.value)} placeholder="Customer Portal"/></label>
+          {scaffoldMode==="CREATE_PROJECT"?<label>Target directory<input value={scaffoldTargetDirectory} onChange={e=>setScaffoldTargetDirectory(e.target.value)} placeholder="customer-portal"/></label>:<label>Module folder<input value={scaffoldModuleName} onChange={e=>setScaffoldModuleName(e.target.value)} placeholder="modules/reports"/></label>}
+          <label className="checkbox-row"><input type="checkbox" checked={scaffoldPlanningOnly} onChange={e=>setScaffoldPlanningOnly(e.target.checked)}/><span>Planning only</span><small>No file proposals</small></label>
+          <div className="decision wrap"><button onClick={()=>void createScaffoldJob()} disabled={!selectedScaffoldTemplate}>Create job</button><button onClick={()=>void generateScaffoldProposals()} disabled={!currentScaffoldJob||currentScaffoldJob.status==="AWAITING_APPROVAL"||currentScaffoldJob.status==="REGISTERED"}>Generate proposals</button></div>
+          {currentScaffoldJob&&<div className="scaffold-status"><div className="row"><span>Status</span><strong>{currentScaffoldJob.status.replaceAll("_"," ")}</strong></div><div className="row"><span>Mode</span><span>{currentScaffoldJob.mode.replaceAll("_"," ")}</span></div><small>{currentScaffoldJob.targetRootPath}</small><small>Task: {currentScaffoldJob.taskId}</small>{currentScaffoldJob.approvalId&&<small>Approval: {currentScaffoldJob.approvalId}</small>}{currentScaffoldJob.plan?.steps?.length?<ol className="status-timeline">{currentScaffoldJob.plan.steps.map((step,index)=><li key={`${currentScaffoldJob.id}-step-${index}`}>{step}</li>)}</ol>:null}{currentScaffoldJob.files.length?<div className="scaffold-files">{currentScaffoldJob.files.map(file=><small key={`${file.relativePath}-${file.status}`}>{file.operation} {file.relativePath} - {file.status}</small>)}</div>:<small>No generated file proposals yet.</small>}</div>}
+        </div>
         {notice&&<p className="success">{notice}</p>}
         {error&&<p className="error">{error}</p>}
         <h3>Agents</h3>{agents.map(a=><button key={a.id} className={`nav ${a.id==="developer"?"active":""}`}><span>{a.name}</span><small>{a.role} · {a.status}</small></button>)}
@@ -314,6 +387,7 @@ function DeveloperWorkspace({navigate}:{navigate:(path:string)=>void}) {
         <h3>Change proposals</h3>{proposals.length?proposals.map(p=><div className={`card proposal ${p.conflictState==="CONFLICT"?"conflict":""}`} key={p.id}><strong>{p.filePath}</strong><div className="row"><span>{p.operation}</span><span>{p.status}</span></div><div className="row"><span>Owner</span><span>{p.ownerName ?? "Developer Agent"}{p.ownerRole ? ` · ${p.ownerRole}` : ""}</span></div>{p.conflictState==="CONFLICT"&&<p className="error">Same-file conflict requires review before apply.</p>}<p>{p.reason}</p><button onClick={()=>void loadDiff(p.id)}>Diff preview</button>{diffs[p.id]&&<pre>{diffs[p.id]}</pre>}<div className="decision"><button onClick={()=>void decideProposal(p.id,"approve")} disabled={p.status!=="PENDING"}>Approve</button><button onClick={()=>void decideProposal(p.id,"reject")} disabled={p.status!=="PENDING"}>Reject</button></div></div>):<div className="card"><strong>No proposals</strong><p>Mutation requests will appear here for review before any file changes.</p></div>}
         {selectedTask&&<div className="card execution"><strong>Execution</strong><p>Approved files are revalidated before write. Checks run only package.json scripts.</p>{checkpointExecution&&<div className="execution-grid"><div className="execution-field"><span>Rollback status</span><strong>{rollbackStatus}</strong></div><div className="execution-field"><span>Rollback available</span><strong>{rollbackAvailable ? "Yes" : "No"}</strong></div><div className="execution-field"><span>Branch</span><strong>{checkpointExecution.gitCheckpoint?.branch ?? "Unknown"}</strong></div><div className="execution-field"><span>Checkpoint commit</span><strong>{checkpointExecution.gitCheckpoint?.head ?? "Unavailable"}</strong></div><div className="execution-field"><span>Checkpoint ref</span><strong>{checkpointExecution.gitCheckpoint?.checkpointRef ?? "Unavailable"}</strong></div><div className="execution-field"><span>Repository state</span><strong>{checkpointExecution.gitCheckpoint?.dirty ? "Dirty" : "Clean"}</strong></div><div className="execution-field"><span>Checkpoint created</span><strong>{checkpointExecution.createdAt}</strong></div>{checkpointExecution.gitCheckpoint?.warning&&<div className="execution-field wide"><span>Recovery note</span><strong>{checkpointExecution.gitCheckpoint.warning}</strong></div>}</div>}{latestExecution&&<div className="execution-summary"><div className="row"><span>Status</span><span>{latestExecution.status}</span></div><div className="row"><span>Recovery outcome</span><span>{execution?.recoveryOutcome ?? "No recovery required"}</span></div><div className="row"><span>Recovery action</span><span>{execution?.recoveryAvailable ? "Recover execution" : "Not available"}</span></div></div>}{checkResults.length>0&&<div className="check-results">{checkResults.map((result)=><article key={`${result.action}-${result.script}`} className={`check-result ${result.ok ? "ok" : "fail"}`}><div className="row"><strong>{result.action}</strong><span>{result.ok ? "Passed" : "Failed"}</span></div><small>Script: {result.script}</small><small>{result.skipped ? "Skipped" : `Exit code: ${result.exitCode ?? "n/a"}`}</small><pre>{result.output || "No output captured."}</pre></article>)}</div>}{checkResults.length===0&&<div className="muted">No check results yet.</div>}{execution?.appliedFiles.length ? <div className="files-changed">{execution.appliedFiles.map(f=><div className="mini" key={`${f.filePath}-${f.result}`}><span>{f.operation} {f.filePath}</span><small>{f.result}</small></div>)}</div> : <div className="muted">No files have been applied yet.</div>}<div className="decision"><button onClick={()=>void runChecks(selectedTask.id)}>Run checks</button><button onClick={()=>void rollback(selectedTask.id)} disabled={!rollbackAvailable}>Rollback</button><button onClick={()=>void recover(selectedTask.id)} disabled={!execution?.recoveryAvailable}>Recover</button></div></div>}
         {selectedTask&&proposals.some(p=>p.status==="APPROVED")&&<button className="primary" onClick={()=>void applyApproved(selectedTask.id)}>Apply approved changes</button>}
+        {taskHistory?.task.scaffoldJob&&<div className="card"><strong>Scaffold plan</strong><div className="row"><span>Status</span><span>{taskHistory.task.scaffoldJob.status.replaceAll("_"," ")}</span></div><div className="row"><span>Target</span><span>{taskHistory.task.scaffoldJob.targetProjectName}</span></div><small>{taskHistory.task.scaffoldJob.targetRootPath}</small>{taskHistory.task.scaffoldJob.plan?.steps?.length?<ol className="status-timeline">{taskHistory.task.scaffoldJob.plan.steps.map((step,index)=><li key={`history-scaffold-${index}`}>{step}</li>)}</ol>:null}{taskHistory.task.scaffoldJob.files.length?<div className="scaffold-files">{taskHistory.task.scaffoldJob.files.map(file=><small key={`${file.relativePath}-${file.status}`}>{file.operation} {file.relativePath} - {file.status}</small>)}</div>:<p className="muted">Planning-only scaffold or proposals not generated yet.</p>}</div>}
         {taskHistory&&<div className="card"><strong>Coordinator plan</strong><div className="row"><span>Specialists</span><span>{taskHistory.task.assignmentCount ?? taskHistory.assignments.length}</span></div><div className="row"><span>Next action</span><span>{taskHistory.task.nextRequiredAction.replaceAll("_"," ")}</span></div>{taskHistory.task.nextRequiredActionDetail&&<p>{taskHistory.task.nextRequiredActionDetail}</p>}{taskHistory.task.coordinatorPlan?.steps?.length?<ol className="status-timeline">{taskHistory.task.coordinatorPlan.steps.map((step,index)=><li key={`${index}-${step}`}>{step}</li>)}</ol>:<p className="muted">No coordinator steps recorded.</p>}</div>}
         {taskHistory?.assignments?.length?<div className="card"><strong>Specialist assignments</strong><div className="assignment-list">{taskHistory.assignments.map(assignment=><article className={`assignment-item ${assignment.conflictState.toLowerCase()}`} key={assignment.id}><div className="row first-row"><strong>{assignment.role.replaceAll("_"," ")}</strong><span>{assignment.status}</span></div><div className="row"><span>Agent</span><span>{assignment.agent?.name ?? assignment.specialistAgentId}</span></div><div className="row"><span>Priority</span><span>{assignment.priority}</span></div><div className="row"><span>Attempts</span><span>{assignment.attempts}</span></div><div className="row"><span>Risk</span><span className={`risk ${assignment.riskLevel}`}>{assignment.riskLevel}</span></div><div className="row"><span>Can mutate</span><span>{assignment.canMutate ? "Proposal only" : "Read only"}</span></div><div className="row"><span>Dependencies</span><span>{assignment.dependencyAssignmentIds.length || "none"}</span></div><div className="row"><span>Completion order</span><span>{assignment.completionOrder ?? "pending"}</span></div>{assignment.output?.summary&&<small>{assignment.output.summary}</small>}{assignment.output?.rollbackGuidance&&<small>{assignment.output.rollbackGuidance}</small>}{assignment.output?.proposals?.length?<div className="assignment-proposals">{assignment.output.proposals.map(proposal=><small key={proposal.id}>{proposal.operation} {proposal.filePath}</small>)}</div>:null}{assignment.reviewDecisions.length?<small>Review: {assignment.reviewDecisions.map(decision=>decision.verdict ?? "recorded").join(", ")}</small>:null}{assignment.conflicts.length?<p className="error">Conflict on {assignment.conflicts.map(conflict=>conflict.filePath).join(", ")}</p>:null}<div className="decision wrap"><button onClick={()=>void assignmentAction(assignment.id,"pause")} disabled={assignment.status==="PAUSED"||assignment.status==="COMPLETED"||assignment.status==="CANCELLED"}>Pause</button><button onClick={()=>void assignmentAction(assignment.id,"resume")} disabled={assignment.status!=="PAUSED"&&assignment.status!=="BLOCKED"}>Resume</button><button onClick={()=>void assignmentAction(assignment.id,"retry")} disabled={assignment.status==="CANCELLED"}>Retry</button><button onClick={()=>void assignmentAction(assignment.id,"cancel")} disabled={assignment.status==="CANCELLED"||assignment.status==="COMPLETED"}>Cancel</button><button onClick={()=>void reassignAssignment(assignment)} disabled={!assignment.canMutate}>Reassign</button></div></article>)}</div></div>:null}
         {taskHistory&&<div className="card"><strong>Task history</strong><div className="row"><span>Attempts</span><span>{taskHistory.task.attemptCount}</span></div><div className="row"><span>Correction rounds</span><span>{taskHistory.task.correctionRounds}</span></div><div className="row"><span>Next required action</span><span>{taskHistory.task.nextRequiredAction.replaceAll("_"," ")}</span></div><div className="history-list">{taskHistory.rounds.map(round=><article key={round.id} className="mini history-round"><div className="row"><strong>Round {round.roundNumber}</strong><span>{round.roundType}</span></div><div className="row"><span>Status</span><span>{round.status}</span></div><div className="row"><span>Next action</span><span>{round.nextRequiredAction.replaceAll("_"," ")}</span></div><small>{round.summary}</small><small>{round.userMessage}</small><small>{round.proposalCount} proposals · {round.approvalRequired ? "approval required" : "no approval required"}</small>{round.recoveryAvailable&&<small>Recovery available</small>}{round.recoveryOutcome&&<small>Recovery outcome: {round.recoveryOutcome}</small>}</article>)}</div></div>}

@@ -9,6 +9,7 @@ import { hashContent, validateProposalPath, type AuditWriter } from "./change-pr
 import { runAvailableChecks, runProjectCheck, type CheckAction } from "./command-runner.js";
 import { getCurrentTaskRound, summarizeTaskState, updateTaskRound } from "./task-workflow.js";
 import { classifyProposalRole, detectProposalConflicts } from "./specialist-orchestration.js";
+import { markScaffoldApplied, markScaffoldRecovered, markScaffoldRolledBack } from "./scaffold-engine.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -258,6 +259,7 @@ export async function applyTaskProposals(db: Database.Database, taskId: string, 
     });
   }
   await fs.rm(tempRoot, { recursive: true, force: true });
+  markScaffoldApplied(db, task.id, now, audit);
   return { status: finalStatus, applied: staged.length, gitCheckpoint: checkpoint, checkResults };
 }
 
@@ -370,6 +372,7 @@ export async function rollbackTask(db: Database.Database, taskId: string, now: s
     });
   }
   audit("TASK_ROLLED_BACK", "Task files rolled back", { projectId: task.projectId, taskId: task.id, payload: { fileCount: changes.length } });
+  markScaffoldRolledBack(db, task.id, now, audit);
   return { status: "ROLLED_BACK", rolledBack: changes.length };
 }
 
@@ -424,5 +427,6 @@ export async function recoverTaskExecution(db: Database.Database, taskId: string
     });
   }
   audit("TASK_RECOVERED", `Task recovery ${checksOk ? "completed" : "requires review"}`, { projectId: task.projectId, taskId: task.id, payload: { status: finalStatus, checkCount: checkResults.length } });
+  markScaffoldRecovered(db, task.id, now, audit);
   return { status: finalStatus, checkResults, recoveryOutcome: checksOk ? "CHECKS_PASSED" : "CHECKS_FAILED" };
 }
