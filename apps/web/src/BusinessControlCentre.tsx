@@ -361,23 +361,32 @@ const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "contrast", label: "High Contrast" }
 ];
 
-const sidebarSections = [
-  { id: "company-dashboard", label: "Company Dashboard" },
-  { id: "company-workspaces", label: "Company / Workspaces" },
-  { id: "department-structure", label: "Department Structure" },
-  { id: "role-hierarchy", label: "Role Hierarchy" },
-  { id: "access-boundary", label: "Access Boundary" },
-  { id: "project-operations", label: "Project Operations" },
-  { id: "project-assignment-control", label: "Project Assignment Control" },
-  { id: "client-management", label: "Client Management" },
-  { id: "approvals", label: "Approvals Control Centre" },
-  { id: "support-desk", label: "Support Desk" },
-  { id: "finance-billing", label: "Finance & Billing" },
-  { id: "hrms", label: "HRMS / Employee Management" },
-  { id: "agent-operations", label: "Agent Operations" },
-  { id: "audit-compliance", label: "Audit & Compliance" },
-  { id: "system-health", label: "System Health" },
-  { id: "deployment-cloud", label: "Deployment / Cloud Ops" }
+const sidebarSectionGroups = ["Company", "Operations", "People", "Governance", "System"] as const;
+type SidebarSectionGroup = (typeof sidebarSectionGroups)[number];
+
+type SidebarSection = {
+  id: string;
+  label: string;
+  group: SidebarSectionGroup;
+};
+
+const sidebarSections: SidebarSection[] = [
+  { id: "company-dashboard", label: "Company Dashboard", group: "Company" },
+  { id: "company-workspaces", label: "Company / Workspaces", group: "Company" },
+  { id: "department-structure", label: "Department Structure", group: "Company" },
+  { id: "role-hierarchy", label: "Role Hierarchy", group: "Company" },
+  { id: "access-boundary", label: "Access Boundary", group: "Company" },
+  { id: "project-operations", label: "Project Operations", group: "Operations" },
+  { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
+  { id: "client-management", label: "Client Management", group: "Operations" },
+  { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
+  { id: "support-desk", label: "Support Desk", group: "Operations" },
+  { id: "finance-billing", label: "Finance & Billing", group: "Operations" },
+  { id: "hrms", label: "HRMS / Employee Management", group: "People" },
+  { id: "agent-operations", label: "Agent Operations", group: "Governance" },
+  { id: "audit-compliance", label: "Audit & Compliance", group: "Governance" },
+  { id: "system-health", label: "System Health", group: "System" },
+  { id: "deployment-cloud", label: "Deployment / Cloud Ops", group: "System" }
 ];
 
 const dashboardCards: MetricCard[] = [
@@ -1182,6 +1191,31 @@ const deploymentApprovalRules = [
   "Git checkpoint required before deployment",
   "Post-deployment monitoring required",
   "Rollback plan required before production release"
+];
+
+type ReadinessTone = "ready" | "pending" | "warning";
+
+type ReadinessItem = {
+  label: string;
+  status: string;
+  tone: ReadinessTone;
+};
+
+const businessReadinessItems: ReadinessItem[] = [
+  { label: "UI shell ready", status: "Ready", tone: "ready" },
+  { label: "Internal-only boundary visible", status: "Ready", tone: "ready" },
+  { label: "Company dashboard ready", status: "Ready", tone: "ready" },
+  { label: "Project operations placeholder ready", status: "Ready", tone: "ready" },
+  { label: "Client/support placeholder ready", status: "Ready", tone: "ready" },
+  { label: "Finance placeholder ready", status: "Ready", tone: "ready" },
+  { label: "HRMS placeholder ready", status: "Ready", tone: "ready" },
+  { label: "Agent governance placeholder ready", status: "Ready", tone: "ready" },
+  { label: "Audit/compliance placeholder ready", status: "Ready", tone: "ready" },
+  { label: "System/cloud placeholder ready", status: "Ready", tone: "ready" },
+  { label: "Backend wiring pending", status: "Pending", tone: "pending" },
+  { label: "Auth/RBAC pending", status: "Pending", tone: "warning" },
+  { label: "Database persistence pending", status: "Pending", tone: "pending" },
+  { label: "Production approval pending", status: "Pending", tone: "warning" }
 ];
 
 const financeOverviewCards: MetricCard[] = [
@@ -2081,14 +2115,14 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
     <main className="app-shell app-studio-shell business-control-shell" data-theme={theme}>
       <header className="topbar business-topbar">
         <div className="business-title-block">
-          <span>Internal Admin Portal</span>
+          <span>Internal-only admin workspace</span>
           <h1>Business Control Centre</h1>
-          <p>Parent company: Shrinika Technologies</p>
+          <p>Shrinika Technologies business administration</p>
         </div>
         <div className="business-header-meta">
-          <div><span>Main Admin / Owner</span><strong>Shrinika</strong></div>
-          <div><span>Operator</span><strong>Shiva / Internal Operator</strong></div>
-          <div><span>System status</span><strong className="success">Placeholder stable</strong></div>
+          <div><span>Main Admin / Owner Admin</span><strong>Shrinika</strong></div>
+          <div><span>Founder-builder / system guardian</span><strong>Shiva</strong></div>
+          <div><span>Customer access boundary</span><strong className="success">Internal only</strong></div>
         </div>
         <div className="top-actions business-actions">
           <button className="top-link" onClick={() => navigate("/")}>App Studio</button>
@@ -2101,8 +2135,13 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
           <strong>Business Control</strong>
           <p>Internal sections</p>
           <nav aria-label="Business Control Centre sections">
-            {sidebarSections.map(section => (
-              <a key={section.id} href={`#${section.id}`} className="business-nav-item">{section.label}</a>
+            {sidebarSectionGroups.map(group => (
+              <div className="business-nav-group" key={group}>
+                <span>{group}</span>
+                {sidebarSections.filter(section => section.group === group).map(section => (
+                  <a key={section.id} href={`#${section.id}`} className="business-nav-item">{section.label}</a>
+                ))}
+              </div>
             ))}
           </nav>
         </aside>
@@ -2124,6 +2163,26 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
           <section className="business-boundary-notice">
             <strong>Internal-only notice</strong>
             <p>App Studio and Business Control Centre are restricted to Shrinika Technologies employees, developers, managers, team leaders, HR, and approved internal operators. Customers use the separate website, email, support, and future client portal.</p>
+          </section>
+
+          <section className="business-section readiness-section" aria-label="Business Control Centre readiness">
+            <div className="business-section-heading">
+              <span>Static final-readiness snapshot before backend, auth, and persistence wiring.</span>
+              <h2>Business Control Centre Readiness</h2>
+            </div>
+            <div className="readiness-panel-grid">
+              {businessReadinessItems.map(item => (
+                <article className={`readiness-item ${item.tone}`} key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.status}</strong>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="business-boundary-notice backend-readiness-warning">
+            <strong>Backend readiness warning</strong>
+            <p>This Business Control Centre is currently a UI-only internal operations dashboard. Before production use, it still requires authentication, role-based access control, database persistence, backend APIs, audit persistence, approval workflow enforcement, security review, and deployment approval.</p>
           </section>
 
           <section className="business-card-grid" aria-label="Company dashboard overview cards">
