@@ -3,6 +3,11 @@ import { setBusinessUserPasswordCredential } from "./business-auth.js";
 
 const allowedSeededInternalUserIds = new Set(["business-user-shrinika", "business-user-shiva"]);
 
+export const INTERNAL_DEV_DEFAULT_CREDENTIALS = [
+  { email: "owner@shrinika.local", password: "ShrinikaDev@2026!" },
+  { email: "shiva@shrinika.local", password: "ShivaDev@2026!" }
+] as const;
+
 type SetupUserRow = {
   id: string;
   email: string;
@@ -73,5 +78,31 @@ export function formatInternalCredentialSetupSummary(summary: InternalCredential
     `Roles: ${summary.roleKeys.join(", ") || "none"}`,
     `Status: ${summary.credentialStatus}`,
     `Updated at: ${summary.updatedAt}`
+  ].join("\n");
+}
+
+export function setDevelopmentDefaultInternalPasswords(database: Database.Database, input: { nodeEnv?: string; now?: string } = {}): InternalCredentialSetupSummary[] {
+  if ((input.nodeEnv ?? process.env.NODE_ENV) === "production") {
+    throw new Error("Development default internal passwords cannot be set in production");
+  }
+  const now = input.now ?? new Date().toISOString();
+  return INTERNAL_DEV_DEFAULT_CREDENTIALS.map((credential, index) => setSeededInternalUserPassword(database, {
+    email: credential.email,
+    password: credential.password,
+    now: new Date(Date.parse(now) + index).toISOString()
+  }));
+}
+
+export function formatDevelopmentDefaultCredentialSetupSummary(summaries: InternalCredentialSetupSummary[]): string {
+  return [
+    "Local development default internal credentials were activated.",
+    "Use only for local development. Rotate these passwords after testing.",
+    ...summaries.flatMap((summary) => [
+      "",
+      `User: ${summary.displayName} <${summary.email}>`,
+      `Roles: ${summary.roleKeys.join(", ") || "none"}`,
+      `Status: ${summary.credentialStatus}`,
+      `Updated at: ${summary.updatedAt}`
+    ])
   ].join("\n");
 }

@@ -3,9 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 export * from "./business-auth.js";
+export * from "./database-path.js";
 export * from "./internal-credential-setup.js";
+import { getResolvedDatabasePath } from "./database-path.js";
 
-const dbPath = path.resolve(process.env.S4_DB_PATH ?? "./data/s4-agent-studio.db");
+const dbPath = getResolvedDatabasePath();
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");

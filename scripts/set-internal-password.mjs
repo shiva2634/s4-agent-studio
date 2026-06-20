@@ -88,9 +88,10 @@ async function main() {
   if (!args.email) throw new Error("Missing required --email argument");
 
   const password = await readPassword(args.passwordEnv);
-  const { db, formatInternalCredentialSetupSummary, initializeDatabase, setSeededInternalUserPassword } = await import("@s4/db");
+  const { db, formatInternalCredentialSetupSummary, getResolvedDatabasePath, initializeDatabase, setSeededInternalUserPassword } = await import("@s4/db");
   try {
     initializeDatabase();
+    console.log(`Using database: ${getResolvedDatabasePath()}`);
     const summary = setSeededInternalUserPassword(db, {
       email: args.email,
       password,

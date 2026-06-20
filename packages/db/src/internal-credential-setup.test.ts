@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { describe, it } from "node:test";
 import { verifyBusinessPassword } from "./business-auth.js";
-import { formatInternalCredentialSetupSummary, setSeededInternalUserPassword } from "./internal-credential-setup.js";
+import {
+  INTERNAL_DEV_DEFAULT_CREDENTIALS,
+  formatDevelopmentDefaultCredentialSetupSummary,
+  formatInternalCredentialSetupSummary,
+  setDevelopmentDefaultInternalPasswords,
+  setSeededInternalUserPassword
+} from "./internal-credential-setup.js";
 
 async function loadInitializer() {
   return await import("./index.js");
@@ -119,6 +125,64 @@ describe("internal credential setup", () => {
       assert.ok(!output.includes(password));
       assert.ok(!output.includes(stored.passwordHash));
       assert.ok(!output.includes(summary.credentialId));
+    } finally {
+      db.close();
+    }
+  });
+
+  it("sets local development default credentials for both seeded users", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      setSeededInternalUserPassword(db, { email: "owner@shrinika.local", password: "OldOwnerPassword!2026", now: "2026-01-01T00:00:00.000Z" });
+      const summaries = setDevelopmentDefaultInternalPasswords(db, { nodeEnv: "development", now: "2026-01-01T00:10:00.000Z" });
+      assert.deepEqual(summaries.map((summary) => summary.email), ["owner@shrinika.local", "shiva@shrinika.local"]);
+
+      for (const credential of INTERNAL_DEV_DEFAULT_CREDENTIALS) {
+        const user = db.prepare("SELECT id FROM business_users WHERE email=?").get(credential.email) as { id: string };
+        const stored = db.prepare(`SELECT password_hash AS passwordHash,is_enabled AS isEnabled
+          FROM business_auth_credentials
+          WHERE user_id=? AND credential_type='PASSWORD_HASH' AND is_enabled=1`).get(user.id) as { passwordHash: string; isEnabled: number };
+        assert.equal(stored.isEnabled, 1);
+        assert.notEqual(stored.passwordHash, credential.password);
+        assert.equal(verifyBusinessPassword(credential.password, stored.passwordHash), true);
+      }
+
+      const ownerActiveCount = db.prepare(`SELECT COUNT(*) AS count
+        FROM business_auth_credentials
+        WHERE user_id='business-user-shrinika' AND credential_type='PASSWORD_HASH' AND is_enabled=1`).get() as { count: number };
+      assert.equal(ownerActiveCount.count, 1);
+      const ownerActive = db.prepare(`SELECT password_hash AS passwordHash
+        FROM business_auth_credentials
+        WHERE user_id='business-user-shrinika' AND credential_type='PASSWORD_HASH' AND is_enabled=1`).get() as { passwordHash: string };
+      assert.equal(verifyBusinessPassword("OldOwnerPassword!2026", ownerActive.passwordHash), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses development default credentials in production and keeps output safe", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      assert.throws(() => setDevelopmentDefaultInternalPasswords(db, { nodeEnv: "production", now: "2026-01-01T00:10:00.000Z" }), /cannot be set in production/);
+      const summaries = setDevelopmentDefaultInternalPasswords(db, { nodeEnv: "test", now: "2026-01-01T00:11:00.000Z" });
+      const output = formatDevelopmentDefaultCredentialSetupSummary(summaries);
+      const hashes = db.prepare(`SELECT password_hash AS passwordHash FROM business_auth_credentials WHERE is_enabled=1`).all() as Array<{ passwordHash: string }>;
+
+      assert.ok(output.includes("owner@shrinika.local"));
+      assert.ok(output.includes("shiva@shrinika.local"));
+      for (const credential of INTERNAL_DEV_DEFAULT_CREDENTIALS) {
+        assert.ok(!output.includes(credential.password));
+      }
+      for (const row of hashes) {
+        assert.ok(!output.includes(row.passwordHash));
+      }
+      assert.ok(!output.toLowerCase().includes("token"));
     } finally {
       db.close();
     }
