@@ -33,6 +33,8 @@ import { PermissionDeniedError, assertFilePermission, assertNetworkAllowed, asse
 import { GitWorkflowError, applyApprovedProposalsToGitWorkflow, cleanupTaskWorktree, createReleaseCandidate, createTaskGitWorkflow, getProjectGitStatus, getTaskGitWorkflowStatus, mergeApprovedReleaseCandidate, recoverGitWorkflow, requestMergeApproval, rollbackGitWorkflow, runGitWorkflowChecks } from "./git-workflow.js";
 import { SelfBuildReadinessError, convertApprovedBuildMission, createBuildMissionDraft, getBuildMission, getLatestReadinessReport, getReadinessReport, listBuildMissionEvents, listBuildMissions, listReadinessHistory, requestBuildMissionApproval, resolveBuildMissionApproval, runSelfBuildReadiness } from "./self-build-readiness.js";
 import { registerBusinessAuthRoutes } from "./business-auth.js";
+import { registerBusinessControlCentreRoutes } from "./business-control-centre-routes.js";
+import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -79,6 +81,8 @@ function isMediaProviderTask(value: string): value is MediaProviderTask {
 app.get("/health", async () => ({ status: "ok", service: "s4-agent-studio-api", time: now() }));
 
 registerBusinessAuthRoutes(app);
+registerBusinessControlCentreRoutes(app);
+registerAppStudioInternalRoutes(app);
 
 app.get("/api/providers/status", async () => getProviderStatus());
 
