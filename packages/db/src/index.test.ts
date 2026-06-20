@@ -193,4 +193,163 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates Business Control Centre identity/access tables and idempotent seed data", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, userHasBusinessPermission } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      for (const tableName of ["business_users", "internal_user_profiles", "business_roles", "business_permissions", "business_role_permissions", "business_user_roles", "denied_access_events"]) {
+        const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
+        assert.ok(table, `${tableName} should exist`);
+      }
+
+      const roleCount = db.prepare("SELECT COUNT(*) AS count FROM business_roles").get() as { count: number };
+      assert.equal(roleCount.count, 16);
+
+      const permissionCount = db.prepare("SELECT COUNT(*) AS count FROM business_permissions").get() as { count: number };
+      assert.equal(permissionCount.count, 132);
+
+      const ownerRole = db.prepare(`SELECT r.role_key AS roleKey
+        FROM business_users u
+        JOIN business_user_roles ur ON ur.user_id=u.id AND ur.revoked_at IS NULL
+        JOIN business_roles r ON r.id=ur.role_id
+        WHERE u.id='business-user-shrinika'`).get() as { roleKey: string };
+      assert.equal(ownerRole.roleKey, "main_admin_owner");
+
+      const shiva = db.prepare(`SELECT r.role_key AS roleKey,p.is_system_guardian AS isSystemGuardian
+        FROM business_users u
+        JOIN internal_user_profiles p ON p.user_id=u.id
+        JOIN business_user_roles ur ON ur.user_id=u.id AND ur.revoked_at IS NULL
+        JOIN business_roles r ON r.id=ur.role_id
+        WHERE u.id='business-user-shiva'`).get() as { roleKey: string; isSystemGuardian: number };
+      assert.equal(shiva.roleKey, "system_guardian");
+      assert.equal(shiva.isSystemGuardian, 1);
+
+      assert.equal(userHasBusinessPermission(db, "business-user-shrinika", "deployment.deploy"), true);
+      assert.equal(userHasBusinessPermission(db, "business-user-shiva", "app_studio.view"), true);
+      assert.equal(userHasBusinessPermission(db, "business-user-shiva", "audit.view"), true);
+      assert.equal(userHasBusinessPermission(db, "business-user-shiva", "system.configure"), true);
+
+      const countsBefore = {
+        users: (db.prepare("SELECT COUNT(*) AS count FROM business_users").get() as { count: number }).count,
+        roles: (db.prepare("SELECT COUNT(*) AS count FROM business_roles").get() as { count: number }).count,
+        permissions: (db.prepare("SELECT COUNT(*) AS count FROM business_permissions").get() as { count: number }).count,
+        rolePermissions: (db.prepare("SELECT COUNT(*) AS count FROM business_role_permissions").get() as { count: number }).count,
+        userRoles: (db.prepare("SELECT COUNT(*) AS count FROM business_user_roles").get() as { count: number }).count
+      };
+      initializeDatabaseOn(db);
+      const countsAfter = {
+        users: (db.prepare("SELECT COUNT(*) AS count FROM business_users").get() as { count: number }).count,
+        roles: (db.prepare("SELECT COUNT(*) AS count FROM business_roles").get() as { count: number }).count,
+        permissions: (db.prepare("SELECT COUNT(*) AS count FROM business_permissions").get() as { count: number }).count,
+        rolePermissions: (db.prepare("SELECT COUNT(*) AS count FROM business_role_permissions").get() as { count: number }).count,
+        userRoles: (db.prepare("SELECT COUNT(*) AS count FROM business_user_roles").get() as { count: number }).count
+      };
+      assert.deepEqual(countsAfter, countsBefore);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("keeps external client users separate from internal permissions", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, assignBusinessRoleToUser, userHasBusinessPermission } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at)
+        VALUES ('business-user-client-fixture','client@example.local','Client Fixture','EXTERNAL_CLIENT','ACTIVE','created','created')`).run();
+
+      assert.doesNotThrow(() => assignBusinessRoleToUser(db, { userId: "business-user-client-fixture", roleKey: "external_client_user", now: "2026-01-01T00:00:00.000Z" }));
+      assert.throws(() => assignBusinessRoleToUser(db, { userId: "business-user-client-fixture", roleKey: "company_admin", now: "2026-01-01T00:00:01.000Z" }), /External client users cannot receive internal roles/);
+
+      assert.equal(userHasBusinessPermission(db, "business-user-client-fixture", "client_portal.view"), true);
+      assert.equal(userHasBusinessPermission(db, "business-user-client-fixture", "app_studio.view"), false);
+      assert.equal(userHasBusinessPermission(db, "business-user-client-fixture", "company.view"), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("denies unsafe or inactive permission checks and honors revoked assignments", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, assignBusinessRoleToUser, userHasBusinessPermission } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      assert.equal(userHasBusinessPermission(db, "missing-user", "projects.view"), false);
+      assert.equal(userHasBusinessPermission(db, "business-user-shrinika", "missing.permission"), false);
+
+      db.prepare("UPDATE business_users SET status='SUSPENDED' WHERE id='business-user-shrinika'").run();
+      assert.equal(userHasBusinessPermission(db, "business-user-shrinika", "projects.view"), false);
+      db.prepare("UPDATE business_users SET status='ACTIVE' WHERE id='business-user-shrinika'").run();
+
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at)
+        VALUES ('business-user-manager-fixture','manager@example.local','Manager Fixture','INTERNAL','ACTIVE','created','created')`).run();
+      assignBusinessRoleToUser(db, { userId: "business-user-manager-fixture", roleKey: "manager", now: "2026-01-01T00:00:00.000Z" });
+      assert.equal(userHasBusinessPermission(db, "business-user-manager-fixture", "projects.assign"), true);
+      db.prepare("UPDATE business_user_roles SET revoked_at='2026-01-01T01:00:00.000Z' WHERE user_id='business-user-manager-fixture'").run();
+      assert.equal(userHasBusinessPermission(db, "business-user-manager-fixture", "projects.assign"), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("prevents duplicate active mappings for roles and permissions", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, assignBusinessRoleToUser } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const ownerRole = db.prepare("SELECT id FROM business_roles WHERE role_key='main_admin_owner'").get() as { id: string };
+      const projectView = db.prepare("SELECT id FROM business_permissions WHERE permission_key='projects.view'").get() as { id: string };
+      assert.throws(() => {
+        db.prepare("INSERT INTO business_role_permissions (id,role_id,permission_id,created_at) VALUES (?,?,?,?)")
+          .run("duplicate-role-permission", ownerRole.id, projectView.id, "created");
+      });
+
+      const first = assignBusinessRoleToUser(db, { userId: "business-user-shrinika", roleKey: "main_admin_owner", now: "2026-01-01T00:00:00.000Z" }) as { id: string };
+      const second = assignBusinessRoleToUser(db, { userId: "business-user-shrinika", roleKey: "main_admin_owner", now: "2026-01-01T00:00:01.000Z" }) as { id: string };
+      assert.equal(second.id, first.id);
+      assert.throws(() => {
+        db.prepare("INSERT INTO business_user_roles (id,user_id,role_id,created_at) VALUES (?,?,?,?)")
+          .run("duplicate-active-user-role", "business-user-shrinika", ownerRole.id, "created");
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records denied access events with redacted metadata", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, recordDeniedAccessEvent } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const event = recordDeniedAccessEvent(db, {
+        userId: "business-user-shiva",
+        userType: "INTERNAL",
+        attemptedModule: "deployment",
+        attemptedAction: "deploy",
+        reason: "Production deployment requires approval",
+        metadata: {
+          route: "/api/business-control/deployments/release",
+          apiKey: "sk-test-secret-value",
+          authorization: "Bearer hidden-token",
+          note: "safe operational note"
+        },
+        now: "2026-01-01T00:00:00.000Z"
+      }) as { metadataJson: string };
+
+      assert.ok(event.metadataJson.includes("safe operational note"));
+      assert.ok(!event.metadataJson.includes("sk-test-secret-value"));
+      assert.ok(!event.metadataJson.includes("hidden-token"));
+      const count = db.prepare("SELECT COUNT(*) AS count FROM denied_access_events").get() as { count: number };
+      assert.equal(count.count, 1);
+    } finally {
+      db.close();
+    }
+  });
 });

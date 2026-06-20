@@ -8,6 +8,98 @@ export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+type BusinessUserType = "INTERNAL" | "EXTERNAL_CLIENT";
+type BusinessUserStatus = "ACTIVE" | "INVITED" | "SUSPENDED" | "ARCHIVED";
+type BusinessRoleScope = "INTERNAL" | "EXTERNAL_CLIENT";
+
+type BusinessRoleRow = {
+  id: string;
+  roleKey: string;
+  name: string;
+  description: string;
+  scope: BusinessRoleScope;
+  isSystemRole: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type BusinessPermissionRow = {
+  id: string;
+  permissionKey: string;
+  module: string;
+  action: string;
+  description: string;
+  internalOnly: number;
+  riskLevel: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AssignBusinessRoleInput = {
+  userId: string;
+  roleKey: string;
+  assignedByUserId?: string | null;
+  now?: string;
+};
+
+type DeniedAccessEventInput = {
+  userId?: string | null;
+  userType?: BusinessUserType | string | null;
+  attemptedModule: string;
+  attemptedAction: string;
+  reason: string;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
+const businessRoleSeeds = [
+  ["main_admin_owner", "Main Admin / Owner Admin", "Shrinika owner authority for all internal Business Control Centre operations.", "INTERNAL"],
+  ["system_guardian", "Founder-builder / System Guardian", "Shiva internal system guardian role for technical governance and safety oversight.", "INTERNAL"],
+  ["company_admin", "Company Admin", "Company-level administration and governance.", "INTERNAL"],
+  ["manager", "Manager", "Project ownership, assignment approval, escalation, and final review.", "INTERNAL"],
+  ["team_leader", "Team Leader", "Delivery coordination and team handoff ownership.", "INTERNAL"],
+  ["frontend_developer", "Frontend Developer", "Frontend delivery role for assigned project work.", "INTERNAL"],
+  ["backend_developer", "Backend Developer", "Backend delivery role for assigned project work.", "INTERNAL"],
+  ["testing_qa_developer", "Testing / QA Developer", "Testing, QA, and validation role for assigned project work.", "INTERNAL"],
+  ["final_production_readiness_developer", "Final Production Readiness Developer", "Final production readiness checks before deployment approval.", "INTERNAL"],
+  ["hr_manager", "HR Manager", "HRMS, onboarding, employee, and access request workflow owner.", "INTERNAL"],
+  ["finance_admin", "Finance Admin", "Finance, quotation, invoice, agreement, and payment tracking workflow owner.", "INTERNAL"],
+  ["support_manager", "Support Manager", "Support desk, ticket assignment, and escalation workflow owner.", "INTERNAL"],
+  ["agent_supervisor", "Agent Supervisor", "Agent registry, task queue, and agent governance owner.", "INTERNAL"],
+  ["auditor", "Auditor", "Audit, compliance, denied access, and sensitive action review owner.", "INTERNAL"],
+  ["cloud_deployment_operator", "Cloud / Deployment Operator", "Deployment, system health, rollback, backup, and incident operations owner.", "INTERNAL"],
+  ["external_client_user", "External Client User", "Future external Client Portal role with no internal access.", "EXTERNAL_CLIENT"]
+] as const;
+
+const businessPermissionModules = [
+  "company",
+  "projects",
+  "clients",
+  "support",
+  "finance",
+  "hrms",
+  "agents",
+  "audit",
+  "system",
+  "deployment",
+  "app_studio",
+  "client_portal"
+] as const;
+
+const businessPermissionActions = [
+  "view",
+  "create",
+  "update",
+  "approve",
+  "reject",
+  "assign",
+  "export",
+  "configure",
+  "deploy",
+  "audit",
+  "admin_override"
+] as const;
+
 export function initializeDatabaseOn(database: Database.Database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS projects (
@@ -346,6 +438,81 @@ export function initializeDatabaseOn(database: Database.Database) {
       summary TEXT NOT NULL,
       payload_json TEXT,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      display_name TEXT NOT NULL,
+      user_type TEXT NOT NULL CHECK(user_type IN ('INTERNAL','EXTERNAL_CLIENT')),
+      status TEXT NOT NULL CHECK(status IN ('ACTIVE','INVITED','SUSPENDED','ARCHIVED')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS internal_user_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL UNIQUE,
+      employee_code TEXT,
+      title TEXT,
+      department_key TEXT,
+      job_role_key TEXT,
+      reports_to_user_id TEXT,
+      is_system_guardian INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE CASCADE,
+      FOREIGN KEY(reports_to_user_id) REFERENCES business_users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_roles (
+      id TEXT PRIMARY KEY,
+      role_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('INTERNAL','EXTERNAL_CLIENT')),
+      is_system_role INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_permissions (
+      id TEXT PRIMARY KEY,
+      permission_key TEXT NOT NULL UNIQUE,
+      module TEXT NOT NULL,
+      action TEXT NOT NULL,
+      description TEXT NOT NULL,
+      internal_only INTEGER NOT NULL DEFAULT 1,
+      risk_level TEXT NOT NULL CHECK(risk_level IN ('low','medium','high','critical')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_role_permissions (
+      id TEXT PRIMARY KEY,
+      role_id TEXT NOT NULL,
+      permission_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(role_id) REFERENCES business_roles(id) ON DELETE CASCADE,
+      FOREIGN KEY(permission_id) REFERENCES business_permissions(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS business_user_roles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      assigned_by_user_id TEXT,
+      created_at TEXT NOT NULL,
+      revoked_at TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE CASCADE,
+      FOREIGN KEY(role_id) REFERENCES business_roles(id) ON DELETE CASCADE,
+      FOREIGN KEY(assigned_by_user_id) REFERENCES business_users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS denied_access_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      user_type TEXT,
+      attempted_module TEXT NOT NULL,
+      attempted_action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      metadata_json TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE SET NULL
     );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
@@ -724,6 +891,13 @@ export function initializeDatabaseOn(database: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_users_type_status ON business_users(user_type, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_role_permissions_unique ON business_role_permissions(role_id, permission_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_user_roles_active_unique ON business_user_roles(user_id, role_id) WHERE revoked_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_business_user_roles_user ON business_user_roles(user_id, revoked_at);
+    CREATE INDEX IF NOT EXISTS idx_business_permissions_module_action ON business_permissions(module, action);
+    CREATE INDEX IF NOT EXISTS idx_denied_access_events_user ON denied_access_events(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_denied_access_events_attempt ON denied_access_events(attempted_module, attempted_action, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -1402,6 +1576,7 @@ export function initializeDatabaseOn(database: Database.Database) {
   seedPermissionProfiles(database, now);
   seedMediaTemplates(database, now);
   seedScaffoldTemplates(database, now);
+  seedBusinessIdentityAccess(database, now);
   const insertAgent = database.prepare(`INSERT OR IGNORE INTO agents
     (id,name,role,purpose,instructions,status,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`);
@@ -1413,6 +1588,192 @@ export function initializeDatabaseOn(database: Database.Database) {
 
 export function initializeDatabase() {
   initializeDatabaseOn(db);
+}
+
+export function getBusinessRoleByKey(database: Database.Database, roleKey: string): BusinessRoleRow | undefined {
+  return database.prepare(`SELECT id,role_key AS roleKey,name,description,scope,is_system_role AS isSystemRole,created_at AS createdAt,updated_at AS updatedAt
+    FROM business_roles WHERE role_key=?`).get(roleKey) as BusinessRoleRow | undefined;
+}
+
+export function getBusinessPermissionByKey(database: Database.Database, permissionKey: string): BusinessPermissionRow | undefined {
+  return database.prepare(`SELECT id,permission_key AS permissionKey,module,action,description,internal_only AS internalOnly,risk_level AS riskLevel,created_at AS createdAt,updated_at AS updatedAt
+    FROM business_permissions WHERE permission_key=?`).get(permissionKey) as BusinessPermissionRow | undefined;
+}
+
+export function userHasBusinessPermission(database: Database.Database, userId: string, permissionKey: string): boolean {
+  const row = database.prepare(`SELECT u.user_type AS userType,u.status,p.internal_only AS internalOnly
+    FROM business_users u
+    JOIN business_user_roles ur ON ur.user_id=u.id AND ur.revoked_at IS NULL
+    JOIN business_role_permissions rp ON rp.role_id=ur.role_id
+    JOIN business_permissions p ON p.id=rp.permission_id
+    WHERE u.id=? AND p.permission_key=?
+    LIMIT 1`).get(userId, permissionKey) as { userType: BusinessUserType; status: BusinessUserStatus; internalOnly: number } | undefined;
+  if (!row) return false;
+  if (row.status !== "ACTIVE" && row.status !== "INVITED") return false;
+  if (row.internalOnly === 1 && row.userType !== "INTERNAL") return false;
+  return true;
+}
+
+export function assignBusinessRoleToUser(database: Database.Database, input: AssignBusinessRoleInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const user = database.prepare("SELECT id,user_type AS userType,status FROM business_users WHERE id=?").get(input.userId) as { id: string; userType: BusinessUserType; status: BusinessUserStatus } | undefined;
+  if (!user) throw new Error("Business user not found");
+  if (user.status === "ARCHIVED" || user.status === "SUSPENDED") throw new Error("Business user is not active for role assignment");
+
+  const role = getBusinessRoleByKey(database, input.roleKey);
+  if (!role) throw new Error("Business role not found");
+  if (user.userType === "EXTERNAL_CLIENT" && role.scope === "INTERNAL") {
+    throw new Error("External client users cannot receive internal roles");
+  }
+
+  const existing = database.prepare(`SELECT id,user_id AS userId,role_id AS roleId,assigned_by_user_id AS assignedByUserId,created_at AS createdAt,revoked_at AS revokedAt
+    FROM business_user_roles WHERE user_id=? AND role_id=? AND revoked_at IS NULL`).get(user.id, role.id) as { id: string; userId: string; roleId: string; assignedByUserId: string | null; createdAt: string; revokedAt: string | null } | undefined;
+  if (existing) return existing;
+
+  const id = `business-user-role-${user.id}-${role.id}-${timestamp.replace(/[^0-9A-Za-z]/g, "")}`;
+  database.prepare("INSERT INTO business_user_roles (id,user_id,role_id,assigned_by_user_id,created_at,revoked_at) VALUES (?,?,?,?,?,NULL)")
+    .run(id, user.id, role.id, input.assignedByUserId ?? null, timestamp);
+  return database.prepare(`SELECT id,user_id AS userId,role_id AS roleId,assigned_by_user_id AS assignedByUserId,created_at AS createdAt,revoked_at AS revokedAt
+    FROM business_user_roles WHERE id=?`).get(id);
+}
+
+export function recordDeniedAccessEvent(database: Database.Database, input: DeniedAccessEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const metadata = input.metadata ? sanitizeDeniedAccessMetadata(input.metadata) : null;
+  const id = `denied-access-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO denied_access_events (id,user_id,user_type,attempted_module,attempted_action,reason,created_at,metadata_json)
+    VALUES (?,?,?,?,?,?,?,?)`).run(
+    id,
+    input.userId ?? null,
+    input.userType ?? null,
+    input.attemptedModule,
+    input.attemptedAction,
+    input.reason,
+    timestamp,
+    metadata ? JSON.stringify(metadata) : null
+  );
+  return database.prepare(`SELECT id,user_id AS userId,user_type AS userType,attempted_module AS attemptedModule,attempted_action AS attemptedAction,reason,created_at AS createdAt,metadata_json AS metadataJson
+    FROM denied_access_events WHERE id=?`).get(id);
+}
+
+function seedBusinessIdentityAccess(database: Database.Database, timestamp: string) {
+  const insertUser = database.prepare(`INSERT OR IGNORE INTO business_users (id,email,display_name,user_type,status,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,NULL)`);
+  insertUser.run("business-user-shrinika", "owner@shrinika.local", "Shrinika", "INTERNAL", "ACTIVE", timestamp, timestamp);
+  insertUser.run("business-user-shiva", "shiva@shrinika.local", "Shiva", "INTERNAL", "ACTIVE", timestamp, timestamp);
+
+  const insertInternalProfile = database.prepare(`INSERT OR IGNORE INTO internal_user_profiles
+    (id,user_id,employee_code,title,department_key,job_role_key,reports_to_user_id,is_system_guardian,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  insertInternalProfile.run("internal-profile-shrinika", "business-user-shrinika", null, "Main Admin / Owner Admin", "admin_governance", "main_admin_owner", null, 0, timestamp, timestamp);
+  insertInternalProfile.run("internal-profile-shiva", "business-user-shiva", null, "Founder-builder / System Guardian", "admin_governance", "system_guardian", "business-user-shrinika", 1, timestamp, timestamp);
+
+  const insertRole = database.prepare(`INSERT OR IGNORE INTO business_roles (id,role_key,name,description,scope,is_system_role,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`);
+  for (const [roleKey, name, description, scope] of businessRoleSeeds) {
+    insertRole.run(`business-role-${roleKey}`, roleKey, name, description, scope, 1, timestamp, timestamp);
+  }
+
+  const insertPermission = database.prepare(`INSERT OR IGNORE INTO business_permissions
+    (id,permission_key,module,action,description,internal_only,risk_level,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`);
+  for (const moduleKey of businessPermissionModules) {
+    for (const action of businessPermissionActions) {
+      const permissionKey = `${moduleKey}.${action}`;
+      const externalSafe = permissionKey === "client_portal.view";
+      insertPermission.run(
+        `business-permission-${moduleKey}-${action}`,
+        permissionKey,
+        moduleKey,
+        action,
+        `${action.replace(/_/g, " ")} permission for ${moduleKey.replace(/_/g, " ")}.`,
+        externalSafe ? 0 : 1,
+        businessPermissionRiskLevel(moduleKey, action),
+        timestamp,
+        timestamp
+      );
+    }
+  }
+
+  seedBusinessRolePermissions(database, timestamp);
+  assignBusinessRoleToUser(database, { userId: "business-user-shrinika", roleKey: "main_admin_owner", now: timestamp });
+  assignBusinessRoleToUser(database, { userId: "business-user-shiva", roleKey: "system_guardian", assignedByUserId: "business-user-shrinika", now: timestamp });
+}
+
+function seedBusinessRolePermissions(database: Database.Database, timestamp: string) {
+  const allPermissions = database.prepare("SELECT id,permission_key AS permissionKey,internal_only AS internalOnly FROM business_permissions").all() as Array<{ id: string; permissionKey: string; internalOnly: number }>;
+  const roleByKey = new Map((database.prepare("SELECT id,role_key AS roleKey FROM business_roles").all() as Array<{ id: string; roleKey: string }>).map((role) => [role.roleKey, role.id]));
+  const insert = database.prepare("INSERT OR IGNORE INTO business_role_permissions (id,role_id,permission_id,created_at) VALUES (?,?,?,?)");
+  const grant = (roleKey: string, permissionKey: string) => {
+    const roleId = roleByKey.get(roleKey);
+    const permission = allPermissions.find((item) => item.permissionKey === permissionKey);
+    if (!roleId || !permission) return;
+    insert.run(`business-role-permission-${roleKey}-${permissionKey}`, roleId, permission.id, timestamp);
+  };
+  const grantInternalActions = (roleKey: string, moduleKey: string, actions: string[]) => {
+    for (const action of actions) grant(roleKey, `${moduleKey}.${action}`);
+  };
+
+  for (const permission of allPermissions.filter((item) => item.internalOnly === 1)) grant("main_admin_owner", permission.permissionKey);
+  for (const permission of allPermissions.filter((item) => item.internalOnly === 1 && !item.permissionKey.endsWith(".admin_override"))) grant("system_guardian", permission.permissionKey);
+
+  for (const moduleKey of ["company", "projects", "clients", "support", "finance", "hrms", "agents", "audit", "system", "deployment", "app_studio"]) {
+    grantInternalActions("company_admin", moduleKey, ["view", "create", "update", "approve", "reject", "assign", "export", "configure", "audit"]);
+  }
+  grantInternalActions("manager", "projects", ["view", "create", "update", "approve", "reject", "assign", "export", "audit"]);
+  grantInternalActions("manager", "clients", ["view", "update"]);
+  grantInternalActions("manager", "support", ["view", "approve", "reject", "assign"]);
+  grantInternalActions("manager", "deployment", ["view", "approve", "reject", "audit"]);
+  grantInternalActions("team_leader", "projects", ["view", "update", "assign"]);
+  for (const roleKey of ["frontend_developer", "backend_developer", "testing_qa_developer", "final_production_readiness_developer"]) {
+    grantInternalActions(roleKey, "projects", ["view", "update"]);
+    grant(roleKey, "app_studio.view");
+  }
+  grantInternalActions("hr_manager", "hrms", ["view", "create", "update", "approve", "reject", "assign", "export", "audit"]);
+  grantInternalActions("finance_admin", "finance", ["view", "create", "update", "approve", "reject", "assign", "export", "audit"]);
+  grantInternalActions("support_manager", "support", ["view", "create", "update", "approve", "reject", "assign", "export", "audit"]);
+  grantInternalActions("support_manager", "clients", ["view", "update"]);
+  grantInternalActions("agent_supervisor", "agents", ["view", "create", "update", "approve", "reject", "assign", "export", "configure", "audit"]);
+  grantInternalActions("auditor", "audit", ["view", "export", "audit"]);
+  for (const moduleKey of ["company", "projects", "clients", "support", "finance", "hrms", "agents", "system", "deployment", "app_studio"]) grant("auditor", `${moduleKey}.audit`);
+  grantInternalActions("cloud_deployment_operator", "system", ["view", "update", "export", "configure", "audit"]);
+  grantInternalActions("cloud_deployment_operator", "deployment", ["view", "create", "update", "export", "configure", "deploy", "audit"]);
+  grant("external_client_user", "client_portal.view");
+}
+
+function businessPermissionRiskLevel(moduleKey: string, action: string) {
+  if (action === "admin_override" || action === "deploy") return "critical";
+  if (["finance", "hrms", "audit", "deployment", "agents"].includes(moduleKey) && ["create", "update", "approve", "reject", "assign", "export", "configure", "audit"].includes(action)) return "high";
+  if (["approve", "reject", "assign", "configure", "export", "audit"].includes(action)) return "medium";
+  return "low";
+}
+
+function sanitizeDeniedAccessMetadata(metadata: Record<string, unknown>) {
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (isSensitiveMetadataKey(key)) {
+      clean[key] = "[redacted]";
+      continue;
+    }
+    if (typeof value === "string") {
+      clean[key] = looksSensitive(value) ? "[redacted]" : value.slice(0, 500);
+    } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+      clean[key] = value;
+    } else if (Array.isArray(value)) {
+      clean[key] = value.slice(0, 20).map((item) => typeof item === "string" ? (looksSensitive(item) ? "[redacted]" : item.slice(0, 200)) : String(item).slice(0, 200));
+    } else {
+      clean[key] = "[object redacted]";
+    }
+  }
+  return clean;
+}
+
+function isSensitiveMetadataKey(key: string) {
+  return /secret|token|api[_-]?key|password|credential|authorization|cookie|session/i.test(key);
+}
+
+function looksSensitive(value: string) {
+  return /(sk-[A-Za-z0-9_-]{12,}|api[_-]?key|password|bearer\s+|secret|token=|authorization:)/i.test(value);
 }
 
 function seedPermissionProfiles(db: Database.Database, timestamp: string) {
