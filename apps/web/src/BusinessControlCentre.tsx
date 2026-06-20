@@ -290,6 +290,67 @@ type BlockedSafetyEvent = {
   requiredNextStep: string;
 };
 
+type SystemComponentStatus = "Healthy" | "Warning" | "Degraded Placeholder" | "Offline Placeholder" | "Not Connected" | "Needs Review";
+
+type SystemComponentRecord = {
+  componentName: string;
+  area: string;
+  status: SystemComponentStatus;
+  healthNote: string;
+  owner: string;
+  lastChecked: string;
+  riskLevel: GovernanceRisk;
+  nextAction: string;
+};
+
+type DeploymentEnvironment = "Local" | "Staging Placeholder" | "Production Placeholder";
+
+type ReleaseStatus =
+  | "Draft"
+  | "Waiting Approval"
+  | "Testing"
+  | "Security Review"
+  | "Ready for Staging"
+  | "Ready for Production"
+  | "Deployed Placeholder"
+  | "Rollback Required"
+  | "Failed Placeholder";
+
+type DeploymentReleaseRecord = {
+  releaseId: string;
+  projectModule: string;
+  environment: DeploymentEnvironment;
+  status: ReleaseStatus;
+  approvalOwner: string;
+  gitCheckpoint: string;
+  testStatus: string;
+  securityReviewStatus: string;
+  rollbackStatus: string;
+  lastUpdate: string;
+};
+
+type BackupRecoveryRecord = {
+  item: string;
+  frequency: string;
+  status: SystemComponentStatus;
+  owner: string;
+  lastChecked: string;
+  recoveryNote: string;
+};
+
+type IncidentStatus = "Open Placeholder" | "Investigating" | "Waiting Approval" | "Resolved Placeholder" | "Monitoring";
+
+type IncidentRecord = {
+  incidentId: string;
+  area: string;
+  severity: GovernanceRisk;
+  status: IncidentStatus;
+  owner: string;
+  impact: string;
+  requiredNextStep: string;
+  lastUpdate: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -315,7 +376,8 @@ const sidebarSections = [
   { id: "hrms", label: "HRMS / Employee Management" },
   { id: "agent-operations", label: "Agent Operations" },
   { id: "audit-compliance", label: "Audit & Compliance" },
-  { id: "system-health", label: "System Health" }
+  { id: "system-health", label: "System Health" },
+  { id: "deployment-cloud", label: "Deployment / Cloud Ops" }
 ];
 
 const dashboardCards: MetricCard[] = [
@@ -746,12 +808,380 @@ const tableSections: TableSection[] = [
   }
 ];
 
-const systemHealthCards = [
-  { label: "App Studio", value: "Online placeholder", tone: "success" },
-  { label: "API", value: "Not connected on this shell", tone: "neutral" },
-  { label: "Database", value: "No reads in MVP shell", tone: "neutral" },
-  { label: "Agent queue", value: "Static preview", tone: "warning" },
-  { label: "Audit logging", value: "Future integration", tone: "warning" }
+const systemHealthOverviewCards: MetricCard[] = [
+  { label: "Overall system status", value: "Stable", note: "Static placeholder", tone: "success" },
+  { label: "Web app status", value: "Healthy", note: "No live probe connected", tone: "success" },
+  { label: "API status", value: "Not connected", note: "Placeholder API view", tone: "neutral" },
+  { label: "Database status", value: "Sample", note: "No database read in UI", tone: "neutral" },
+  { label: "Background jobs", value: "Placeholder", note: "No job runner connected", tone: "warning" },
+  { label: "Provider health", value: "Stable", note: "No provider calls from UI", tone: "success" },
+  { label: "Storage health", value: "Needs review", note: "Mock storage signal", tone: "warning" },
+  { label: "Backup status", value: "Sample", note: "No backup job connected", tone: "neutral" },
+  { label: "Last deployment", value: "Placeholder", note: "No deployment execution", tone: "neutral" },
+  { label: "Uptime", value: "99.9%", note: "Placeholder uptime", tone: "success" },
+  { label: "Open incidents", value: "2", note: "Mock incident count", tone: "danger" },
+  { label: "Security checks", value: "Pending", note: "Static security review", tone: "warning" }
+];
+
+const systemComponentStatuses: SystemComponentStatus[] = ["Healthy", "Warning", "Degraded Placeholder", "Offline Placeholder", "Not Connected", "Needs Review"];
+
+const systemComponents: SystemComponentRecord[] = [
+  {
+    componentName: "Business Control Centre",
+    area: "Internal Admin",
+    status: "Healthy",
+    healthNote: "Static dashboard rendering placeholder.",
+    owner: "Shrinika / Shiva",
+    lastChecked: "Placeholder: today",
+    riskLevel: "Low",
+    nextAction: "Continue UI validation."
+  },
+  {
+    componentName: "App Studio",
+    area: "Internal Development",
+    status: "Healthy",
+    healthNote: "Internal-only workspace placeholder.",
+    owner: "Shiva",
+    lastChecked: "Placeholder: today",
+    riskLevel: "Medium",
+    nextAction: "Keep access boundary reviewed."
+  },
+  {
+    componentName: "Agent Core",
+    area: "Agent Governance",
+    status: "Warning",
+    healthNote: "Approval-gated agent controls placeholder.",
+    owner: "Agent Supervisor",
+    lastChecked: "Placeholder: this week",
+    riskLevel: "High",
+    nextAction: "Review blocked actions before release."
+  },
+  {
+    componentName: "Media Studio",
+    area: "Media",
+    status: "Needs Review",
+    healthNote: "Media provider view remains separate.",
+    owner: "Media Operator",
+    lastChecked: "Placeholder: sample",
+    riskLevel: "Medium",
+    nextAction: "No changes in this step."
+  },
+  {
+    componentName: "Client Portal placeholder",
+    area: "Customer Surface",
+    status: "Not Connected",
+    healthNote: "Future customer portal remains separate.",
+    owner: "Future portal team",
+    lastChecked: "Placeholder: not connected",
+    riskLevel: "Medium",
+    nextAction: "Do not expose internal systems."
+  },
+  {
+    componentName: "Customer Website placeholder",
+    area: "Customer Surface",
+    status: "Not Connected",
+    healthNote: "Customer website is outside this UI.",
+    owner: "Customer systems team",
+    lastChecked: "Placeholder: not connected",
+    riskLevel: "Low",
+    nextAction: "Keep customer access separate."
+  },
+  {
+    componentName: "API Server",
+    area: "Backend",
+    status: "Warning",
+    healthNote: "No live probe connected from dashboard.",
+    owner: "Backend Operator",
+    lastChecked: "Placeholder: sample",
+    riskLevel: "Medium",
+    nextAction: "Add real probes only in future backend step."
+  },
+  {
+    componentName: "Database",
+    area: "Data",
+    status: "Degraded Placeholder",
+    healthNote: "Mock status; no database read performed.",
+    owner: "Database Operator",
+    lastChecked: "Placeholder: sample",
+    riskLevel: "High",
+    nextAction: "Require backup and recovery review before production."
+  },
+  {
+    componentName: "File Storage",
+    area: "Storage",
+    status: "Needs Review",
+    healthNote: "Storage provider is placeholder only.",
+    owner: "Cloud Operator",
+    lastChecked: "Placeholder: sample",
+    riskLevel: "Medium",
+    nextAction: "Validate provider later with approval."
+  },
+  {
+    componentName: "Provider Gateway",
+    area: "Providers",
+    status: "Warning",
+    healthNote: "No real provider calls from this UI.",
+    owner: "Shiva",
+    lastChecked: "Placeholder: today",
+    riskLevel: "High",
+    nextAction: "Keep API keys redacted."
+  },
+  {
+    componentName: "Audit Log",
+    area: "Governance",
+    status: "Healthy",
+    healthNote: "Static audit log placeholder.",
+    owner: "Auditor",
+    lastChecked: "Placeholder: today",
+    riskLevel: "Medium",
+    nextAction: "Connect persistence in future approved step."
+  },
+  {
+    componentName: "Notification System placeholder",
+    area: "Notifications",
+    status: "Offline Placeholder",
+    healthNote: "Email/SMS notifications are not connected.",
+    owner: "Support Manager",
+    lastChecked: "Placeholder: not connected",
+    riskLevel: "Low",
+    nextAction: "Do not send emails from this UI."
+  }
+];
+
+const deploymentOverviewCards: MetricCard[] = [
+  { label: "Deployment candidates", value: "5", note: "Static release queue", tone: "neutral" },
+  { label: "Awaiting approval", value: "3", note: "Manager/Admin approval required", tone: "warning" },
+  { label: "Ready for staging", value: "2", note: "Placeholder readiness", tone: "success" },
+  { label: "Ready for production", value: "1", note: "Requires final approval", tone: "warning" },
+  { label: "Rollback plans", value: "4", note: "Placeholder plans", tone: "neutral" },
+  { label: "Failed deployments", value: "1", note: "Mock failure count", tone: "danger" },
+  { label: "Git checkpoints", value: "9", note: "Static checkpoint count", tone: "success" },
+  { label: "Release notes pending", value: "3", note: "Documentation placeholder", tone: "warning" }
+];
+
+const deploymentPipelineSteps = [
+  "Build mission complete",
+  "Manager review",
+  "Typecheck/tests",
+  "Security review",
+  "Git checkpoint",
+  "Staging deployment placeholder",
+  "QA validation",
+  "Final approval",
+  "Production deployment placeholder",
+  "Post-deployment monitoring",
+  "Rollback plan archived"
+];
+
+const deploymentEnvironments: DeploymentEnvironment[] = ["Local", "Staging Placeholder", "Production Placeholder"];
+
+const releaseStatuses: ReleaseStatus[] = ["Draft", "Waiting Approval", "Testing", "Security Review", "Ready for Staging", "Ready for Production", "Deployed Placeholder", "Rollback Required", "Failed Placeholder"];
+
+const deploymentReleases: DeploymentReleaseRecord[] = [
+  {
+    releaseId: "REL-9001",
+    projectModule: "Business Control Centre",
+    environment: "Local",
+    status: "Testing",
+    approvalOwner: "Manager",
+    gitCheckpoint: "Checkpoint placeholder",
+    testStatus: "Typecheck/tests placeholder passed",
+    securityReviewStatus: "Pending security review",
+    rollbackStatus: "Rollback plan draft",
+    lastUpdate: "Placeholder: today"
+  },
+  {
+    releaseId: "REL-9002",
+    projectModule: "Client Management",
+    environment: "Staging Placeholder",
+    status: "Ready for Staging",
+    approvalOwner: "Shrinika",
+    gitCheckpoint: "Git checkpoint sample",
+    testStatus: "Passed placeholder",
+    securityReviewStatus: "Approved placeholder",
+    rollbackStatus: "Plan archived placeholder",
+    lastUpdate: "Placeholder: this week"
+  },
+  {
+    releaseId: "REL-9003",
+    projectModule: "Finance & Billing",
+    environment: "Production Placeholder",
+    status: "Waiting Approval",
+    approvalOwner: "Shrinika / Finance Admin",
+    gitCheckpoint: "Required before production",
+    testStatus: "Waiting validation",
+    securityReviewStatus: "Required before production",
+    rollbackStatus: "Required before production",
+    lastUpdate: "Placeholder: approval queue"
+  },
+  {
+    releaseId: "REL-9004",
+    projectModule: "Agent Operations",
+    environment: "Staging Placeholder",
+    status: "Security Review",
+    approvalOwner: "Security reviewer",
+    gitCheckpoint: "Checkpoint placeholder",
+    testStatus: "Passed placeholder",
+    securityReviewStatus: "In review placeholder",
+    rollbackStatus: "Draft placeholder",
+    lastUpdate: "Placeholder: security review"
+  },
+  {
+    releaseId: "REL-9005",
+    projectModule: "Media Studio",
+    environment: "Local",
+    status: "Rollback Required",
+    approvalOwner: "Manager",
+    gitCheckpoint: "Checkpoint sample",
+    testStatus: "Failed placeholder",
+    securityReviewStatus: "Needs review",
+    rollbackStatus: "Rollback approval required",
+    lastUpdate: "Placeholder: blocked"
+  },
+  {
+    releaseId: "REL-9006",
+    projectModule: "System Health",
+    environment: "Production Placeholder",
+    status: "Failed Placeholder",
+    approvalOwner: "Cloud Operator",
+    gitCheckpoint: "Missing checkpoint placeholder",
+    testStatus: "Missing test validation",
+    securityReviewStatus: "Not approved",
+    rollbackStatus: "No action connected",
+    lastUpdate: "Placeholder: failed sample"
+  }
+];
+
+const cloudOperationsPlaceholders = [
+  "Hosting provider placeholder",
+  "Domain/DNS placeholder",
+  "Email provider placeholder",
+  "Storage provider placeholder",
+  "Backup provider placeholder",
+  "Monitoring provider placeholder",
+  "SSL certificate placeholder",
+  "CDN placeholder",
+  "No real provider calls",
+  "No secrets shown"
+];
+
+const backupRecoveryItems: BackupRecoveryRecord[] = [
+  {
+    item: "Database backup placeholder",
+    frequency: "Daily placeholder",
+    status: "Needs Review",
+    owner: "Database Operator",
+    lastChecked: "Placeholder: today",
+    recoveryNote: "Recovery process not connected."
+  },
+  {
+    item: "File storage backup placeholder",
+    frequency: "Weekly placeholder",
+    status: "Warning",
+    owner: "Cloud Operator",
+    lastChecked: "Placeholder: this week",
+    recoveryNote: "Storage backup provider not connected."
+  },
+  {
+    item: "Git repository checkpoint",
+    frequency: "Before risky changes",
+    status: "Healthy",
+    owner: "Shiva",
+    lastChecked: "Placeholder: active",
+    recoveryNote: "Checkpoint required before deployment."
+  },
+  {
+    item: "Environment config backup placeholder",
+    frequency: "Manual placeholder",
+    status: "Not Connected",
+    owner: "Admin",
+    lastChecked: "Placeholder: not connected",
+    recoveryNote: "No secrets shown or copied."
+  },
+  {
+    item: "Audit log export placeholder",
+    frequency: "Monthly placeholder",
+    status: "Warning",
+    owner: "Auditor",
+    lastChecked: "Placeholder: sample",
+    recoveryNote: "Future export must redact sensitive data."
+  },
+  {
+    item: "Media assets backup placeholder",
+    frequency: "Weekly placeholder",
+    status: "Degraded Placeholder",
+    owner: "Media Operator",
+    lastChecked: "Placeholder: sample",
+    recoveryNote: "No backup jobs connected."
+  }
+];
+
+const incidentStatuses: IncidentStatus[] = ["Open Placeholder", "Investigating", "Waiting Approval", "Resolved Placeholder", "Monitoring"];
+
+const incidents: IncidentRecord[] = [
+  {
+    incidentId: "INC-7001",
+    area: "Provider Gateway",
+    severity: "High",
+    status: "Investigating",
+    owner: "Shiva",
+    impact: "Provider health placeholder warning.",
+    requiredNextStep: "Review provider circuit breaker before any real provider call.",
+    lastUpdate: "Placeholder: today"
+  },
+  {
+    incidentId: "INC-7002",
+    area: "Database",
+    severity: "Critical",
+    status: "Waiting Approval",
+    owner: "Database Operator",
+    impact: "Backup review required before production readiness.",
+    requiredNextStep: "Admin approval for future backup integration.",
+    lastUpdate: "Placeholder: approval queue"
+  },
+  {
+    incidentId: "INC-7003",
+    area: "Deployment",
+    severity: "Medium",
+    status: "Open Placeholder",
+    owner: "Manager",
+    impact: "Release notes and rollback plan missing.",
+    requiredNextStep: "Complete release notes and rollback plan.",
+    lastUpdate: "Placeholder: this week"
+  },
+  {
+    incidentId: "INC-7004",
+    area: "Cloud / DNS",
+    severity: "High",
+    status: "Monitoring",
+    owner: "Cloud Operator",
+    impact: "DNS changes are blocked in this UI.",
+    requiredNextStep: "Keep all domain changes approval-gated.",
+    lastUpdate: "Placeholder: monitoring"
+  },
+  {
+    incidentId: "INC-7005",
+    area: "Security",
+    severity: "Low",
+    status: "Resolved Placeholder",
+    owner: "Security reviewer",
+    impact: "Secret display prevented in placeholder event.",
+    requiredNextStep: "Keep redaction checks in approval rules.",
+    lastUpdate: "Placeholder: resolved"
+  }
+];
+
+const deploymentApprovalRules = [
+  "Production deployment requires Manager/Admin approval",
+  "Rollback requires approval unless emergency rule exists later",
+  "Domain/DNS changes require Admin approval",
+  "Provider changes require Admin approval",
+  "Secret/API key changes require Admin + audit review",
+  "Failed tests block deployment",
+  "Security review required before production",
+  "Git checkpoint required before deployment",
+  "Post-deployment monitoring required",
+  "Rollback plan required before production release"
 ];
 
 const financeOverviewCards: MetricCard[] = [
@@ -2462,18 +2892,195 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
             </div>
           </section>
 
-          <section className="business-section" id="system-health">
+          <section className="business-section system-operations-section" id="system-health">
             <div className="business-section-heading">
-              <span>Static system health cards. No backend probes in this slice.</span>
+              <span>Static operations UI. No monitoring probes, provider calls, backup jobs, deployment execution, or infrastructure actions are connected.</span>
               <h2>System Health</h2>
             </div>
-            <div className="system-health-grid">
-              {systemHealthCards.map(card => (
-                <article className={`system-health-card ${card.tone}`} key={card.label}>
+            <div className="business-boundary-notice system-boundary-notice">
+              <strong>System / Cloud Boundary Notice</strong>
+              <p>System Health and Cloud Operations are internal-only dashboards. This UI must not execute deployments, expose secrets, call providers, change DNS, send emails, modify infrastructure, or perform production actions.</p>
+            </div>
+            <div className="business-card-grid system-overview-grid" aria-label="System Health overview cards">
+              {systemHealthOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
                   <span>{card.label}</span>
                   <strong>{card.value}</strong>
+                  <p>{card.note}</p>
                 </article>
               ))}
+            </div>
+            <div className="system-ops-status-grid">
+              <article>
+                <span>Component statuses</span>
+                <div>{systemComponentStatuses.map(status => <strong className={`system-ops-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+            </div>
+            <div className="ops-subsection">
+              <div className="business-section-heading">
+                <span>Mock component health. No live status checks are performed.</span>
+                <h2>System Component Status</h2>
+              </div>
+              <div className="system-component-grid">
+                {systemComponents.map(component => (
+                  <article className="system-ops-card" key={component.componentName}>
+                    <div className="system-ops-card-header">
+                      <div>
+                        <span>{component.area}</span>
+                        <h3>{component.componentName}</h3>
+                        <small>{component.owner}</small>
+                      </div>
+                      <span className={`system-ops-status-badge ${badgeClassName(component.status)}`}>{component.status}</span>
+                    </div>
+                    <div className="system-ops-detail-grid">
+                      <div><span>Health note</span><strong>{component.healthNote}</strong></div>
+                      <div><span>Last checked</span><strong>{component.lastChecked}</strong></div>
+                      <div><span>Risk level</span><strong className={`priority-text ${component.riskLevel.toLowerCase()}`}>{component.riskLevel}</strong></div>
+                      <div><span>Next action</span><strong>{component.nextAction}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="business-section deployment-cloud-section" id="deployment-cloud">
+            <div className="business-section-heading">
+              <span>Static deployment and cloud operations visibility. No deployment, rollback, DNS, provider, email, backup, or infrastructure action is connected.</span>
+              <h2>Deployment / Cloud Operations</h2>
+            </div>
+            <div className="business-boundary-notice system-boundary-notice">
+              <strong>Deployment Approval Boundary</strong>
+              <p>Deployment and cloud operations are approval-gated. No production deployment, rollback, domain change, provider change, secret change, or infrastructure change should bypass human approval, audit logging, Git checkpoints, tests, and security review.</p>
+            </div>
+            <div className="business-card-grid deployment-overview-grid" aria-label="Deployment overview cards">
+              {deploymentOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="deployment-pipeline-panel">
+              <div className="business-section-heading">
+                <span>Deployment Pipeline</span>
+                <h2>Approval-Gated Release Flow</h2>
+              </div>
+              <div className="deployment-pipeline-chain" aria-label="Deployment pipeline">
+                {deploymentPipelineSteps.map((step, index) => (
+                  <div className="deployment-pipeline-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="system-ops-status-grid">
+              <article>
+                <span>Environments</span>
+                <div>{deploymentEnvironments.map(environment => <strong key={environment}>{environment}</strong>)}</div>
+              </article>
+              <article>
+                <span>Release statuses</span>
+                <div>{releaseStatuses.map(status => <strong className={`system-ops-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+            </div>
+            <div className="ops-subsection">
+              <div className="business-section-heading">
+                <span>Mock releases. No deployment execution or environment mutation is connected.</span>
+                <h2>Deployment Releases</h2>
+              </div>
+              <div className="deployment-release-grid">
+                {deploymentReleases.map(release => (
+                  <article className="system-ops-card" key={release.releaseId}>
+                    <div className="system-ops-card-header">
+                      <div>
+                        <span>{release.releaseId} / {release.environment}</span>
+                        <h3>{release.projectModule}</h3>
+                        <small>{release.approvalOwner}</small>
+                      </div>
+                      <span className={`system-ops-status-badge ${badgeClassName(release.status)}`}>{release.status}</span>
+                    </div>
+                    <div className="system-ops-detail-grid">
+                      <div><span>Git checkpoint</span><strong>{release.gitCheckpoint}</strong></div>
+                      <div><span>Test status</span><strong>{release.testStatus}</strong></div>
+                      <div><span>Security review</span><strong>{release.securityReviewStatus}</strong></div>
+                      <div><span>Rollback status</span><strong>{release.rollbackStatus}</strong></div>
+                      <div><span>Last update</span><strong>{release.lastUpdate}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="cloud-ops-panel">
+              <div className="business-section-heading">
+                <span>Cloud Operations Placeholder</span>
+                <h2>Provider Surfaces</h2>
+              </div>
+              <div>{cloudOperationsPlaceholders.map(item => <strong key={item}>{item}</strong>)}</div>
+            </div>
+            <div className="ops-subsection">
+              <div className="business-section-heading">
+                <span>Mock backup/recovery visibility. No backup jobs or exports are connected.</span>
+                <h2>Backup & Recovery</h2>
+              </div>
+              <div className="backup-recovery-grid">
+                {backupRecoveryItems.map(item => (
+                  <article className="system-ops-card" key={item.item}>
+                    <div className="system-ops-card-header">
+                      <div>
+                        <span>{item.frequency}</span>
+                        <h3>{item.item}</h3>
+                        <small>{item.owner}</small>
+                      </div>
+                      <span className={`system-ops-status-badge ${badgeClassName(item.status)}`}>{item.status}</span>
+                    </div>
+                    <div className="system-ops-detail-grid">
+                      <div><span>Last checked</span><strong>{item.lastChecked}</strong></div>
+                      <div><span>Recovery note</span><strong>{item.recoveryNote}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="ops-subsection">
+              <div className="business-section-heading">
+                <span>Mock incident queue. No incident automation or notifications are connected.</span>
+                <h2>Incident Management</h2>
+              </div>
+              <div className="system-ops-status-grid">
+                <article>
+                  <span>Incident statuses</span>
+                  <div>{incidentStatuses.map(status => <strong className={`system-ops-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+                </article>
+              </div>
+              <div className="incident-grid">
+                {incidents.map(incident => (
+                  <article className="system-ops-card" key={incident.incidentId}>
+                    <div className="system-ops-card-header">
+                      <div>
+                        <span>{incident.incidentId} / {incident.area}</span>
+                        <h3>{incident.impact}</h3>
+                        <small>{incident.owner}</small>
+                      </div>
+                      <span className={`severity-badge ${badgeClassName(incident.severity)}`}>{incident.severity}</span>
+                    </div>
+                    <div className="system-ops-detail-grid">
+                      <div><span>Status</span><strong className={`system-ops-status-badge ${badgeClassName(incident.status)}`}>{incident.status}</strong></div>
+                      <div><span>Required next step</span><strong>{incident.requiredNextStep}</strong></div>
+                      <div><span>Last update</span><strong>{incident.lastUpdate}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="deployment-rules-panel">
+              <div className="business-section-heading">
+                <span>Deployment Approval Rules</span>
+                <h2>Release Controls</h2>
+              </div>
+              <div>{deploymentApprovalRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
             </div>
           </section>
         </section>
