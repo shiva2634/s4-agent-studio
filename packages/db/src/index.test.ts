@@ -352,4 +352,235 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates Business Control Centre auth/session tables and idempotent placeholder credentials", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      for (const tableName of ["business_auth_credentials", "business_auth_sessions", "business_login_events", "business_password_reset_tokens", "business_auth_security_events"]) {
+        const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
+        assert.ok(table, `${tableName} should exist`);
+      }
+
+      for (const indexName of [
+        "idx_business_auth_credentials_user_type",
+        "idx_business_auth_credentials_active_unique",
+        "idx_business_auth_sessions_user_status_expires",
+        "idx_business_auth_sessions_token_hash",
+        "idx_business_login_events_email_created",
+        "idx_business_login_events_user_created",
+        "idx_business_password_reset_tokens_user_status_expires",
+        "idx_business_password_reset_tokens_hash",
+        "idx_business_auth_security_events_user_created",
+        "idx_business_auth_security_events_type_severity_created"
+      ]) {
+        const index = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get(indexName);
+        assert.ok(index, `${indexName} should exist`);
+      }
+
+      const placeholdersBefore = db.prepare(`SELECT COUNT(*) AS count
+        FROM business_auth_credentials
+        WHERE credential_type='PASSWORD_HASH' AND password_hash IS NULL AND is_enabled=0`).get() as { count: number };
+      assert.equal(placeholdersBefore.count, 2);
+
+      initializeDatabaseOn(db);
+      const placeholdersAfter = db.prepare(`SELECT COUNT(*) AS count
+        FROM business_auth_credentials
+        WHERE credential_type='PASSWORD_HASH' AND password_hash IS NULL AND is_enabled=0`).get() as { count: number };
+      assert.equal(placeholdersAfter.count, 2);
+
+      db.prepare(`INSERT INTO business_auth_credentials
+        (id,user_id,credential_type,password_hash,password_hash_algorithm,password_updated_at,must_rotate_password,is_enabled,created_at,updated_at)
+        VALUES ('enabled-credential-1','business-user-shrinika','PASSWORD_HASH','hash-1','test-hash','created',0,1,'created','created')`).run();
+      assert.throws(() => {
+        db.prepare(`INSERT INTO business_auth_credentials
+          (id,user_id,credential_type,password_hash,password_hash_algorithm,password_updated_at,must_rotate_password,is_enabled,created_at,updated_at)
+          VALUES ('enabled-credential-2','business-user-shrinika','PASSWORD_HASH','hash-2','test-hash','created',0,1,'created','created')`).run();
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("creates and validates only active internal auth sessions", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, createBusinessAuthSession, getActiveBusinessAuthSession } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const session = createBusinessAuthSession(db, {
+        userId: "business-user-shrinika",
+        sessionTokenHash: "sha256-session-token-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        ipAddressHash: "ip-hash",
+        userAgentHash: "ua-hash",
+        metadata: {
+          route: "/business-control-centre",
+          session: "raw-session-secret",
+          note: "internal login placeholder"
+        },
+        now: "2026-01-01T00:00:00.000Z"
+      }) as { id: string; sessionTokenHash: string; metadataJson: string | null };
+
+      assert.equal(session.sessionTokenHash, "sha256-session-token-hash");
+      assert.ok(session.metadataJson?.includes("internal login placeholder"));
+      assert.ok(!session.metadataJson?.includes("raw-session-secret"));
+
+      const active = getActiveBusinessAuthSession(db, "sha256-session-token-hash", "2026-01-01T00:10:00.000Z") as { id: string; lastSeenAt: string } | undefined;
+      assert.equal(active?.id, session.id);
+      assert.equal(active?.lastSeenAt, "2026-01-01T00:10:00.000Z");
+
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at)
+        VALUES ('business-user-client-session','client-session@example.local','Client Session','EXTERNAL_CLIENT','ACTIVE','created','created')`).run();
+      assert.throws(() => createBusinessAuthSession(db, {
+        userId: "business-user-client-session",
+        sessionTokenHash: "external-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      }), /External client users cannot create internal auth sessions/);
+
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at)
+        VALUES ('business-user-suspended-session','suspended-session@example.local','Suspended Session','INTERNAL','SUSPENDED','created','created')`).run();
+      assert.throws(() => createBusinessAuthSession(db, {
+        userId: "business-user-suspended-session",
+        sessionTokenHash: "suspended-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      }), /Business user is not active/);
+
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at)
+        VALUES ('business-user-archived-session','archived-session@example.local','Archived Session','INTERNAL','ARCHIVED','created','created')`).run();
+      assert.throws(() => createBusinessAuthSession(db, {
+        userId: "business-user-archived-session",
+        sessionTokenHash: "archived-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      }), /Business user is not active/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects revoked, expired, and inactive-user auth sessions", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, createBusinessAuthSession, getActiveBusinessAuthSession, revokeBusinessAuthSession } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const session = createBusinessAuthSession(db, {
+        userId: "business-user-shiva",
+        sessionTokenHash: "sha256-active-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      }) as { id: string };
+
+      const revoked = revokeBusinessAuthSession(db, session.id, "manual logout", "2026-01-01T00:05:00.000Z") as { status: string; revokedAt: string; revokedReason: string };
+      assert.equal(revoked.status, "REVOKED");
+      assert.equal(revoked.revokedAt, "2026-01-01T00:05:00.000Z");
+      assert.equal(revoked.revokedReason, "manual logout");
+
+      const revokedAgain = revokeBusinessAuthSession(db, session.id, "second logout", "2026-01-01T00:06:00.000Z") as { status: string; revokedAt: string; revokedReason: string };
+      assert.equal(revokedAgain.status, "REVOKED");
+      assert.equal(revokedAgain.revokedAt, "2026-01-01T00:05:00.000Z");
+      assert.equal(revokedAgain.revokedReason, "manual logout");
+      assert.equal(getActiveBusinessAuthSession(db, "sha256-active-session-hash", "2026-01-01T00:10:00.000Z"), undefined);
+
+      createBusinessAuthSession(db, {
+        userId: "business-user-shiva",
+        sessionTokenHash: "sha256-expired-session-hash",
+        expiresAt: "2026-01-01T00:01:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      });
+      assert.equal(getActiveBusinessAuthSession(db, "sha256-expired-session-hash", "2026-01-01T00:02:00.000Z"), undefined);
+
+      createBusinessAuthSession(db, {
+        userId: "business-user-shiva",
+        sessionTokenHash: "sha256-suspended-user-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      });
+      db.prepare("UPDATE business_users SET status='SUSPENDED' WHERE id='business-user-shiva'").run();
+      assert.equal(getActiveBusinessAuthSession(db, "sha256-suspended-user-session-hash", "2026-01-01T00:10:00.000Z"), undefined);
+
+      db.prepare("UPDATE business_users SET status='ACTIVE' WHERE id='business-user-shiva'").run();
+      createBusinessAuthSession(db, {
+        userId: "business-user-shiva",
+        sessionTokenHash: "sha256-archived-user-session-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:00:00.000Z"
+      });
+      db.prepare("UPDATE business_users SET status='ARCHIVED' WHERE id='business-user-shiva'").run();
+      assert.equal(getActiveBusinessAuthSession(db, "sha256-archived-user-session-hash", "2026-01-01T00:10:00.000Z"), undefined);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records auth events and reset placeholders with sanitized metadata only", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, recordBusinessLoginEvent, recordBusinessAuthSecurityEvent, createBusinessPasswordResetTokenPlaceholder } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const loginEvent = recordBusinessLoginEvent(db, {
+        userId: "business-user-shrinika",
+        email: "owner@shrinika.local",
+        userType: "INTERNAL",
+        result: "BLOCKED",
+        reason: "rate limit placeholder",
+        metadata: {
+          password: "plain-password-secret",
+          token: "reset-token-secret",
+          cookie: "session-cookie-secret",
+          authorization: "Bearer hidden-auth-token",
+          note: "safe login note"
+        },
+        now: "2026-01-01T00:00:00.000Z"
+      }) as { metadataJson: string | null };
+      assert.ok(loginEvent.metadataJson?.includes("safe login note"));
+      assert.ok(!loginEvent.metadataJson?.includes("plain-password-secret"));
+      assert.ok(!loginEvent.metadataJson?.includes("reset-token-secret"));
+      assert.ok(!loginEvent.metadataJson?.includes("session-cookie-secret"));
+      assert.ok(!loginEvent.metadataJson?.includes("hidden-auth-token"));
+
+      const securityEvent = recordBusinessAuthSecurityEvent(db, {
+        userId: "business-user-shiva",
+        eventType: "suspicious_login",
+        severity: "high",
+        description: "Repeated failed attempts",
+        metadata: {
+          apiKey: "sk-test-auth-security-secret",
+          route: "/api/auth/login"
+        },
+        now: "2026-01-01T00:01:00.000Z"
+      }) as { metadataJson: string | null };
+      assert.ok(securityEvent.metadataJson?.includes("/api/auth/login"));
+      assert.ok(!securityEvent.metadataJson?.includes("sk-test-auth-security-secret"));
+
+      const resetToken = createBusinessPasswordResetTokenPlaceholder(db, {
+        userId: "business-user-shiva",
+        tokenHash: "sha256-reset-token-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        metadata: {
+          token: "raw-reset-token-secret",
+          note: "owner recovery approval still required"
+        },
+        now: "2026-01-01T00:02:00.000Z"
+      }) as { tokenHash: string; metadataJson: string | null };
+      assert.equal(resetToken.tokenHash, "sha256-reset-token-hash");
+      assert.ok(resetToken.metadataJson?.includes("owner recovery approval still required"));
+      assert.ok(!resetToken.metadataJson?.includes("raw-reset-token-secret"));
+
+      assert.throws(() => createBusinessPasswordResetTokenPlaceholder(db, {
+        userId: "missing-business-user",
+        tokenHash: "sha256-missing-user-token-hash",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        now: "2026-01-01T00:02:00.000Z"
+      }), /Business user not found/);
+    } finally {
+      db.close();
+    }
+  });
 });

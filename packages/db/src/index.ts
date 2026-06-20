@@ -52,6 +52,45 @@ type DeniedAccessEventInput = {
   now?: string;
 };
 
+type BusinessAuthSessionInput = {
+  userId: string;
+  sessionTokenHash: string;
+  expiresAt: string;
+  ipAddressHash?: string | null;
+  userAgentHash?: string | null;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
+type BusinessLoginEventInput = {
+  userId?: string | null;
+  email?: string | null;
+  userType?: BusinessUserType | string | null;
+  result: "SUCCESS" | "FAILURE" | "BLOCKED";
+  reason: string;
+  ipAddressHash?: string | null;
+  userAgentHash?: string | null;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
+type BusinessAuthSecurityEventInput = {
+  userId?: string | null;
+  eventType: string;
+  severity: "low" | "medium" | "high" | "critical";
+  description: string;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
+type BusinessPasswordResetTokenPlaceholderInput = {
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
 const businessRoleSeeds = [
   ["main_admin_owner", "Main Admin / Owner Admin", "Shrinika owner authority for all internal Business Control Centre operations.", "INTERNAL"],
   ["system_guardian", "Founder-builder / System Guardian", "Shiva internal system guardian role for technical governance and safety oversight.", "INTERNAL"],
@@ -514,6 +553,69 @@ export function initializeDatabaseOn(database: Database.Database) {
       metadata_json TEXT,
       FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE SET NULL
     );
+    CREATE TABLE IF NOT EXISTS business_auth_credentials (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      credential_type TEXT NOT NULL CHECK(credential_type IN ('PASSWORD_HASH','MAGIC_LINK_PLACEHOLDER')),
+      password_hash TEXT,
+      password_hash_algorithm TEXT,
+      password_updated_at TEXT,
+      must_rotate_password INTEGER NOT NULL DEFAULT 0,
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS business_auth_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      session_token_hash TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('ACTIVE','REVOKED','EXPIRED')),
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      revoked_reason TEXT,
+      ip_address_hash TEXT,
+      user_agent_hash TEXT,
+      metadata_json TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS business_login_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      email TEXT,
+      user_type TEXT,
+      result TEXT NOT NULL CHECK(result IN ('SUCCESS','FAILURE','BLOCKED')),
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      ip_address_hash TEXT,
+      user_agent_hash TEXT,
+      metadata_json TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('ACTIVE','USED','REVOKED','EXPIRED')),
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      revoked_at TEXT,
+      metadata_json TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS business_auth_security_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      event_type TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('low','medium','high','critical')),
+      description TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      metadata_json TEXT,
+      FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE SET NULL
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -898,6 +1000,16 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_permissions_module_action ON business_permissions(module, action);
     CREATE INDEX IF NOT EXISTS idx_denied_access_events_user ON denied_access_events(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_denied_access_events_attempt ON denied_access_events(attempted_module, attempted_action, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_auth_credentials_user_type ON business_auth_credentials(user_id, credential_type);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_auth_credentials_active_unique ON business_auth_credentials(user_id, credential_type) WHERE is_enabled = 1;
+    CREATE INDEX IF NOT EXISTS idx_business_auth_sessions_user_status_expires ON business_auth_sessions(user_id, status, expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_auth_sessions_token_hash ON business_auth_sessions(session_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_business_login_events_email_created ON business_login_events(email, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_login_events_user_created ON business_login_events(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_password_reset_tokens_user_status_expires ON business_password_reset_tokens(user_id, status, expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_password_reset_tokens_hash ON business_password_reset_tokens(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_business_auth_security_events_user_created ON business_auth_security_events(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_auth_security_events_type_severity_created ON business_auth_security_events(event_type, severity, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -1656,6 +1768,153 @@ export function recordDeniedAccessEvent(database: Database.Database, input: Deni
     FROM denied_access_events WHERE id=?`).get(id);
 }
 
+export function createBusinessAuthSession(database: Database.Database, input: BusinessAuthSessionInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const user = database.prepare("SELECT id,user_type AS userType,status FROM business_users WHERE id=?").get(input.userId) as { id: string; userType: BusinessUserType; status: BusinessUserStatus } | undefined;
+  if (!user) throw new Error("Business user not found");
+  if (user.userType !== "INTERNAL") throw new Error("External client users cannot create internal auth sessions");
+  if (user.status !== "ACTIVE") throw new Error("Business user is not active for internal auth sessions");
+
+  const metadata = input.metadata ? sanitizeAuthMetadata(input.metadata) : null;
+  const id = `business-auth-session-${user.id}-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_auth_sessions
+    (id,user_id,session_token_hash,status,created_at,last_seen_at,expires_at,revoked_at,revoked_reason,ip_address_hash,user_agent_hash,metadata_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    id,
+    user.id,
+    input.sessionTokenHash,
+    "ACTIVE",
+    timestamp,
+    timestamp,
+    input.expiresAt,
+    null,
+    null,
+    input.ipAddressHash ?? null,
+    input.userAgentHash ?? null,
+    metadata ? JSON.stringify(metadata) : null
+  );
+  return getBusinessAuthSessionById(database, id);
+}
+
+export function getActiveBusinessAuthSession(database: Database.Database, sessionTokenHash: string, now = new Date().toISOString()) {
+  const row = database.prepare(`SELECT s.id,s.user_id AS userId,s.session_token_hash AS sessionTokenHash,s.status,s.created_at AS createdAt,
+      s.last_seen_at AS lastSeenAt,s.expires_at AS expiresAt,s.revoked_at AS revokedAt,s.revoked_reason AS revokedReason,
+      s.ip_address_hash AS ipAddressHash,s.user_agent_hash AS userAgentHash,s.metadata_json AS metadataJson,
+      u.user_type AS userType,u.status AS userStatus
+    FROM business_auth_sessions s
+    JOIN business_users u ON u.id=s.user_id
+    WHERE s.session_token_hash=?
+    LIMIT 1`).get(sessionTokenHash) as {
+      id: string;
+      userId: string;
+      sessionTokenHash: string;
+      status: "ACTIVE" | "REVOKED" | "EXPIRED";
+      createdAt: string;
+      lastSeenAt: string;
+      expiresAt: string;
+      revokedAt: string | null;
+      revokedReason: string | null;
+      ipAddressHash: string | null;
+      userAgentHash: string | null;
+      metadataJson: string | null;
+      userType: BusinessUserType;
+      userStatus: BusinessUserStatus;
+    } | undefined;
+  if (!row) return undefined;
+  if (row.status !== "ACTIVE") return undefined;
+  if (row.revokedAt) return undefined;
+  if (row.expiresAt <= now) return undefined;
+  if (row.userType !== "INTERNAL") return undefined;
+  if (row.userStatus !== "ACTIVE") return undefined;
+
+  database.prepare("UPDATE business_auth_sessions SET last_seen_at=? WHERE id=?").run(now, row.id);
+  return getBusinessAuthSessionById(database, row.id);
+}
+
+export function revokeBusinessAuthSession(database: Database.Database, sessionId: string, reason: string, now = new Date().toISOString()) {
+  const existing = getBusinessAuthSessionById(database, sessionId) as { status: string; revokedAt: string | null } | undefined;
+  if (!existing) return undefined;
+  if (existing.status !== "REVOKED") {
+    database.prepare("UPDATE business_auth_sessions SET status='REVOKED',revoked_at=?,revoked_reason=? WHERE id=?")
+      .run(now, reason, sessionId);
+  }
+  return getBusinessAuthSessionById(database, sessionId);
+}
+
+export function recordBusinessLoginEvent(database: Database.Database, input: BusinessLoginEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const metadata = input.metadata ? sanitizeAuthMetadata(input.metadata) : null;
+  const id = `business-login-event-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_login_events
+    (id,user_id,email,user_type,result,reason,created_at,ip_address_hash,user_agent_hash,metadata_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    id,
+    input.userId ?? null,
+    input.email ?? null,
+    input.userType ?? null,
+    input.result,
+    input.reason,
+    timestamp,
+    input.ipAddressHash ?? null,
+    input.userAgentHash ?? null,
+    metadata ? JSON.stringify(metadata) : null
+  );
+  return database.prepare(`SELECT id,user_id AS userId,email,user_type AS userType,result,reason,created_at AS createdAt,
+      ip_address_hash AS ipAddressHash,user_agent_hash AS userAgentHash,metadata_json AS metadataJson
+    FROM business_login_events WHERE id=?`).get(id);
+}
+
+export function recordBusinessAuthSecurityEvent(database: Database.Database, input: BusinessAuthSecurityEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const metadata = input.metadata ? sanitizeAuthMetadata(input.metadata) : null;
+  const id = `business-auth-security-event-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_auth_security_events
+    (id,user_id,event_type,severity,description,created_at,metadata_json)
+    VALUES (?,?,?,?,?,?,?)`).run(
+    id,
+    input.userId ?? null,
+    input.eventType,
+    input.severity,
+    input.description,
+    timestamp,
+    metadata ? JSON.stringify(metadata) : null
+  );
+  return database.prepare(`SELECT id,user_id AS userId,event_type AS eventType,severity,description,created_at AS createdAt,metadata_json AS metadataJson
+    FROM business_auth_security_events WHERE id=?`).get(id);
+}
+
+export function createBusinessPasswordResetTokenPlaceholder(database: Database.Database, input: BusinessPasswordResetTokenPlaceholderInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  const user = database.prepare("SELECT id FROM business_users WHERE id=?").get(input.userId) as { id: string } | undefined;
+  if (!user) throw new Error("Business user not found");
+
+  const metadata = input.metadata ? sanitizeAuthMetadata(input.metadata) : null;
+  const id = `business-password-reset-${user.id}-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_password_reset_tokens
+    (id,user_id,token_hash,status,created_at,expires_at,used_at,revoked_at,metadata_json)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(
+    id,
+    user.id,
+    input.tokenHash,
+    "ACTIVE",
+    timestamp,
+    input.expiresAt,
+    null,
+    null,
+    metadata ? JSON.stringify(metadata) : null
+  );
+  return database.prepare(`SELECT id,user_id AS userId,token_hash AS tokenHash,status,created_at AS createdAt,expires_at AS expiresAt,
+      used_at AS usedAt,revoked_at AS revokedAt,metadata_json AS metadataJson
+    FROM business_password_reset_tokens WHERE id=?`).get(id);
+}
+
+function getBusinessAuthSessionById(database: Database.Database, sessionId: string) {
+  return database.prepare(`SELECT id,user_id AS userId,session_token_hash AS sessionTokenHash,status,created_at AS createdAt,
+      last_seen_at AS lastSeenAt,expires_at AS expiresAt,revoked_at AS revokedAt,revoked_reason AS revokedReason,
+      ip_address_hash AS ipAddressHash,user_agent_hash AS userAgentHash,metadata_json AS metadataJson
+    FROM business_auth_sessions WHERE id=?`).get(sessionId);
+}
+
 function seedBusinessIdentityAccess(database: Database.Database, timestamp: string) {
   const insertUser = database.prepare(`INSERT OR IGNORE INTO business_users (id,email,display_name,user_type,status,created_at,updated_at,archived_at)
     VALUES (?,?,?,?,?,?,?,NULL)`);
@@ -1667,6 +1926,12 @@ function seedBusinessIdentityAccess(database: Database.Database, timestamp: stri
     VALUES (?,?,?,?,?,?,?,?,?,?)`);
   insertInternalProfile.run("internal-profile-shrinika", "business-user-shrinika", null, "Main Admin / Owner Admin", "admin_governance", "main_admin_owner", null, 0, timestamp, timestamp);
   insertInternalProfile.run("internal-profile-shiva", "business-user-shiva", null, "Founder-builder / System Guardian", "admin_governance", "system_guardian", "business-user-shrinika", 1, timestamp, timestamp);
+
+  const insertCredential = database.prepare(`INSERT OR IGNORE INTO business_auth_credentials
+    (id,user_id,credential_type,password_hash,password_hash_algorithm,password_updated_at,must_rotate_password,is_enabled,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  insertCredential.run("business-auth-credential-shrinika-password-placeholder", "business-user-shrinika", "PASSWORD_HASH", null, null, null, 0, 0, timestamp, timestamp);
+  insertCredential.run("business-auth-credential-shiva-password-placeholder", "business-user-shiva", "PASSWORD_HASH", null, null, null, 0, 0, timestamp, timestamp);
 
   const insertRole = database.prepare(`INSERT OR IGNORE INTO business_roles (id,role_key,name,description,scope,is_system_role,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)`);
@@ -1766,6 +2031,10 @@ function sanitizeDeniedAccessMetadata(metadata: Record<string, unknown>) {
     }
   }
   return clean;
+}
+
+function sanitizeAuthMetadata(metadata: Record<string, unknown>) {
+  return sanitizeDeniedAccessMetadata(metadata);
 }
 
 function isSensitiveMetadataKey(key: string) {
