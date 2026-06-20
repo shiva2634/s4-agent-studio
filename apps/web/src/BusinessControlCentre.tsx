@@ -110,6 +110,34 @@ type SupportTicketRecord = {
   internalNote: string;
 };
 
+type QuotationStatus = "Draft" | "Waiting Approval" | "Approved" | "Sent to Client" | "Revision Needed" | "Rejected";
+
+type PaymentStatus = "Draft" | "Sent" | "Partially Paid" | "Paid" | "Overdue" | "Cancelled";
+
+type FinanceQuotation = {
+  quoteId: string;
+  client: string;
+  relatedProject: string;
+  estimatedProductionCost: string;
+  recommendedPrice: string;
+  margin: string;
+  status: QuotationStatus;
+  approvalOwner: string;
+  lastUpdate: string;
+  riskLevel: ClientPriority;
+};
+
+type InvoicePaymentRecord = {
+  invoiceId: string;
+  client: string;
+  relatedProject: string;
+  amount: string;
+  paymentStatus: PaymentStatus;
+  dueDate: string;
+  owner: string;
+  lastUpdate: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -596,11 +624,182 @@ const systemHealthCards = [
   { label: "Audit logging", value: "Future integration", tone: "warning" }
 ];
 
-const financePlaceholders = [
-  "Current month billing placeholder",
-  "Pending invoices placeholder",
-  "Payment follow-ups placeholder",
-  "Finance alerts placeholder"
+const financeOverviewCards: MetricCard[] = [
+  { label: "Draft quotations", value: "3", note: "Static quotation drafts", tone: "neutral" },
+  { label: "Awaiting approval", value: "2", note: "Human approval required", tone: "warning" },
+  { label: "Approved quotations", value: "4", note: "Ready for controlled send", tone: "success" },
+  { label: "Pending agreements", value: "2", note: "Contract placeholders", tone: "warning" },
+  { label: "Draft invoices", value: "3", note: "Not issued to customers", tone: "neutral" },
+  { label: "Pending payments", value: "5", note: "Mock collection queue", tone: "warning" },
+  { label: "Payments received", value: "INR 4.8L", note: "Placeholder received total", tone: "success" },
+  { label: "Refund requests", value: "1", note: "Requires finance/admin approval", tone: "danger" },
+  { label: "Monthly revenue", value: "INR 8.6L", note: "Placeholder revenue metric", tone: "success" },
+  { label: "Expenses", value: "INR 2.1L", note: "Placeholder expense metric", tone: "neutral" }
+];
+
+const commercialWorkflowSteps = [
+  "Client requirement",
+  "App Studio production cost estimate",
+  "Manager/Admin review",
+  "Finance quotation draft",
+  "Human approval",
+  "Client send",
+  "Agreement / contract",
+  "Invoice",
+  "Payment tracking",
+  "Receipt",
+  "Renewal / follow-up"
+];
+
+const quotationStatuses: QuotationStatus[] = ["Draft", "Waiting Approval", "Approved", "Sent to Client", "Revision Needed", "Rejected"];
+
+const paymentStatuses: PaymentStatus[] = ["Draft", "Sent", "Partially Paid", "Paid", "Overdue", "Cancelled"];
+
+const financeQuotations: FinanceQuotation[] = [
+  {
+    quoteId: "QTN-2401",
+    client: "Client Alpha",
+    relatedProject: "Automation Studio Client Workspace",
+    estimatedProductionCost: "INR 1.8L placeholder",
+    recommendedPrice: "INR 3.2L placeholder",
+    margin: "Placeholder margin",
+    status: "Waiting Approval",
+    approvalOwner: "Shrinika / Manager",
+    lastUpdate: "Placeholder: today",
+    riskLevel: "High"
+  },
+  {
+    quoteId: "QTN-2402",
+    client: "Client Beta",
+    relatedProject: "Support Desk Upgrade",
+    estimatedProductionCost: "INR 90K placeholder",
+    recommendedPrice: "INR 1.6L placeholder",
+    margin: "Placeholder margin",
+    status: "Draft",
+    approvalOwner: "Finance Admin",
+    lastUpdate: "Placeholder: yesterday",
+    riskLevel: "Medium"
+  },
+  {
+    quoteId: "QTN-2403",
+    client: "Client Gamma",
+    relatedProject: "Client Portal Foundation",
+    estimatedProductionCost: "INR 2.4L placeholder",
+    recommendedPrice: "INR 4.1L placeholder",
+    margin: "Placeholder margin",
+    status: "Approved",
+    approvalOwner: "Shrinika",
+    lastUpdate: "Placeholder: this week",
+    riskLevel: "Low"
+  },
+  {
+    quoteId: "QTN-2404",
+    client: "Client Delta",
+    relatedProject: "Operations Intake",
+    estimatedProductionCost: "INR 65K placeholder",
+    recommendedPrice: "INR 1.2L placeholder",
+    margin: "Placeholder margin",
+    status: "Sent to Client",
+    approvalOwner: "Manager",
+    lastUpdate: "Placeholder: sent sample",
+    riskLevel: "Low"
+  },
+  {
+    quoteId: "QTN-2405",
+    client: "Client Epsilon",
+    relatedProject: "Billing Workflow Review",
+    estimatedProductionCost: "INR 75K placeholder",
+    recommendedPrice: "INR 1.4L placeholder",
+    margin: "Placeholder margin",
+    status: "Revision Needed",
+    approvalOwner: "Finance Admin",
+    lastUpdate: "Placeholder: revision requested",
+    riskLevel: "Medium"
+  },
+  {
+    quoteId: "QTN-2406",
+    client: "Client Zeta",
+    relatedProject: "Maintenance Retainer",
+    estimatedProductionCost: "INR 40K placeholder",
+    recommendedPrice: "INR 80K placeholder",
+    margin: "Placeholder margin",
+    status: "Rejected",
+    approvalOwner: "Shrinika",
+    lastUpdate: "Placeholder: rejected sample",
+    riskLevel: "High"
+  }
+];
+
+const invoicePayments: InvoicePaymentRecord[] = [
+  {
+    invoiceId: "INV-3001",
+    client: "Client Alpha",
+    relatedProject: "Automation Studio Client Workspace",
+    amount: "INR 3.2L placeholder",
+    paymentStatus: "Sent",
+    dueDate: "Placeholder: 15 days",
+    owner: "Finance Admin",
+    lastUpdate: "Placeholder: today"
+  },
+  {
+    invoiceId: "INV-3002",
+    client: "Client Beta",
+    relatedProject: "Support Desk Upgrade",
+    amount: "INR 1.6L placeholder",
+    paymentStatus: "Partially Paid",
+    dueDate: "Placeholder: this month",
+    owner: "Finance Admin",
+    lastUpdate: "Placeholder: payment follow-up"
+  },
+  {
+    invoiceId: "INV-3003",
+    client: "Client Gamma",
+    relatedProject: "Client Portal Foundation",
+    amount: "INR 4.1L placeholder",
+    paymentStatus: "Paid",
+    dueDate: "Placeholder: closed",
+    owner: "Finance Admin",
+    lastUpdate: "Placeholder: receipt prepared"
+  },
+  {
+    invoiceId: "INV-3004",
+    client: "Client Delta",
+    relatedProject: "Operations Intake",
+    amount: "INR 1.2L placeholder",
+    paymentStatus: "Draft",
+    dueDate: "Placeholder: not issued",
+    owner: "Manager / Finance",
+    lastUpdate: "Placeholder: draft"
+  },
+  {
+    invoiceId: "INV-3005",
+    client: "Client Epsilon",
+    relatedProject: "Billing Workflow Review",
+    amount: "INR 1.4L placeholder",
+    paymentStatus: "Overdue",
+    dueDate: "Placeholder: overdue",
+    owner: "Finance Admin",
+    lastUpdate: "Placeholder: approval needed before reminder"
+  },
+  {
+    invoiceId: "INV-3006",
+    client: "Client Zeta",
+    relatedProject: "Maintenance Retainer",
+    amount: "INR 80K placeholder",
+    paymentStatus: "Cancelled",
+    dueDate: "Placeholder: cancelled",
+    owner: "Shrinika",
+    lastUpdate: "Placeholder: cancelled sample"
+  }
+];
+
+const financeApprovalRules = [
+  "Quotation release requires human approval",
+  "Invoice issue requires human approval",
+  "Agreement/contract send requires human approval",
+  "Refunds require finance/admin approval",
+  "Payment reminders require approval if sensitive or high-value",
+  "Customer-facing commercial documents must be audit logged"
 ];
 
 const hrmsPlaceholders = [
@@ -1029,21 +1228,139 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
 
           {tableSections.slice(2).map(section => <BusinessTableSection section={section} key={section.id} />)}
 
-          <section className="business-section split-business-section" id="finance-billing">
-            <div>
-              <div className="business-section-heading">
-                <span>Placeholder section only</span>
-                <h2>Finance & Billing</h2>
-              </div>
-              <div className="placeholder-list">{financePlaceholders.map(item => <span key={item}>{item}</span>)}</div>
+          <section className="business-section finance-billing-section" id="finance-billing">
+            <div className="business-section-heading">
+              <span>Static commercial planning UI. No payment gateway, tax engine, invoice issue, or contract send is connected.</span>
+              <h2>Finance & Billing</h2>
             </div>
-            <div id="hrms">
-              <div className="business-section-heading">
-                <span>Placeholder section only</span>
-                <h2>HRMS / Employee Management</h2>
-              </div>
-              <div className="placeholder-list">{hrmsPlaceholders.map(item => <span key={item}>{item}</span>)}</div>
+            <div className="business-boundary-notice finance-boundary-notice">
+              <strong>Finance Boundary Notice</strong>
+              <p>This section is only a planning and placeholder UI. No real payments, invoices, tax calculation, contracts, or customer billing actions are connected yet.</p>
             </div>
+            <div className="finance-scope-panel">
+              <article>
+                <span>App Studio owns</span>
+                <p>Requirement analysis, scope, effort estimation, production-cost calculation, delivery risk, and recommended pricing.</p>
+              </article>
+              <article>
+                <span>Finance & Billing owns</span>
+                <p>Quotations, agreements/contracts, invoices, taxes, payment schedules, collections, receipts, renewals, refunds, and commercial document workflows.</p>
+              </article>
+            </div>
+            <div className="business-card-grid finance-overview-grid" aria-label="Finance and billing overview cards">
+              {financeOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="commercial-workflow-panel">
+              <div className="business-section-heading">
+                <span>Commercial Workflow</span>
+                <h2>Requirement to Renewal Flow</h2>
+              </div>
+              <div className="commercial-workflow-chain" aria-label="Commercial workflow">
+                {commercialWorkflowSteps.map((step, index) => (
+                  <div className="commercial-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="finance-status-grid">
+              <article>
+                <span>Quotation statuses</span>
+                <div>{quotationStatuses.map(status => <strong className={`finance-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+              <article>
+                <span>Payment statuses</span>
+                <div>{paymentStatuses.map(status => <strong className={`finance-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+            </div>
+            <div className="finance-subsection">
+              <div className="business-section-heading">
+                <span>Mock quotation cards. Production cost comes from App Studio planning, commercial release stays with Finance.</span>
+                <h2>Quotation Pipeline</h2>
+              </div>
+              <div className="quotation-card-grid">
+                {financeQuotations.map(quotation => (
+                  <article className="quotation-card" key={quotation.quoteId}>
+                    <div className="finance-card-header">
+                      <div>
+                        <span>{quotation.quoteId}</span>
+                        <h3>{quotation.client}</h3>
+                        <small>{quotation.relatedProject}</small>
+                      </div>
+                      <span className={`finance-status-badge ${badgeClassName(quotation.status)}`}>{quotation.status}</span>
+                    </div>
+                    <div className="finance-detail-grid">
+                      <div><span>Estimated production cost</span><strong>{quotation.estimatedProductionCost}</strong></div>
+                      <div><span>Recommended price</span><strong>{quotation.recommendedPrice}</strong></div>
+                      <div><span>Margin</span><strong>{quotation.margin}</strong></div>
+                      <div><span>Approval owner</span><strong>{quotation.approvalOwner}</strong></div>
+                      <div><span>Last update</span><strong>{quotation.lastUpdate}</strong></div>
+                      <div><span>Risk level</span><strong className={`priority-text ${quotation.riskLevel.toLowerCase()}`}>{quotation.riskLevel}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="finance-subsection">
+              <div className="business-section-heading">
+                <span>Mock invoice and payment tracking. No real billing documents or collections are generated.</span>
+                <h2>Invoices & Payments</h2>
+              </div>
+              <div className="invoice-table-wrap">
+                <table className="business-table invoice-payment-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice ID</th>
+                      <th>Client</th>
+                      <th>Related project</th>
+                      <th>Amount</th>
+                      <th>Payment status</th>
+                      <th>Due date</th>
+                      <th>Owner</th>
+                      <th>Last update</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoicePayments.map(invoice => (
+                      <tr key={invoice.invoiceId}>
+                        <td>{invoice.invoiceId}</td>
+                        <td>{invoice.client}</td>
+                        <td>{invoice.relatedProject}</td>
+                        <td>{invoice.amount}</td>
+                        <td><span className={`finance-status-badge ${badgeClassName(invoice.paymentStatus)}`}>{invoice.paymentStatus}</span></td>
+                        <td>{invoice.dueDate}</td>
+                        <td>{invoice.owner}</td>
+                        <td>{invoice.lastUpdate}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="approval-rules-panel">
+              <div className="business-section-heading">
+                <span>Approval Rules</span>
+                <h2>Commercial Controls</h2>
+              </div>
+              <div className="approval-rules-grid">
+                {financeApprovalRules.map(rule => <article key={rule}><span>Rule</span><strong>{rule}</strong></article>)}
+              </div>
+            </div>
+          </section>
+
+          <section className="business-section" id="hrms">
+            <div className="business-section-heading">
+              <span>Placeholder section only</span>
+              <h2>HRMS / Employee Management</h2>
+            </div>
+            <div className="placeholder-list">{hrmsPlaceholders.map(item => <span key={item}>{item}</span>)}</div>
           </section>
 
           <section className="business-section" id="system-health">
