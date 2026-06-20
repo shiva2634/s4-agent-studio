@@ -138,6 +138,80 @@ type InvoicePaymentRecord = {
   lastUpdate: string;
 };
 
+type EmployeeDepartment =
+  | "Admin & Governance"
+  | "Project Operations"
+  | "Development"
+  | "Testing / QA"
+  | "Production Readiness"
+  | "HR"
+  | "Finance & Billing"
+  | "Customer Support"
+  | "Agent Operations"
+  | "Audit & Compliance"
+  | "Cloud / Deployment";
+
+type EmployeeRole =
+  | "Main Admin / Owner Admin"
+  | "Founder Builder / System Guardian"
+  | "Company Admin"
+  | "Manager"
+  | "Team Leader"
+  | "Frontend Developer"
+  | "Backend Developer"
+  | "Testing / QA Developer"
+  | "Final Production Readiness Developer"
+  | "HR Manager"
+  | "Finance Admin"
+  | "Support Manager"
+  | "Agent Supervisor"
+  | "Auditor"
+  | "Cloud / Deployment Operator";
+
+type EmployeeWorkStatus = "Active" | "Onboarding" | "Leave Placeholder" | "Access Review" | "Paused";
+
+type EmployeeRecord = {
+  employeeName: string;
+  employeeId: string;
+  department: EmployeeDepartment;
+  role: EmployeeRole;
+  reportingManager: string;
+  workStatus: EmployeeWorkStatus;
+  assignedProjects: string[];
+  accessLevel: string;
+  lastActivity: string;
+};
+
+type HRRequestType =
+  | "Onboarding"
+  | "Leave request"
+  | "Access change"
+  | "Role change"
+  | "Payroll query placeholder"
+  | "Performance review"
+  | "Exit process placeholder"
+  | "Compliance review";
+
+type HRRequestStatus =
+  | "Draft"
+  | "Waiting Manager Approval"
+  | "Waiting HR Approval"
+  | "Waiting Admin Approval"
+  | "Approved"
+  | "Rejected"
+  | "Completed";
+
+type HRRequestRecord = {
+  requestId: string;
+  employee: string;
+  requestType: HRRequestType;
+  department: EmployeeDepartment;
+  priority: ClientPriority;
+  status: HRRequestStatus;
+  approvalOwner: string;
+  lastUpdate: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -802,12 +876,286 @@ const financeApprovalRules = [
   "Customer-facing commercial documents must be audit logged"
 ];
 
-const hrmsPlaceholders = [
-  "Employee count placeholder",
-  "Active managers placeholder",
-  "Team leaders placeholder",
-  "Developer allocation placeholder",
-  "HR alerts placeholder"
+const hrmsOverviewCards: MetricCard[] = [
+  { label: "Total employees", value: "42", note: "Static employee placeholder", tone: "neutral" },
+  { label: "Active employees", value: "36", note: "Mock active internal users", tone: "success" },
+  { label: "Managers", value: "3", note: "Project ownership layer", tone: "neutral" },
+  { label: "Team leaders", value: "3", note: "Delivery coordination layer", tone: "neutral" },
+  { label: "Developers", value: "12", note: "Frontend, backend, readiness", tone: "neutral" },
+  { label: "QA / testing members", value: "4", note: "Validation placeholder", tone: "neutral" },
+  { label: "HR requests pending", value: "6", note: "Static request queue", tone: "warning" },
+  { label: "Leave requests pending", value: "2", note: "Placeholder only", tone: "warning" },
+  { label: "Onboarding in progress", value: "3", note: "Mock onboarding flow", tone: "success" },
+  { label: "Payroll status", value: "Not connected", note: "Placeholder status only", tone: "warning" },
+  { label: "Compliance checks", value: "Sample", note: "Static review placeholder", tone: "neutral" },
+  { label: "Access reviews pending", value: "4", note: "Admin review required", tone: "danger" }
+];
+
+const employeeDepartments: EmployeeDepartment[] = [
+  "Admin & Governance",
+  "Project Operations",
+  "Development",
+  "Testing / QA",
+  "Production Readiness",
+  "HR",
+  "Finance & Billing",
+  "Customer Support",
+  "Agent Operations",
+  "Audit & Compliance",
+  "Cloud / Deployment"
+];
+
+const employeeRoles: EmployeeRole[] = [
+  "Main Admin / Owner Admin",
+  "Founder Builder / System Guardian",
+  "Company Admin",
+  "Manager",
+  "Team Leader",
+  "Frontend Developer",
+  "Backend Developer",
+  "Testing / QA Developer",
+  "Final Production Readiness Developer",
+  "HR Manager",
+  "Finance Admin",
+  "Support Manager",
+  "Agent Supervisor",
+  "Auditor",
+  "Cloud / Deployment Operator"
+];
+
+const employeeDirectory: EmployeeRecord[] = [
+  {
+    employeeName: "Shrinika",
+    employeeId: "EMP-OWN-001",
+    department: "Admin & Governance",
+    role: "Main Admin / Owner Admin",
+    reportingManager: "Owner authority",
+    workStatus: "Active",
+    assignedProjects: ["Business Control Centre", "Company Governance"],
+    accessLevel: "Owner admin placeholder",
+    lastActivity: "Placeholder: today"
+  },
+  {
+    employeeName: "Shiva",
+    employeeId: "EMP-SYS-002",
+    department: "Agent Operations",
+    role: "Founder Builder / System Guardian",
+    reportingManager: "Shrinika",
+    workStatus: "Active",
+    assignedProjects: ["App Studio", "System Guardian Workflow"],
+    accessLevel: "Internal operator placeholder",
+    lastActivity: "Placeholder: active this week"
+  },
+  {
+    employeeName: "Aarav",
+    employeeId: "EMP-MGR-101",
+    department: "Project Operations",
+    role: "Manager",
+    reportingManager: "Shrinika",
+    workStatus: "Active",
+    assignedProjects: ["Automation Studio Client Workspace"],
+    accessLevel: "Manager access placeholder",
+    lastActivity: "Placeholder: manager review"
+  },
+  {
+    employeeName: "Meera",
+    employeeId: "EMP-TL-201",
+    department: "Development",
+    role: "Team Leader",
+    reportingManager: "Aarav",
+    workStatus: "Active",
+    assignedProjects: ["Automation Studio Client Workspace", "Reporting Dashboard"],
+    accessLevel: "Team leader placeholder",
+    lastActivity: "Placeholder: delivery sync"
+  },
+  {
+    employeeName: "Dev Frontend 1",
+    employeeId: "EMP-FE-301",
+    department: "Development",
+    role: "Frontend Developer",
+    reportingManager: "Meera",
+    workStatus: "Active",
+    assignedProjects: ["Automation Studio Client Workspace"],
+    accessLevel: "Developer access placeholder",
+    lastActivity: "Placeholder: frontend task"
+  },
+  {
+    employeeName: "Dev Backend 2",
+    employeeId: "EMP-BE-302",
+    department: "Development",
+    role: "Backend Developer",
+    reportingManager: "Meera",
+    workStatus: "Access Review",
+    assignedProjects: ["Support Desk Upgrade"],
+    accessLevel: "Backend developer placeholder",
+    lastActivity: "Placeholder: access review"
+  },
+  {
+    employeeName: "QA Developer 3",
+    employeeId: "EMP-QA-401",
+    department: "Testing / QA",
+    role: "Testing / QA Developer",
+    reportingManager: "Karan",
+    workStatus: "Active",
+    assignedProjects: ["Client Portal Foundation"],
+    accessLevel: "QA access placeholder",
+    lastActivity: "Placeholder: QA queue"
+  },
+  {
+    employeeName: "Readiness Developer 4",
+    employeeId: "EMP-PR-501",
+    department: "Production Readiness",
+    role: "Final Production Readiness Developer",
+    reportingManager: "Rohan",
+    workStatus: "Onboarding",
+    assignedProjects: ["Deployment Approval Placeholder"],
+    accessLevel: "Readiness access placeholder",
+    lastActivity: "Placeholder: onboarding"
+  },
+  {
+    employeeName: "Nisha",
+    employeeId: "EMP-HR-601",
+    department: "HR",
+    role: "HR Manager",
+    reportingManager: "Shrinika",
+    workStatus: "Active",
+    assignedProjects: ["HRMS Placeholder"],
+    accessLevel: "HR manager placeholder",
+    lastActivity: "Placeholder: HR request review"
+  },
+  {
+    employeeName: "Riya",
+    employeeId: "EMP-FIN-701",
+    department: "Finance & Billing",
+    role: "Finance Admin",
+    reportingManager: "Shrinika",
+    workStatus: "Leave Placeholder",
+    assignedProjects: ["Finance & Billing Placeholder"],
+    accessLevel: "Finance admin placeholder",
+    lastActivity: "Placeholder: leave request"
+  }
+];
+
+const hrRequestTypes: HRRequestType[] = [
+  "Onboarding",
+  "Leave request",
+  "Access change",
+  "Role change",
+  "Payroll query placeholder",
+  "Performance review",
+  "Exit process placeholder",
+  "Compliance review"
+];
+
+const hrRequestStatuses: HRRequestStatus[] = [
+  "Draft",
+  "Waiting Manager Approval",
+  "Waiting HR Approval",
+  "Waiting Admin Approval",
+  "Approved",
+  "Rejected",
+  "Completed"
+];
+
+const hrRequestQueue: HRRequestRecord[] = [
+  {
+    requestId: "HR-REQ-1001",
+    employee: "Readiness Developer 4",
+    requestType: "Onboarding",
+    department: "Production Readiness",
+    priority: "High",
+    status: "Waiting Admin Approval",
+    approvalOwner: "Shrinika",
+    lastUpdate: "Placeholder: today"
+  },
+  {
+    requestId: "HR-REQ-1002",
+    employee: "Riya",
+    requestType: "Leave request",
+    department: "Finance & Billing",
+    priority: "Medium",
+    status: "Waiting Manager Approval",
+    approvalOwner: "Finance Manager",
+    lastUpdate: "Placeholder: yesterday"
+  },
+  {
+    requestId: "HR-REQ-1003",
+    employee: "Dev Backend 2",
+    requestType: "Access change",
+    department: "Development",
+    priority: "High",
+    status: "Waiting Admin Approval",
+    approvalOwner: "Admin",
+    lastUpdate: "Placeholder: access review"
+  },
+  {
+    requestId: "HR-REQ-1004",
+    employee: "QA Developer 3",
+    requestType: "Performance review",
+    department: "Testing / QA",
+    priority: "Medium",
+    status: "Waiting HR Approval",
+    approvalOwner: "HR Manager",
+    lastUpdate: "Placeholder: review cycle"
+  },
+  {
+    requestId: "HR-REQ-1005",
+    employee: "Meera",
+    requestType: "Role change",
+    department: "Development",
+    priority: "High",
+    status: "Draft",
+    approvalOwner: "Manager / Admin",
+    lastUpdate: "Placeholder: draft only"
+  },
+  {
+    requestId: "HR-REQ-1006",
+    employee: "Former Employee Placeholder",
+    requestType: "Exit process placeholder",
+    department: "Customer Support",
+    priority: "High",
+    status: "Completed",
+    approvalOwner: "HR + Admin",
+    lastUpdate: "Placeholder: access revoked sample"
+  },
+  {
+    requestId: "HR-REQ-1007",
+    employee: "Support Manager Placeholder",
+    requestType: "Compliance review",
+    department: "Customer Support",
+    priority: "Low",
+    status: "Approved",
+    approvalOwner: "Auditor",
+    lastUpdate: "Placeholder: approved"
+  }
+];
+
+const onboardingWorkflowSteps = [
+  "Candidate selected",
+  "HR onboarding draft",
+  "Manager role confirmation",
+  "Admin access approval",
+  "Tool/account setup",
+  "Department assignment",
+  "Project assignment",
+  "Policy acknowledgement",
+  "Active employee"
+];
+
+const leaveAttendancePlaceholders = [
+  "Leave requests are placeholders only",
+  "Attendance is not tracked yet",
+  "Payroll is not connected yet",
+  "Final approval rules must be added before real HR operations"
+];
+
+const hrApprovalRules = [
+  "New employee onboarding requires HR + Admin approval",
+  "Role changes require Manager + Admin approval",
+  "Access changes require Admin approval",
+  "Payroll-related actions require Finance/HR approval",
+  "Exit process must revoke access before closure",
+  "Sensitive employee actions must be audit logged"
 ];
 
 function isAppTheme(value: string | null): value is AppTheme {
@@ -1355,12 +1703,130 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
             </div>
           </section>
 
-          <section className="business-section" id="hrms">
+          <section className="business-section hrms-section" id="hrms">
             <div className="business-section-heading">
-              <span>Placeholder section only</span>
+              <span>Static HRMS planning UI. No real employee records, attendance, leave approval, payroll, or HR backend is connected.</span>
               <h2>HRMS / Employee Management</h2>
             </div>
-            <div className="placeholder-list">{hrmsPlaceholders.map(item => <span key={item}>{item}</span>)}</div>
+            <div className="business-boundary-notice hrms-boundary-notice">
+              <strong>Employee Access Boundary</strong>
+              <p>HRMS is internal-only. Employees may later receive role-based internal access, but customers must never access HRMS, Business Control Centre, or App Studio.</p>
+            </div>
+            <div className="business-card-grid hrms-overview-grid" aria-label="HRMS overview cards">
+              {hrmsOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="hrms-reference-grid">
+              <article>
+                <span>Departments</span>
+                <div>{employeeDepartments.map(department => <strong key={department}>{department}</strong>)}</div>
+              </article>
+              <article>
+                <span>Roles</span>
+                <div>{employeeRoles.map(role => <strong key={role}>{role}</strong>)}</div>
+              </article>
+            </div>
+            <div className="hrms-subsection">
+              <div className="business-section-heading">
+                <span>Mock employee directory. No real employee database or attendance tracking is connected.</span>
+                <h2>Employee Directory</h2>
+              </div>
+              <div className="employee-card-grid">
+                {employeeDirectory.map(employee => (
+                  <article className="employee-card" key={employee.employeeId}>
+                    <div className="hrms-card-header">
+                      <div>
+                        <span>{employee.employeeId}</span>
+                        <h3>{employee.employeeName}</h3>
+                        <small>{employee.role}</small>
+                      </div>
+                      <span className={`hrms-status-badge ${badgeClassName(employee.workStatus)}`}>{employee.workStatus}</span>
+                    </div>
+                    <div className="hrms-detail-grid">
+                      <div><span>Department</span><strong>{employee.department}</strong></div>
+                      <div><span>Reporting manager</span><strong>{employee.reportingManager}</strong></div>
+                      <div><span>Access level</span><strong>{employee.accessLevel}</strong></div>
+                      <div><span>Last activity</span><strong>{employee.lastActivity}</strong></div>
+                    </div>
+                    <div className="employee-projects">
+                      <span>Assigned projects</span>
+                      <div>{employee.assignedProjects.map(project => <strong key={project}>{project}</strong>)}</div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="hrms-subsection">
+              <div className="business-section-heading">
+                <span>Mock HR request queue. No real leave, payroll, access, or role workflow is connected.</span>
+                <h2>HR Request Queue</h2>
+              </div>
+              <div className="hrms-status-grid">
+                <article>
+                  <span>Request types</span>
+                  <div>{hrRequestTypes.map(type => <strong key={type}>{type}</strong>)}</div>
+                </article>
+                <article>
+                  <span>Request statuses</span>
+                  <div>{hrRequestStatuses.map(status => <strong className={`hrms-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+                </article>
+              </div>
+              <div className="hr-request-grid">
+                {hrRequestQueue.map(request => (
+                  <article className="hr-request-card" key={request.requestId}>
+                    <div className="hrms-card-header">
+                      <div>
+                        <span>{request.requestId}</span>
+                        <h3>{request.employee}</h3>
+                        <small>{request.requestType}</small>
+                      </div>
+                      <span className={`hrms-status-badge ${badgeClassName(request.status)}`}>{request.status}</span>
+                    </div>
+                    <div className="hrms-detail-grid">
+                      <div><span>Department</span><strong>{request.department}</strong></div>
+                      <div><span>Priority</span><strong className={`priority-text ${request.priority.toLowerCase()}`}>{request.priority}</strong></div>
+                      <div><span>Approval owner</span><strong>{request.approvalOwner}</strong></div>
+                      <div><span>Last update</span><strong>{request.lastUpdate}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="onboarding-workflow-panel">
+              <div className="business-section-heading">
+                <span>Onboarding Workflow</span>
+                <h2>Candidate to Active Employee</h2>
+              </div>
+              <div className="onboarding-workflow-chain" aria-label="Onboarding workflow">
+                {onboardingWorkflowSteps.map((step, index) => (
+                  <div className="onboarding-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="hrms-control-grid">
+              <article className="leave-attendance-panel">
+                <div className="business-section-heading">
+                  <span>Leave / Attendance Placeholder</span>
+                  <h2>Operations Not Connected</h2>
+                </div>
+                <div>{leaveAttendancePlaceholders.map(item => <strong key={item}>{item}</strong>)}</div>
+              </article>
+              <article className="hr-approval-rules-panel">
+                <div className="business-section-heading">
+                  <span>HR Approval Rules</span>
+                  <h2>Employee Controls</h2>
+                </div>
+                <div>{hrApprovalRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
+              </article>
+            </div>
           </section>
 
           <section className="business-section" id="system-health">
