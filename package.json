@@ -13,7 +13,8 @@
     "test": "npm run test --workspaces --if-present",
     "db:init": "npm run db:init -w @s4/db",
     "internal-auth:set-password": "tsx scripts/set-internal-password.mjs",
-    "internal-auth:dev-default-passwords": "tsx scripts/set-dev-default-passwords.mjs"
+    "internal-auth:dev-default-passwords": "tsx scripts/set-dev-default-passwords.mjs",
+    "internal-auth:verify-dev-login": "tsx scripts/verify-dev-login.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

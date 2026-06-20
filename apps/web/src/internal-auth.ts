@@ -1,4 +1,15 @@
-const API = "http://127.0.0.1:4310";
+export function getInternalAuthApiBase() {
+  if (typeof window === "undefined") return "http://127.0.0.1:4310";
+  const hostname = window.location.hostname;
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    return `http://${hostname}:4310`;
+  }
+  return "http://127.0.0.1:4310";
+}
+
+function internalAuthUrl(path: string) {
+  return `${getInternalAuthApiBase()}${path}`;
+}
 
 export type InternalAuthUser = {
   id: string;
@@ -68,7 +79,7 @@ function normalizeCurrentUser(value: unknown): InternalAuthState {
 
 export async function getCurrentInternalUser(): Promise<InternalAuthState> {
   try {
-    const response = await fetch(`${API}/api/business-auth/current-user`, {
+    const response = await fetch(internalAuthUrl("/api/business-auth/current-user"), {
       credentials: "include"
     });
     if (!response.ok) return unauthenticatedInternalState;
@@ -79,7 +90,7 @@ export async function getCurrentInternalUser(): Promise<InternalAuthState> {
 }
 
 export async function loginInternalUser(email: string, password: string): Promise<InternalAuthState> {
-  const response = await fetch(`${API}/api/business-auth/login`, {
+  const response = await fetch(internalAuthUrl("/api/business-auth/login"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
@@ -95,7 +106,7 @@ export async function loginInternalUser(email: string, password: string): Promis
 
 export async function logoutInternalUser(): Promise<void> {
   try {
-    await fetch(`${API}/api/business-auth/logout`, {
+    await fetch(internalAuthUrl("/api/business-auth/logout"), {
       method: "POST",
       credentials: "include"
     });

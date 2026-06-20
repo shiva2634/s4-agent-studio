@@ -14,6 +14,7 @@ const {
   createBusinessAuthSession,
   hashBusinessPassword,
   hashBusinessSessionToken,
+  setDevelopmentDefaultInternalPasswords,
   setBusinessUserPasswordCredential,
   revokeBusinessAuthSession
 } = dbModule;
@@ -83,6 +84,46 @@ describe("Business Control Centre internal auth API", () => {
     assert.ok(body.user.roles.includes("main_admin_owner"));
     assert.ok(body.user.permissions.includes("app_studio.view"));
     assert.ok(body.session.expiresAt);
+  });
+
+  it("logs in with development default credentials and returns the current user", async () => {
+    setDevelopmentDefaultInternalPasswords(db, {
+      nodeEnv: "test",
+      now: "2026-01-01T00:05:00.000Z"
+    });
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/business-auth/login",
+      payload: { email: "owner@shrinika.local", password: "ShrinikaDev@2026!" }
+    });
+
+    assert.equal(login.statusCode, 200);
+    const setCookie = getSetCookie(login);
+    assert.ok(setCookie.includes("shrinika_internal_session="));
+    assert.ok(setCookie.includes("HttpOnly"));
+    const cookie = setCookie.split(";")[0];
+    const rawSessionToken = extractSessionToken(setCookie);
+
+    assert.ok(!login.body.includes("ShrinikaDev@2026!"));
+    assert.ok(!login.body.includes(rawSessionToken));
+    assert.ok(!login.body.includes("scrypt$"));
+
+    const currentUser = await app.inject({
+      method: "GET",
+      url: "/api/business-auth/current-user",
+      headers: { cookie }
+    });
+
+    assert.equal(currentUser.statusCode, 200);
+    const currentBody = currentUser.json() as { authenticated: boolean; user: { email: string; roles: string[]; permissions: string[] } };
+    assert.equal(currentBody.authenticated, true);
+    assert.equal(currentBody.user.email, "owner@shrinika.local");
+    assert.ok(currentBody.user.roles.includes("main_admin_owner"));
+    assert.ok(currentBody.user.permissions.includes("app_studio.view"));
+    assert.ok(!currentUser.body.includes("ShrinikaDev@2026!"));
+    assert.ok(!currentUser.body.includes(rawSessionToken));
+    assert.ok(!currentUser.body.includes("scrypt$"));
   });
 
   it("returns sanitized current-user data for a valid cookie and false after logout", async () => {

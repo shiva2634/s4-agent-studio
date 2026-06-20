@@ -70,6 +70,34 @@ shiva@shrinika.local / ShivaDev@2026!
 
 Do not use these defaults in production. Rotate or change both passwords after testing with the normal password setup command.
 
+Verify that the active local database has the seeded users and hashed credentials:
+
+```bash
+npm run internal-auth:verify-dev-login
+```
+
+The verifier prints the resolved database path and safe user status only. It does not print passwords, password hashes, credential IDs, tokens, or secrets.
+
+## Local Login Fix Flow
+
+Use this flow when the protected internal page still appears after setting credentials:
+
+```bash
+npm run internal-auth:dev-default-passwords
+npm run internal-auth:verify-dev-login
+npm run dev
+```
+
+Then open:
+
+```text
+http://localhost:5173/internal-login?returnTo=/business-control-centre
+```
+
+Login with the temporary local credentials above. Rotate or change both passwords after testing with the normal password setup command.
+
+For local browser login, keep the web and API hostnames aligned. When the web app is opened at `http://localhost:5173`, the frontend calls `http://localhost:4310`; when opened at `http://127.0.0.1:5173`, it calls `http://127.0.0.1:4310`. This keeps the HttpOnly `SameSite=Lax` internal session cookie usable without weakening production cookie settings.
+
 ## Login
 
 After setting a password, use the internal login screen:
