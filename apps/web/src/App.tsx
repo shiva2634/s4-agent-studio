@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { BusinessControlCentre } from "./BusinessControlCentre";
 import { getCurrentInternalUser, loginInternalUser, logoutInternalUser, unauthenticatedInternalState, type InternalAuthState } from "./internal-auth";
 import { getProjectManagementActions } from "./project-management.js";
@@ -80,7 +80,7 @@ function parseJsonArray<T>(value: string | null): T[] {
 }
 
 export function App() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [path, setPath] = useState(currentBrowserPath);
   const [internalAuth, setInternalAuth] = useState<InternalAuthState>(unauthenticatedInternalState);
   const [internalAuthLoading, setInternalAuthLoading] = useState(true);
 
@@ -99,32 +99,102 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const onPopState = () => setPath(window.location.pathname);
+    const onPopState = () => setPath(currentBrowserPath());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
   const navigate = (nextPath: string) => {
     window.history.pushState({}, "", nextPath);
-    setPath(nextPath);
+    setPath(currentBrowserPath());
   };
 
   const handleAuthenticated = (state: InternalAuthState) => {
     setInternalAuth(state);
   };
   const handleLogout = async () => {
-    await logoutInternalUser();
     setInternalAuth(unauthenticatedInternalState);
+    await logoutInternalUser();
   };
 
-  if (path === "/internal-login") return <InternalLoginView navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onAuthenticated={handleAuthenticated} />;
-  if (path === "/business-control-centre" || path === "/admin") return <BusinessControlCentre navigate={navigate} auth={internalAuth} onLogout={handleLogout} />;
-  if (path.startsWith("/media-studio")) return <MediaStudio path={path} navigate={navigate} />;
-  return <DeveloperWorkspace navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onLogout={handleLogout} />;
+  const routePath = getRoutePath(path);
+  if (routePath === "/internal-login") return <InternalLoginView navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onAuthenticated={handleAuthenticated} returnTo={getReturnToFromLoginPath(path)} />;
+  if (routePath.startsWith("/media-studio")) return <MediaStudio path={routePath} navigate={navigate} />;
+  if (routePath === "/business-control-centre" || routePath === "/admin") {
+    return (
+      <InternalRouteGate auth={internalAuth} authLoading={internalAuthLoading} navigate={navigate} returnTo={routePath}>
+        <BusinessControlCentre navigate={navigate} auth={internalAuth} onLogout={handleLogout} />
+      </InternalRouteGate>
+    );
+  }
+  const appStudioReturnTo = routePath === "/app-studio" ? "/app-studio" : "/";
+  return (
+    <InternalRouteGate auth={internalAuth} authLoading={internalAuthLoading} navigate={navigate} returnTo={appStudioReturnTo}>
+      <DeveloperWorkspace navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onLogout={handleLogout} />
+    </InternalRouteGate>
+  );
+}
+
+function currentBrowserPath(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function getRoutePath(value: string): string {
+  return value.split("?")[0] || "/";
+}
+
+function isSafeInternalReturnPath(value: string | null | undefined): value is string {
+  if (!value || value.trim() !== value) return false;
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return false;
+  const lowerValue = value.toLowerCase();
+  if (lowerValue.startsWith("javascript:") || lowerValue.startsWith("data:") || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  return ["/", "/app-studio", "/business-control-centre", "/admin"].includes(getRoutePath(value));
+}
+
+function getSafeInternalReturnPath(value: string | null | undefined): string {
+  return isSafeInternalReturnPath(value) ? value : "/business-control-centre";
+}
+
+function getReturnToFromLoginPath(value: string): string {
+  const query = value.includes("?") ? value.slice(value.indexOf("?") + 1) : "";
+  return getSafeInternalReturnPath(new URLSearchParams(query).get("returnTo"));
+}
+
+function getInternalLoginPath(returnTo: string): string {
+  return `/internal-login?returnTo=${encodeURIComponent(getSafeInternalReturnPath(returnTo))}`;
 }
 
 function formatInternalRole(role: string | undefined): string {
   if (!role) return "Internal user";
   return role.split("_").map(part => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
+function InternalRouteGate({ auth, authLoading, navigate, returnTo, children }: { auth: InternalAuthState; authLoading: boolean; navigate: (path: string) => void; returnTo: string; children: ReactNode }) {
+  if (authLoading) return <InternalAccessScreen mode="checking" navigate={navigate} returnTo={returnTo} />;
+  if (!auth.authenticated || !auth.user) return <InternalAccessScreen mode="locked" navigate={navigate} returnTo={returnTo} />;
+  return <>{children}</>;
+}
+
+function InternalAccessScreen({ mode, navigate, returnTo }: { mode: "checking" | "locked"; navigate: (path: string) => void; returnTo: string }) {
+  const checking = mode === "checking";
+  return (
+    <main className="internal-login-shell app-studio-shell" data-theme="dark">
+      <section className="internal-access-panel">
+        <div className="internal-login-copy">
+          <span>Shrinika Automation Studio</span>
+          <h1>{checking ? "Checking internal session" : "Internal access required"}</h1>
+          <p>Internal workspace for Shrinika Technologies team only.</p>
+          <p>Business Control Centre and App Studio require an active internal session.</p>
+          <strong>Customers must use the Client Portal, support, email, or payment pages.</strong>
+        </div>
+        <div className="internal-access-card">
+          <span>{checking ? "Session check" : "Protected internal page"}</span>
+          <h2>{checking ? "Checking internal session..." : "Sign in required"}</h2>
+          <p>{checking ? "The workspace will open after the current internal session is verified." : "No internal dashboard content is shown until a valid internal session is active."}</p>
+          {!checking ? <button className="primary" onClick={() => navigate(getInternalLoginPath(returnTo))}>Internal login</button> : null}
+        </div>
+      </section>
+    </main>
+  );
 }
 
 function InternalSessionHeader({ auth, authLoading, navigate, onLogout }: { auth: InternalAuthState; authLoading: boolean; navigate: (path: string) => void; onLogout: () => Promise<void> }) {
@@ -137,7 +207,7 @@ function InternalSessionHeader({ auth, authLoading, navigate, onLogout }: { auth
         <span>Internal login</span>
         <strong>Not signed in</strong>
         <small>Business Control Centre and App Studio are internal-only.</small>
-        <button className="top-link" onClick={() => navigate("/internal-login")}>Internal login</button>
+        <button className="top-link" onClick={() => navigate(getInternalLoginPath("/"))}>Internal login</button>
       </div>
     );
   }
@@ -151,7 +221,7 @@ function InternalSessionHeader({ auth, authLoading, navigate, onLogout }: { auth
   );
 }
 
-function InternalLoginView({ navigate, auth, authLoading, onAuthenticated }: { navigate: (path: string) => void; auth: InternalAuthState; authLoading: boolean; onAuthenticated: (state: InternalAuthState) => void }) {
+function InternalLoginView({ navigate, auth, authLoading, onAuthenticated, returnTo }: { navigate: (path: string) => void; auth: InternalAuthState; authLoading: boolean; onAuthenticated: (state: InternalAuthState) => void; returnTo: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -165,7 +235,7 @@ function InternalLoginView({ navigate, auth, authLoading, onAuthenticated }: { n
       const state = await loginInternalUser(email.trim(), password);
       onAuthenticated(state);
       setPassword("");
-      navigate("/business-control-centre");
+      navigate(returnTo);
     } catch {
       setError("Invalid email or password.");
       setPassword("");
