@@ -2,6 +2,8 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
+export * from "./business-auth.js";
+
 const dbPath = path.resolve(process.env.S4_DB_PATH ?? "./data/s4-agent-studio.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 export const db = new Database(dbPath);
