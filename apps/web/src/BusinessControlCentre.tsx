@@ -66,6 +66,50 @@ type RoleHierarchyItem = {
   description: string;
 };
 
+type ClientStatus = "Lead" | "Active" | "Waiting Approval" | "Support Needed" | "Payment Pending" | "Paused";
+
+type ClientPriority = "Low" | "Medium" | "High";
+
+type ClientRecord = {
+  clientName: string;
+  companyName: string;
+  contactPerson: string;
+  email: string;
+  phone: string;
+  linkedProjects: string[];
+  supportTicketCount: number;
+  pendingApprovalCount: number;
+  accountStatus: ClientStatus;
+  priority: ClientPriority;
+  lastContact: string;
+};
+
+type SupportIssueType =
+  | "Bug"
+  | "Feature request"
+  | "Complaint"
+  | "Billing issue"
+  | "Access issue"
+  | "Project correction"
+  | "General support";
+
+type SupportChannel = "Website form" | "Email" | "Phone" | "WhatsApp placeholder" | "Future Client Portal";
+
+type SupportTicketStatus = "Open" | "Waiting Customer Reply" | "Waiting Internal Team" | "Escalated" | "Resolved Placeholder";
+
+type SupportTicketRecord = {
+  ticketId: string;
+  client: string;
+  relatedProject: string;
+  issueType: SupportIssueType;
+  priority: ClientPriority;
+  status: SupportTicketStatus;
+  assignedOwner: string;
+  sourceChannel: SupportChannel;
+  lastUpdate: string;
+  internalNote: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -293,6 +337,210 @@ const projectAssignments: ProjectAssignment[] = [
 const pendingManagerApprovals = projectAssignments.filter(assignment => assignment.currentStage === "Waiting Manager Approval");
 const productionReadinessCompleted = projectAssignments.filter(assignment => ["Waiting Manager Approval", "Approved for Deployment", "Deployed"].includes(assignment.currentStage));
 
+const clientStatusBadges: ClientStatus[] = ["Lead", "Active", "Waiting Approval", "Support Needed", "Payment Pending", "Paused"];
+
+const clientOverviewCards: MetricCard[] = [
+  { label: "Total clients", value: "8", note: "Static placeholder count", tone: "neutral" },
+  { label: "Active clients", value: "4", note: "Mock active accounts", tone: "success" },
+  { label: "New leads", value: "2", note: "Placeholder lead pipeline", tone: "neutral" },
+  { label: "Clients with active projects", value: "5", note: "Linked to mock projects", tone: "success" },
+  { label: "Pending approvals", value: "3", note: "Waiting internal/customer approval", tone: "warning" },
+  { label: "Open support tickets", value: "7", note: "Static support workload", tone: "warning" },
+  { label: "Payment pending", value: "2", note: "Placeholder billing follow-up", tone: "warning" },
+  { label: "High priority clients", value: "2", note: "Mock priority watchlist", tone: "danger" }
+];
+
+const clients: ClientRecord[] = [
+  {
+    clientName: "Client Alpha",
+    companyName: "Alpha Industries",
+    contactPerson: "Priya Rao",
+    email: "client.alpha@example.com",
+    phone: "+91 90000 10001",
+    linkedProjects: ["Automation Studio Client Workspace", "Reporting Dashboard"],
+    supportTicketCount: 2,
+    pendingApprovalCount: 1,
+    accountStatus: "Active",
+    priority: "High",
+    lastContact: "Placeholder: this week"
+  },
+  {
+    clientName: "Client Beta",
+    companyName: "Beta Retail",
+    contactPerson: "Arjun Mehta",
+    email: "client.beta@example.com",
+    phone: "+91 90000 10002",
+    linkedProjects: ["Support Desk Upgrade"],
+    supportTicketCount: 3,
+    pendingApprovalCount: 2,
+    accountStatus: "Support Needed",
+    priority: "High",
+    lastContact: "Placeholder: yesterday"
+  },
+  {
+    clientName: "Client Gamma",
+    companyName: "Gamma Services",
+    contactPerson: "Neha Iyer",
+    email: "client.gamma@example.com",
+    phone: "+91 90000 10003",
+    linkedProjects: ["Client Portal Foundation"],
+    supportTicketCount: 1,
+    pendingApprovalCount: 0,
+    accountStatus: "Waiting Approval",
+    priority: "Medium",
+    lastContact: "Placeholder: last week"
+  },
+  {
+    clientName: "Client Delta",
+    companyName: "Delta Logistics",
+    contactPerson: "Rahul Nair",
+    email: "client.delta@example.com",
+    phone: "+91 90000 10004",
+    linkedProjects: ["Operations Intake"],
+    supportTicketCount: 0,
+    pendingApprovalCount: 0,
+    accountStatus: "Lead",
+    priority: "Medium",
+    lastContact: "Placeholder: new inquiry"
+  },
+  {
+    clientName: "Client Epsilon",
+    companyName: "Epsilon Foods",
+    contactPerson: "Anika Shah",
+    email: "client.epsilon@example.com",
+    phone: "+91 90000 10005",
+    linkedProjects: ["Billing Workflow Review"],
+    supportTicketCount: 1,
+    pendingApprovalCount: 0,
+    accountStatus: "Payment Pending",
+    priority: "Medium",
+    lastContact: "Placeholder: payment follow-up"
+  },
+  {
+    clientName: "Client Zeta",
+    companyName: "Zeta Manufacturing",
+    contactPerson: "Vikram Das",
+    email: "client.zeta@example.com",
+    phone: "+91 90000 10006",
+    linkedProjects: ["Maintenance Retainer"],
+    supportTicketCount: 0,
+    pendingApprovalCount: 0,
+    accountStatus: "Paused",
+    priority: "Low",
+    lastContact: "Placeholder: paused account"
+  }
+];
+
+const supportOverviewCards: MetricCard[] = [
+  { label: "Open tickets", value: "7", note: "Static queue count", tone: "warning" },
+  { label: "High priority tickets", value: "2", note: "Needs focused review", tone: "danger" },
+  { label: "Waiting customer reply", value: "2", note: "External channel follow-up", tone: "warning" },
+  { label: "Waiting internal team", value: "3", note: "Assigned owner follow-up", tone: "warning" },
+  { label: "Resolved this week", value: "5", note: "Placeholder resolved metric", tone: "success" },
+  { label: "Escalated tickets", value: "1", note: "Mock escalation placeholder", tone: "danger" }
+];
+
+const supportIssueTypes: SupportIssueType[] = ["Bug", "Feature request", "Complaint", "Billing issue", "Access issue", "Project correction", "General support"];
+
+const supportChannels: SupportChannel[] = ["Website form", "Email", "Phone", "WhatsApp placeholder", "Future Client Portal"];
+
+const supportWorkflowSteps = [
+  "Customer request",
+  "Support Desk",
+  "Support Manager",
+  "Assigned internal owner",
+  "Manager / Team Leader if project-related",
+  "Resolution",
+  "Customer update through external channel"
+];
+
+const supportTickets: SupportTicketRecord[] = [
+  {
+    ticketId: "SUP-1042",
+    client: "Client Beta",
+    relatedProject: "Support Desk Upgrade",
+    issueType: "Bug",
+    priority: "High",
+    status: "Waiting Internal Team",
+    assignedOwner: "Support Manager",
+    sourceChannel: "Email",
+    lastUpdate: "Placeholder: 2 hours ago",
+    internalNote: "Engineering review needed before customer update."
+  },
+  {
+    ticketId: "SUP-1043",
+    client: "Client Alpha",
+    relatedProject: "Automation Studio Client Workspace",
+    issueType: "Feature request",
+    priority: "Medium",
+    status: "Waiting Customer Reply",
+    assignedOwner: "Client Success",
+    sourceChannel: "Website form",
+    lastUpdate: "Placeholder: today",
+    internalNote: "Clarify scope before adding to project queue."
+  },
+  {
+    ticketId: "SUP-1044",
+    client: "Client Gamma",
+    relatedProject: "Client Portal Foundation",
+    issueType: "Project correction",
+    priority: "High",
+    status: "Escalated",
+    assignedOwner: "Team Leader",
+    sourceChannel: "Phone",
+    lastUpdate: "Placeholder: yesterday",
+    internalNote: "Manager review required because this affects delivery scope."
+  },
+  {
+    ticketId: "SUP-1045",
+    client: "Client Epsilon",
+    relatedProject: "Billing Workflow Review",
+    issueType: "Billing issue",
+    priority: "Medium",
+    status: "Open",
+    assignedOwner: "Finance Admin",
+    sourceChannel: "WhatsApp placeholder",
+    lastUpdate: "Placeholder: this week",
+    internalNote: "Finance placeholder only; no real billing action connected."
+  },
+  {
+    ticketId: "SUP-1046",
+    client: "Client Delta",
+    relatedProject: "Operations Intake",
+    issueType: "Access issue",
+    priority: "Low",
+    status: "Waiting Customer Reply",
+    assignedOwner: "Support Operator",
+    sourceChannel: "Future Client Portal",
+    lastUpdate: "Placeholder: pending portal launch",
+    internalNote: "Future portal channel shown for planning only."
+  },
+  {
+    ticketId: "SUP-1047",
+    client: "Client Alpha",
+    relatedProject: "Reporting Dashboard",
+    issueType: "Complaint",
+    priority: "Medium",
+    status: "Waiting Internal Team",
+    assignedOwner: "Manager",
+    sourceChannel: "Email",
+    lastUpdate: "Placeholder: last week",
+    internalNote: "Review expectation mismatch with internal delivery owner."
+  },
+  {
+    ticketId: "SUP-1048",
+    client: "Client Zeta",
+    relatedProject: "Maintenance Retainer",
+    issueType: "General support",
+    priority: "Low",
+    status: "Resolved Placeholder",
+    assignedOwner: "Support Operator",
+    sourceChannel: "Website form",
+    lastUpdate: "Placeholder: resolved this week",
+    internalNote: "Resolved metric placeholder; no ticket persistence connected."
+  }
+];
+
 const tableSections: TableSection[] = [
   {
     id: "project-operations",
@@ -306,17 +554,6 @@ const tableSections: TableSection[] = [
     ]
   },
   {
-    id: "client-management",
-    title: "Client Management",
-    description: "Placeholder client records. No customer-facing access is enabled.",
-    columns: ["Client", "Company", "Active Projects", "Support Status", "Billing Status"],
-    rows: [
-      ["Client Alpha", "Alpha Industries", "2", "Open follow-up", "Placeholder"],
-      ["Client Beta", "Beta Retail", "1", "Stable", "Placeholder"],
-      ["Client Gamma", "Gamma Services", "3", "Priority watch", "Placeholder"]
-    ]
-  },
-  {
     id: "approvals",
     title: "Approvals Control Centre",
     description: "Static approval queue for future governance integration.",
@@ -325,17 +562,6 @@ const tableSections: TableSection[] = [
       ["Deployment approval", "Manager", "Shrinika", "High", "Pending", "Sample"],
       ["Project assignment", "Admin Operator", "Manager", "Medium", "Pending", "Sample"],
       ["Final readiness", "QA Lead", "Manager", "High", "Reviewing", "Sample"]
-    ]
-  },
-  {
-    id: "support-desk",
-    title: "Support Tickets",
-    description: "Sample support queue. Customer intake remains outside App Studio.",
-    columns: ["Ticket", "Source", "Assigned Team", "Priority", "Status"],
-    rows: [
-      ["SUP-1042", "Support email", "Support Ops", "High", "Triage"],
-      ["SUP-1043", "Website form", "Client Success", "Medium", "Open"],
-      ["SUP-1044", "Internal escalation", "Engineering", "High", "Investigating"]
     ]
   },
   {
@@ -389,6 +615,10 @@ function isAppTheme(value: string | null): value is AppTheme {
   return appThemeOptions.some(theme => theme.id === value);
 }
 
+function badgeClassName(value: string) {
+  return value.toLowerCase().replace(/\s+/g, "-");
+}
+
 function useStoredAppTheme() {
   const [theme, setTheme] = useState<AppTheme>(() => {
     try {
@@ -408,6 +638,29 @@ function useStoredAppTheme() {
   }, [theme]);
 
   return { theme, setTheme };
+}
+
+function BusinessTableSection({ section }: { section: TableSection }) {
+  return (
+    <section className="business-section" id={section.id}>
+      <div className="business-section-heading">
+        <span>{section.description}</span>
+        <h2>{section.title}</h2>
+      </div>
+      <div className="business-table-wrap">
+        <table className="business-table">
+          <thead>
+            <tr>{section.columns.map(column => <th key={column}>{column}</th>)}</tr>
+          </thead>
+          <tbody>
+            {section.rows.map(row => (
+              <tr key={row.join("-")}>{row.map((cell, index) => <td key={`${cell}-${index}`}>{cell}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 export function BusinessControlCentre({ navigate }: { navigate: (path: string) => void }) {
@@ -653,26 +906,128 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
             </div>
           </section>
 
-          {tableSections.map(section => (
-            <section className="business-section" id={section.id} key={section.id}>
+          <BusinessTableSection section={tableSections[0]} />
+
+          <section className="business-section client-management-section" id="client-management">
+            <div className="business-section-heading">
+              <span>Static client workspace visibility. Customer-facing access is not enabled here.</span>
+              <h2>Client Management</h2>
+            </div>
+            <div className="business-boundary-notice client-boundary-notice">
+              <strong>Client Communication Boundary</strong>
+              <p>Customers communicate through the customer website, email, support, and future Client Portal. Internal App Studio and Business Control Centre remain restricted to Shrinika Technologies internal teams.</p>
+            </div>
+            <div className="business-card-grid client-overview-grid" aria-label="Client management overview cards">
+              {clientOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="client-status-strip" aria-label="Client status badges">
+              {clientStatusBadges.map(status => <span className={`client-status-badge ${badgeClassName(status)}`} key={status}>{status}</span>)}
+            </div>
+            <div className="client-card-grid">
+              {clients.map(client => (
+                <article className="client-record-card" key={client.clientName}>
+                  <div className="client-card-header">
+                    <div>
+                      <span>{client.companyName}</span>
+                      <h3>{client.clientName}</h3>
+                      <small>{client.contactPerson}</small>
+                    </div>
+                    <span className={`client-status-badge ${badgeClassName(client.accountStatus)}`}>{client.accountStatus}</span>
+                  </div>
+                  <div className="client-contact-grid">
+                    <div><span>Email</span><strong>{client.email}</strong></div>
+                    <div><span>Phone</span><strong>{client.phone}</strong></div>
+                    <div><span>Last contact</span><strong>{client.lastContact}</strong></div>
+                    <div><span>Priority</span><strong className={`priority-text ${client.priority.toLowerCase()}`}>{client.priority}</strong></div>
+                  </div>
+                  <div className="client-projects">
+                    <span>Linked projects</span>
+                    <div>{client.linkedProjects.map(project => <strong key={project}>{project}</strong>)}</div>
+                  </div>
+                  <div className="client-count-grid">
+                    <div><span>Support tickets</span><strong>{client.supportTicketCount}</strong></div>
+                    <div><span>Pending approvals</span><strong>{client.pendingApprovalCount}</strong></div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <BusinessTableSection section={tableSections[1]} />
+
+          <section className="business-section support-desk-section" id="support-desk">
+            <div className="business-section-heading">
+              <span>Static support queue. No real ticket persistence, email, or portal integration is connected.</span>
+              <h2>Support Desk</h2>
+            </div>
+            <div className="business-boundary-notice support-boundary-notice">
+              <strong>Support Desk is internal</strong>
+              <p>Customers do not log into Business Control Centre. Customer updates must go through the website, email, phone, WhatsApp placeholder, support channels, or future Client Portal.</p>
+            </div>
+            <div className="business-card-grid support-overview-grid" aria-label="Support desk overview cards">
+              {supportOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="support-reference-grid">
+              <article>
+                <span>Issue types</span>
+                <div>{supportIssueTypes.map(type => <strong key={type}>{type}</strong>)}</div>
+              </article>
+              <article>
+                <span>Source channels</span>
+                <div>{supportChannels.map(channel => <strong key={channel}>{channel}</strong>)}</div>
+              </article>
+            </div>
+            <div className="support-workflow-panel">
               <div className="business-section-heading">
-                <span>{section.description}</span>
-                <h2>{section.title}</h2>
+                <span>Internal Support Workflow</span>
+                <h2>Support Routing Chain</h2>
               </div>
-              <div className="business-table-wrap">
-                <table className="business-table">
-                  <thead>
-                    <tr>{section.columns.map(column => <th key={column}>{column}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {section.rows.map(row => (
-                      <tr key={row.join("-")}>{row.map((cell, index) => <td key={`${cell}-${index}`}>{cell}</td>)}</tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="support-workflow-chain" aria-label="Internal support workflow">
+                {supportWorkflowSteps.map((step, index) => (
+                  <div className="support-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
               </div>
-            </section>
-          ))}
+            </div>
+            <div className="support-ticket-grid">
+              {supportTickets.map(ticket => (
+                <article className="support-ticket-card" key={ticket.ticketId}>
+                  <div className="support-ticket-header">
+                    <div>
+                      <span>{ticket.ticketId}</span>
+                      <h3>{ticket.client}</h3>
+                      <small>{ticket.relatedProject}</small>
+                    </div>
+                    <span className={`support-status-badge ${badgeClassName(ticket.status)}`}>{ticket.status}</span>
+                  </div>
+                  <div className="support-ticket-meta">
+                    <div><span>Issue type</span><strong>{ticket.issueType}</strong></div>
+                    <div><span>Priority</span><strong className={`priority-text ${ticket.priority.toLowerCase()}`}>{ticket.priority}</strong></div>
+                    <div><span>Assigned owner</span><strong>{ticket.assignedOwner}</strong></div>
+                    <div><span>Source channel</span><strong>{ticket.sourceChannel}</strong></div>
+                    <div><span>Last update</span><strong>{ticket.lastUpdate}</strong></div>
+                    <div><span>Internal note</span><strong>{ticket.internalNote}</strong></div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          {tableSections.slice(2).map(section => <BusinessTableSection section={section} key={section.id} />)}
 
           <section className="business-section split-business-section" id="finance-billing">
             <div>
