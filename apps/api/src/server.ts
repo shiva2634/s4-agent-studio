@@ -39,6 +39,7 @@ import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
 await app.register(cors, {
+  credentials: true,
   origin(origin, callback) {
     if (!origin || allowedOrigins.has(origin)) return callback(null, true);
     return callback(new Error("CORS origin is not allowed"), false);

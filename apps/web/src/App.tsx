@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { BusinessControlCentre } from "./BusinessControlCentre";
+import { getCurrentInternalUser, loginInternalUser, logoutInternalUser, unauthenticatedInternalState, type InternalAuthState } from "./internal-auth";
 import { getProjectManagementActions } from "./project-management.js";
 
 type Project = { id: string; name: string; rootPath: string; status?: string };
@@ -80,6 +81,23 @@ function parseJsonArray<T>(value: string | null): T[] {
 
 export function App() {
   const [path, setPath] = useState(window.location.pathname);
+  const [internalAuth, setInternalAuth] = useState<InternalAuthState>(unauthenticatedInternalState);
+  const [internalAuthLoading, setInternalAuthLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentInternalUser()
+      .then(state => {
+        if (!cancelled) setInternalAuth(state);
+      })
+      .finally(() => {
+        if (!cancelled) setInternalAuthLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     const onPopState = () => setPath(window.location.pathname);
     window.addEventListener("popstate", onPopState);
@@ -89,12 +107,104 @@ export function App() {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
   };
-  if (path === "/business-control-centre" || path === "/admin") return <BusinessControlCentre navigate={navigate} />;
+
+  const handleAuthenticated = (state: InternalAuthState) => {
+    setInternalAuth(state);
+  };
+  const handleLogout = async () => {
+    await logoutInternalUser();
+    setInternalAuth(unauthenticatedInternalState);
+  };
+
+  if (path === "/internal-login") return <InternalLoginView navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onAuthenticated={handleAuthenticated} />;
+  if (path === "/business-control-centre" || path === "/admin") return <BusinessControlCentre navigate={navigate} auth={internalAuth} onLogout={handleLogout} />;
   if (path.startsWith("/media-studio")) return <MediaStudio path={path} navigate={navigate} />;
-  return <DeveloperWorkspace navigate={navigate} />;
+  return <DeveloperWorkspace navigate={navigate} auth={internalAuth} authLoading={internalAuthLoading} onLogout={handleLogout} />;
 }
 
-function DeveloperWorkspace({ navigate }: { navigate: (path: string) => void }) {
+function formatInternalRole(role: string | undefined): string {
+  if (!role) return "Internal user";
+  return role.split("_").map(part => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
+function InternalSessionHeader({ auth, authLoading, navigate, onLogout }: { auth: InternalAuthState; authLoading: boolean; navigate: (path: string) => void; onLogout: () => Promise<void> }) {
+  if (authLoading) {
+    return <div className="internal-session-chip"><span>Internal session</span><strong>Checking...</strong><small>Business Control Centre and App Studio are internal-only.</small></div>;
+  }
+  if (!auth.authenticated || !auth.user) {
+    return (
+      <div className="internal-session-chip unauthenticated">
+        <span>Internal login</span>
+        <strong>Not signed in</strong>
+        <small>Business Control Centre and App Studio are internal-only.</small>
+        <button className="top-link" onClick={() => navigate("/internal-login")}>Internal login</button>
+      </div>
+    );
+  }
+  return (
+    <div className="internal-session-chip authenticated">
+      <span>Internal session active</span>
+      <strong>{auth.user.displayName || auth.user.email}</strong>
+      <small>{formatInternalRole(auth.user.roles[0])}</small>
+      <button className="top-link" onClick={() => void onLogout()}>Logout</button>
+    </div>
+  );
+}
+
+function InternalLoginView({ navigate, auth, authLoading, onAuthenticated }: { navigate: (path: string) => void; auth: InternalAuthState; authLoading: boolean; onAuthenticated: (state: InternalAuthState) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const state = await loginInternalUser(email.trim(), password);
+      onAuthenticated(state);
+      setPassword("");
+      navigate("/business-control-centre");
+    } catch {
+      setError("Invalid email or password.");
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="internal-login-shell app-studio-shell" data-theme="dark">
+      <section className="internal-login-panel">
+        <div className="internal-login-copy">
+          <span>Shrinika Automation Studio</span>
+          <h1>Internal login</h1>
+          <p>Internal workspace for Shrinika Technologies team only.</p>
+          <p>Customers should use the Client Portal, support, email, or payment pages - not Business Control Centre or App Studio.</p>
+          <strong>No customer access is allowed here.</strong>
+        </div>
+        <form className="internal-login-card" onSubmit={event => void submit(event)}>
+          <div>
+            <span>Secure internal session</span>
+            <h2>Sign in</h2>
+            <p>{authLoading ? "Checking current session..." : auth.authenticated ? "An internal session is already active." : "Use an approved internal account."}</p>
+          </div>
+          <label>Email<input type="email" value={email} autoComplete="username" onChange={event => setEmail(event.target.value)} required /></label>
+          <label>Password<input type="password" value={password} autoComplete="current-password" onChange={event => setPassword(event.target.value)} required /></label>
+          {error ? <p className="error">{error}</p> : null}
+          {auth.authenticated && auth.user ? <p className="notice">Signed in as {auth.user.displayName || auth.user.email}.</p> : null}
+          <div className="internal-login-actions">
+            <button className="secondary" type="button" onClick={() => navigate("/")}>Back to App Studio</button>
+            <button className="primary" type="submit" disabled={busy || !email.trim() || !password}>{busy ? "Signing in..." : "Internal login"}</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function DeveloperWorkspace({ navigate, auth, authLoading, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; authLoading: boolean; onLogout: () => Promise<void> }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [manageableProjects, setManageableProjects] = useState<ManagedProject[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -581,7 +691,7 @@ function DeveloperWorkspace({ navigate }: { navigate: (path: string) => void }) 
         {projects.length ? <select value={projectId} onChange={event => selectProject(event.target.value)}>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select> : <span className="muted">No project registered</span>}
         {selectedProject && <span className={`project-status ${(selectedProject.status ?? "ACTIVE").toLowerCase()}`}>{selectedProject.status ?? "ACTIVE"}</span>}
       </div>
-      <div className="top-actions"><button className="top-link" onClick={()=>navigate("/business-control-centre")}>Business Control Centre</button><span className="status-dot"/> API {providerStatus?.status ?? "connected"}<label className="theme-select">Theme<select value={theme} onChange={event=>setTheme(event.target.value as AppTheme)} aria-label="App Studio theme">{APP_THEME_OPTIONS.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}</select></label><select defaultValue="guided" aria-label="App Studio mode"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div>
+      <div className="top-actions"><button className="top-link" onClick={()=>navigate("/business-control-centre")}>Business Control Centre</button><InternalSessionHeader auth={auth} authLoading={authLoading} navigate={navigate} onLogout={onLogout} /><span className="status-dot"/> API {providerStatus?.status ?? "connected"}<label className="theme-select">Theme<select value={theme} onChange={event=>setTheme(event.target.value as AppTheme)} aria-label="App Studio theme">{APP_THEME_OPTIONS.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}</select></label><select defaultValue="guided" aria-label="App Studio mode"><option value="guided">Guided mode</option><option value="balanced">Balanced mode</option><option value="autonomous">Autonomous mode</option></select></div>
     </header>
     <div className="workspace-grid app-dashboard-grid">
       <aside className="sidebar app-sidebar">

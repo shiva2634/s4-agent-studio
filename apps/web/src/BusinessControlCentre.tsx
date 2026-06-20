@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { InternalAuthState } from "./internal-auth";
 
 type AppTheme = "dark" | "midnight" | "purple" | "emerald" | "sunset" | "light" | "contrast";
 
@@ -2108,7 +2109,12 @@ function BusinessTableSection({ section }: { section: TableSection }) {
   );
 }
 
-export function BusinessControlCentre({ navigate }: { navigate: (path: string) => void }) {
+function formatInternalRole(role: string | undefined): string {
+  if (!role) return "Internal user";
+  return role.split("_").map(part => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
+export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; onLogout: () => Promise<void> }) {
   const { theme, setTheme } = useStoredAppTheme();
 
   return (
@@ -2123,8 +2129,14 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
           <div><span>Main Admin / Owner Admin</span><strong>Shrinika</strong></div>
           <div><span>Founder-builder / system guardian</span><strong>Shiva</strong></div>
           <div><span>Customer access boundary</span><strong className="success">Internal only</strong></div>
+          <div className="business-session-state">
+            <span>{auth.authenticated ? "Internal session active" : "Internal login"}</span>
+            <strong>{auth.authenticated && auth.user ? auth.user.displayName || auth.user.email : "Not signed in"}</strong>
+            <small>{auth.authenticated && auth.user ? formatInternalRole(auth.user.roles[0]) : "Business Control Centre and App Studio are internal-only."}</small>
+          </div>
         </div>
         <div className="top-actions business-actions">
+          {auth.authenticated ? <button className="top-link" onClick={() => void onLogout()}>Logout</button> : <button className="top-link" onClick={() => navigate("/internal-login")}>Internal login</button>}
           <button className="top-link" onClick={() => navigate("/")}>App Studio</button>
           <label className="theme-select">Theme<select value={theme} onChange={event => setTheme(event.target.value as AppTheme)} aria-label="Business Control Centre theme">{appThemeOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
         </div>
