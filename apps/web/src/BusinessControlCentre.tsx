@@ -2116,6 +2116,8 @@ function formatInternalRole(role: string | undefined): string {
 
 export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; onLogout: () => Promise<void> }) {
   const { theme, setTheme } = useStoredAppTheme();
+  const [activeSectionId, setActiveSectionId] = useState("company-dashboard");
+  const activeSection = sidebarSections.find(section => section.id === activeSectionId) ?? sidebarSections[0];
 
   return (
     <main className="app-shell app-studio-shell business-control-shell" data-theme={theme}>
@@ -2151,7 +2153,15 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <div className="business-nav-group" key={group}>
                 <span>{group}</span>
                 {sidebarSections.filter(section => section.group === group).map(section => (
-                  <a key={section.id} href={`#${section.id}`} className="business-nav-item">{section.label}</a>
+                  <button
+                    key={section.id}
+                    type="button"
+                    className={`business-nav-item${section.id === activeSection.id ? " active" : ""}`}
+                    aria-current={section.id === activeSection.id ? "page" : undefined}
+                    onClick={() => setActiveSectionId(section.id)}
+                  >
+                    {section.label}
+                  </button>
                 ))}
               </div>
             ))}
@@ -2159,6 +2169,8 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
         </aside>
 
         <section className="business-content">
+          {activeSection.id === "company-dashboard" ? (
+            <>
           <section className="business-hero" id="company-dashboard">
             <div>
               <span className="business-kicker">Shrinika Technologies</span>
@@ -2206,7 +2218,10 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </article>
             ))}
           </section>
+            </>
+          ) : null}
 
+          {activeSection.id === "company-workspaces" ? (
           <section className="business-section" id="company-workspaces">
             <div className="business-section-heading">
               <span>Mock company and workspace map. Customer systems remain separate from internal tools.</span>
@@ -2229,7 +2244,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               ))}
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "department-structure" ? (
           <section className="business-section" id="department-structure">
             <div className="business-section-heading">
               <span>Static department map for Shrinika Technologies operations.</span>
@@ -2252,7 +2269,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               ))}
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "role-hierarchy" ? (
           <section className="business-section" id="role-hierarchy">
             <div className="business-section-heading">
               <span>Internal authority and delivery ladder.</span>
@@ -2270,7 +2289,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               ))}
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "access-boundary" ? (
           <section className="business-section access-boundary-section" id="access-boundary">
             <div className="business-section-heading">
               <span>Internal systems and customer-facing systems must stay separated.</span>
@@ -2294,7 +2315,10 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </article>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "project-assignment-control" ? (
+            <>
           <section className="business-section workflow-section">
             <div className="business-section-heading">
               <span>Project assignment workflow</span>
@@ -2387,9 +2411,12 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </div>
             </div>
           </section>
+            </>
+          ) : null}
 
-          <BusinessTableSection section={tableSections[0]} />
+          {activeSection.id === "project-operations" ? <BusinessTableSection section={tableSections[0]} /> : null}
 
+          {activeSection.id === "client-management" ? (
           <section className="business-section client-management-section" id="client-management">
             <div className="business-section-heading">
               <span>Static client workspace visibility. Customer-facing access is not enabled here.</span>
@@ -2440,9 +2467,11 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               ))}
             </div>
           </section>
+          ) : null}
 
-          <BusinessTableSection section={tableSections[1]} />
+          {activeSection.id === "approvals" ? <BusinessTableSection section={tableSections[1]} /> : null}
 
+          {activeSection.id === "support-desk" ? (
           <section className="business-section support-desk-section" id="support-desk">
             <div className="business-section-heading">
               <span>Static support queue. No real ticket persistence, email, or portal integration is connected.</span>
@@ -2508,7 +2537,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               ))}
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "finance-billing" ? (
           <section className="business-section finance-billing-section" id="finance-billing">
             <div className="business-section-heading">
               <span>Static commercial planning UI. No payment gateway, tax engine, invoice issue, or contract send is connected.</span>
@@ -2635,7 +2666,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </div>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "hrms" ? (
           <section className="business-section hrms-section" id="hrms">
             <div className="business-section-heading">
               <span>Static HRMS planning UI. No real employee records, attendance, leave approval, payroll, or HR backend is connected.</span>
@@ -2761,7 +2794,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </article>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "agent-operations" ? (
           <section className="business-section agent-operations-section" id="agent-operations">
             <div className="business-section-heading">
               <span>Static agent governance UI. No real agent execution, provider calls, or production action is connected.</span>
@@ -2875,7 +2910,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <div>{providerHealthPlaceholders.map(item => <strong key={item}>{item}</strong>)}</div>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "audit-compliance" ? (
           <section className="business-section audit-compliance-section" id="audit-compliance">
             <div className="business-section-heading">
               <span>Static audit and compliance UI. No real audit persistence, policy engine, or compliance enforcement is connected.</span>
@@ -2962,7 +2999,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </div>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "system-health" ? (
           <section className="business-section system-operations-section" id="system-health">
             <div className="business-section-heading">
               <span>Static operations UI. No monitoring probes, provider calls, backup jobs, deployment execution, or infrastructure actions are connected.</span>
@@ -3014,7 +3053,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               </div>
             </div>
           </section>
+          ) : null}
 
+          {activeSection.id === "deployment-cloud" ? (
           <section className="business-section deployment-cloud-section" id="deployment-cloud">
             <div className="business-section-heading">
               <span>Static deployment and cloud operations visibility. No deployment, rollback, DNS, provider, email, backup, or infrastructure action is connected.</span>
@@ -3154,6 +3195,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <div>{deploymentApprovalRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
             </div>
           </section>
+          ) : null}
         </section>
       </div>
     </main>
