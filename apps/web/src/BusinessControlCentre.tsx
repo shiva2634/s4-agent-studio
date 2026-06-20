@@ -212,6 +212,84 @@ type HRRequestRecord = {
   lastUpdate: string;
 };
 
+type GovernanceRisk = "Low" | "Medium" | "High" | "Critical";
+
+type AgentType =
+  | "Developer Agent"
+  | "Reviewer Agent"
+  | "QA Agent"
+  | "Security Agent"
+  | "Media Agent"
+  | "Social Agent"
+  | "Growth Agent"
+  | "Support Agent"
+  | "Finance Agent"
+  | "HR Agent"
+  | "Cloud Agent"
+  | "Audit Agent";
+
+type AgentStatus = "Active" | "Paused" | "Waiting Approval" | "Blocked" | "Failed Placeholder" | "Review Required";
+
+type AgentTaskStatus =
+  | "Draft"
+  | "Running Placeholder"
+  | "Waiting Approval"
+  | "In Review"
+  | "Blocked"
+  | "Completed Placeholder"
+  | "Failed Placeholder";
+
+type AgentApprovalState = "Not Required" | "Required" | "Pending" | "Approved" | "Rejected";
+
+type AgentRegistryRecord = {
+  agentName: string;
+  agentType: AgentType;
+  assignedModule: string;
+  status: AgentStatus;
+  currentTask: string;
+  approvalRequirement: string;
+  lastActivity: string;
+  riskLevel: GovernanceRisk;
+  provider: string;
+};
+
+type AgentTaskRecord = {
+  taskId: string;
+  agent: string;
+  module: string;
+  taskTitle: string;
+  status: AgentTaskStatus;
+  approvalState: AgentApprovalState;
+  riskLevel: GovernanceRisk;
+  owner: string;
+  lastUpdate: string;
+};
+
+type AuditCategory = "Approval" | "Agent Task" | "Security" | "Finance" | "HR" | "Support" | "Client" | "Project" | "System" | "Policy";
+
+type AuditSeverity = "Info" | "Low" | "Medium" | "High" | "Critical";
+
+type AuditStatus = "Recorded" | "Needs Review" | "Approved" | "Blocked" | "Resolved" | "Escalated";
+
+type AuditEventRecord = {
+  eventId: string;
+  category: AuditCategory;
+  actor: string;
+  target: string;
+  severity: AuditSeverity;
+  status: AuditStatus;
+  timestamp: string;
+  auditNote: string;
+};
+
+type BlockedSafetyEvent = {
+  action: string;
+  reasonBlocked: string;
+  relatedModule: string;
+  riskLevel: GovernanceRisk;
+  requiredNextStep: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -664,28 +742,6 @@ const tableSections: TableSection[] = [
       ["Deployment approval", "Manager", "Shrinika", "High", "Pending", "Sample"],
       ["Project assignment", "Admin Operator", "Manager", "Medium", "Pending", "Sample"],
       ["Final readiness", "QA Lead", "Manager", "High", "Reviewing", "Sample"]
-    ]
-  },
-  {
-    id: "agent-operations",
-    title: "Agent Activity",
-    description: "Placeholder visibility into internal agent tasks.",
-    columns: ["Agent", "Task", "Current State", "Last Activity", "Requires Approval"],
-    rows: [
-      ["Developer Agent", "Plan dashboard shell", "Complete", "Sample", "No"],
-      ["Security Review Agent", "Review access boundary", "Queued", "Sample", "No"],
-      ["Final Review Agent", "Readiness checklist", "Waiting", "Sample", "Yes"]
-    ]
-  },
-  {
-    id: "audit-compliance",
-    title: "Audit Events",
-    description: "Static audit trail preview for future compliance reporting.",
-    columns: ["Event", "Actor", "Area", "Severity", "Timestamp"],
-    rows: [
-      ["Approval viewed", "Shrinika", "Approvals", "Medium", "Placeholder"],
-      ["Project assigned", "Admin Operator", "Projects", "Medium", "Placeholder"],
-      ["Access boundary notice displayed", "System", "Compliance", "Low", "Placeholder"]
     ]
   }
 ];
@@ -1158,6 +1214,384 @@ const hrApprovalRules = [
   "Sensitive employee actions must be audit logged"
 ];
 
+const agentOperationsOverviewCards: MetricCard[] = [
+  { label: "Active agents", value: "8", note: "Static internal agent count", tone: "success" },
+  { label: "Paused agents", value: "2", note: "Mock paused agents", tone: "warning" },
+  { label: "Tasks running", value: "4", note: "Placeholder task activity", tone: "neutral" },
+  { label: "Tasks waiting approval", value: "5", note: "Human review required", tone: "warning" },
+  { label: "Failed tasks", value: "1", note: "Failure placeholder", tone: "danger" },
+  { label: "Blocked actions", value: "7", note: "Safety gates prevented action", tone: "danger" },
+  { label: "Provider health", value: "Stable", note: "No real probes from this UI", tone: "success" },
+  { label: "Human approvals pending", value: "6", note: "Approval queue placeholder", tone: "warning" },
+  { label: "Daily usage", value: "Sample", note: "Usage/cost placeholder", tone: "neutral" },
+  { label: "Safety incidents", value: "2", note: "Mock incident queue", tone: "danger" },
+  { label: "Sandbox checks", value: "Enabled", note: "Governance placeholder", tone: "success" },
+  { label: "Git checkpoints", value: "12", note: "Mock checkpoint count", tone: "neutral" }
+];
+
+const agentTypes: AgentType[] = [
+  "Developer Agent",
+  "Reviewer Agent",
+  "QA Agent",
+  "Security Agent",
+  "Media Agent",
+  "Social Agent",
+  "Growth Agent",
+  "Support Agent",
+  "Finance Agent",
+  "HR Agent",
+  "Cloud Agent",
+  "Audit Agent"
+];
+
+const agentStatuses: AgentStatus[] = ["Active", "Paused", "Waiting Approval", "Blocked", "Failed Placeholder", "Review Required"];
+
+const agentRegistry: AgentRegistryRecord[] = [
+  {
+    agentName: "Developer Agent",
+    agentType: "Developer Agent",
+    assignedModule: "App Studio",
+    status: "Active",
+    currentTask: "Build mission planning placeholder",
+    approvalRequirement: "Required before file changes",
+    lastActivity: "Placeholder: today",
+    riskLevel: "High",
+    provider: "OpenAI-compatible placeholder"
+  },
+  {
+    agentName: "Reviewer Agent",
+    agentType: "Reviewer Agent",
+    assignedModule: "Code Review",
+    status: "Review Required",
+    currentTask: "Review pending change summary",
+    approvalRequirement: "Human final review required",
+    lastActivity: "Placeholder: this week",
+    riskLevel: "Medium",
+    provider: "Local/mock provider placeholder"
+  },
+  {
+    agentName: "QA Agent",
+    agentType: "QA Agent",
+    assignedModule: "Testing",
+    status: "Waiting Approval",
+    currentTask: "Typecheck/test validation placeholder",
+    approvalRequirement: "Required for risky checks",
+    lastActivity: "Placeholder: queued",
+    riskLevel: "Medium",
+    provider: "NVIDIA provider placeholder"
+  },
+  {
+    agentName: "Security Agent",
+    agentType: "Security Agent",
+    assignedModule: "Security Review",
+    status: "Blocked",
+    currentTask: "Secret exposure review placeholder",
+    approvalRequirement: "Always required",
+    lastActivity: "Placeholder: blocked event",
+    riskLevel: "Critical",
+    provider: "Local/mock provider placeholder"
+  },
+  {
+    agentName: "Media Agent",
+    agentType: "Media Agent",
+    assignedModule: "Media Studio",
+    status: "Paused",
+    currentTask: "Asset generation placeholder",
+    approvalRequirement: "Required before media job",
+    lastActivity: "Placeholder: paused",
+    riskLevel: "Low",
+    provider: "Media provider placeholder"
+  },
+  {
+    agentName: "Finance Agent",
+    agentType: "Finance Agent",
+    assignedModule: "Finance & Billing",
+    status: "Failed Placeholder",
+    currentTask: "Quotation review placeholder",
+    approvalRequirement: "Required for documents",
+    lastActivity: "Placeholder: failed sample",
+    riskLevel: "High",
+    provider: "OpenAI-compatible placeholder"
+  },
+  {
+    agentName: "HR Agent",
+    agentType: "HR Agent",
+    assignedModule: "HRMS",
+    status: "Active",
+    currentTask: "Onboarding checklist placeholder",
+    approvalRequirement: "Required for HR-sensitive actions",
+    lastActivity: "Placeholder: active",
+    riskLevel: "High",
+    provider: "Local/mock provider placeholder"
+  },
+  {
+    agentName: "Audit Agent",
+    agentType: "Audit Agent",
+    assignedModule: "Audit & Compliance",
+    status: "Active",
+    currentTask: "Audit log summary placeholder",
+    approvalRequirement: "Human escalation required",
+    lastActivity: "Placeholder: monitoring",
+    riskLevel: "Medium",
+    provider: "Local/mock provider placeholder"
+  }
+];
+
+const agentTaskStatuses: AgentTaskStatus[] = ["Draft", "Running Placeholder", "Waiting Approval", "In Review", "Blocked", "Completed Placeholder", "Failed Placeholder"];
+
+const agentApprovalStates: AgentApprovalState[] = ["Not Required", "Required", "Pending", "Approved", "Rejected"];
+
+const agentTaskQueue: AgentTaskRecord[] = [
+  {
+    taskId: "AGT-1001",
+    agent: "Developer Agent",
+    module: "Business Control Centre",
+    taskTitle: "Prepare Step 8 UI placeholder",
+    status: "In Review",
+    approvalState: "Pending",
+    riskLevel: "High",
+    owner: "Shiva",
+    lastUpdate: "Placeholder: today"
+  },
+  {
+    taskId: "AGT-1002",
+    agent: "QA Agent",
+    module: "Testing",
+    taskTitle: "Run validation checks placeholder",
+    status: "Waiting Approval",
+    approvalState: "Required",
+    riskLevel: "Medium",
+    owner: "Manager",
+    lastUpdate: "Placeholder: queued"
+  },
+  {
+    taskId: "AGT-1003",
+    agent: "Security Agent",
+    module: "Security",
+    taskTitle: "Review blocked secret exposure event",
+    status: "Blocked",
+    approvalState: "Rejected",
+    riskLevel: "Critical",
+    owner: "Security reviewer",
+    lastUpdate: "Placeholder: blocked"
+  },
+  {
+    taskId: "AGT-1004",
+    agent: "Finance Agent",
+    module: "Finance & Billing",
+    taskTitle: "Quotation document review placeholder",
+    status: "Draft",
+    approvalState: "Required",
+    riskLevel: "High",
+    owner: "Finance Admin",
+    lastUpdate: "Placeholder: draft"
+  },
+  {
+    taskId: "AGT-1005",
+    agent: "Support Agent",
+    module: "Support Desk",
+    taskTitle: "Ticket summary placeholder",
+    status: "Completed Placeholder",
+    approvalState: "Approved",
+    riskLevel: "Low",
+    owner: "Support Manager",
+    lastUpdate: "Placeholder: complete"
+  },
+  {
+    taskId: "AGT-1006",
+    agent: "Cloud Agent",
+    module: "Cloud / Deployment",
+    taskTitle: "Deployment readiness placeholder",
+    status: "Failed Placeholder",
+    approvalState: "Pending",
+    riskLevel: "Critical",
+    owner: "Manager",
+    lastUpdate: "Placeholder: failed"
+  }
+];
+
+const agentGovernanceWorkflowSteps = [
+  "Task request",
+  "Agent planning",
+  "Risk classification",
+  "Human approval if required",
+  "Sandboxed execution",
+  "Git checkpoint",
+  "Typecheck/test validation",
+  "Security review",
+  "Audit log",
+  "Human final approval",
+  "Release / archive"
+];
+
+const providerHealthPlaceholders = [
+  "OpenAI-compatible provider placeholder",
+  "NVIDIA provider placeholder",
+  "Local/mock provider placeholder",
+  "Media provider placeholder",
+  "Provider circuit breaker placeholder",
+  "Daily usage/cost limit placeholder",
+  "No API keys shown",
+  "No real provider calls from this UI"
+];
+
+const auditOverviewCards: MetricCard[] = [
+  { label: "Audit events today", value: "28", note: "Static event count", tone: "neutral" },
+  { label: "Approval decisions", value: "9", note: "Mock approval trail", tone: "success" },
+  { label: "Blocked unsafe actions", value: "7", note: "Safety enforcement placeholder", tone: "danger" },
+  { label: "Failed checks", value: "3", note: "Validation failures placeholder", tone: "danger" },
+  { label: "Policy warnings", value: "5", note: "Governance warnings", tone: "warning" },
+  { label: "Sensitive actions", value: "4", note: "Needs audit attention", tone: "warning" },
+  { label: "Security reviews pending", value: "2", note: "Security queue placeholder", tone: "warning" },
+  { label: "Compliance reviews pending", value: "3", note: "Compliance queue placeholder", tone: "warning" },
+  { label: "Open incidents", value: "2", note: "Mock incident count", tone: "danger" },
+  { label: "Resolved incidents", value: "6", note: "Static resolved count", tone: "success" }
+];
+
+const auditCategories: AuditCategory[] = ["Approval", "Agent Task", "Security", "Finance", "HR", "Support", "Client", "Project", "System", "Policy"];
+
+const auditSeverities: AuditSeverity[] = ["Info", "Low", "Medium", "High", "Critical"];
+
+const auditStatuses: AuditStatus[] = ["Recorded", "Needs Review", "Approved", "Blocked", "Resolved", "Escalated"];
+
+const auditEvents: AuditEventRecord[] = [
+  {
+    eventId: "AUD-5001",
+    category: "Approval",
+    actor: "Shrinika",
+    target: "Deployment approval placeholder",
+    severity: "High",
+    status: "Approved",
+    timestamp: "Placeholder: today",
+    auditNote: "Human final approval recorded as static sample."
+  },
+  {
+    eventId: "AUD-5002",
+    category: "Agent Task",
+    actor: "Developer Agent",
+    target: "Business Control Centre Step 8",
+    severity: "Medium",
+    status: "Needs Review",
+    timestamp: "Placeholder: today",
+    auditNote: "Agent task requires human review before release."
+  },
+  {
+    eventId: "AUD-5003",
+    category: "Security",
+    actor: "Security Agent",
+    target: "Secret/API key redaction gate",
+    severity: "Critical",
+    status: "Blocked",
+    timestamp: "Placeholder: blocked sample",
+    auditNote: "Secret exposure prevented. No secret value shown."
+  },
+  {
+    eventId: "AUD-5004",
+    category: "Finance",
+    actor: "Finance Admin",
+    target: "Quotation send placeholder",
+    severity: "High",
+    status: "Escalated",
+    timestamp: "Placeholder: this week",
+    auditNote: "Commercial document send requires approval."
+  },
+  {
+    eventId: "AUD-5005",
+    category: "HR",
+    actor: "HR Manager",
+    target: "Role change placeholder",
+    severity: "High",
+    status: "Needs Review",
+    timestamp: "Placeholder: this week",
+    auditNote: "Sensitive employee action requires Manager + Admin approval."
+  },
+  {
+    eventId: "AUD-5006",
+    category: "Policy",
+    actor: "System",
+    target: "Customer access restriction",
+    severity: "Critical",
+    status: "Recorded",
+    timestamp: "Placeholder: continuous",
+    auditNote: "Customers must not access internal systems."
+  },
+  {
+    eventId: "AUD-5007",
+    category: "Project",
+    actor: "Manager",
+    target: "Git checkpoint placeholder",
+    severity: "Medium",
+    status: "Resolved",
+    timestamp: "Placeholder: yesterday",
+    auditNote: "Risky change requires checkpoint before apply."
+  }
+];
+
+const complianceControls = [
+  "App Studio internal-only boundary",
+  "Customer access restriction",
+  "Human approval required for sensitive actions",
+  "Commercial document approval required",
+  "HR sensitive action approval required",
+  "Agent production action approval required",
+  "Audit logging required",
+  "Secret/API key redaction required",
+  "Sandbox and file boundary required",
+  "Git checkpoint required before risky changes"
+];
+
+const blockedSafetyEvents: BlockedSafetyEvent[] = [
+  {
+    action: "Internal access attempt placeholder",
+    reasonBlocked: "Customer attempted internal access placeholder",
+    relatedModule: "Access Boundary",
+    riskLevel: "Critical",
+    requiredNextStep: "Keep customer on public website, email, support, or future Client Portal."
+  },
+  {
+    action: "Production action placeholder",
+    reasonBlocked: "Agent attempted unapproved production action",
+    relatedModule: "Agent Operations",
+    riskLevel: "Critical",
+    requiredNextStep: "Require human approval and audit review."
+  },
+  {
+    action: "Quotation send placeholder",
+    reasonBlocked: "Finance document send without approval",
+    relatedModule: "Finance & Billing",
+    riskLevel: "High",
+    requiredNextStep: "Route to Shrinika or Finance/Admin approval."
+  },
+  {
+    action: "Role change placeholder",
+    reasonBlocked: "HR role change without approval",
+    relatedModule: "HRMS",
+    riskLevel: "High",
+    requiredNextStep: "Require Manager + Admin approval."
+  },
+  {
+    action: "Sensitive output placeholder",
+    reasonBlocked: "Secret/API key exposure prevented",
+    relatedModule: "Security",
+    riskLevel: "Critical",
+    requiredNextStep: "Redact output and record audit event."
+  },
+  {
+    action: "File path operation placeholder",
+    reasonBlocked: "Unsafe file path blocked",
+    relatedModule: "Sandbox",
+    riskLevel: "High",
+    requiredNextStep: "Validate path boundaries before continuing."
+  },
+  {
+    action: "Release readiness placeholder",
+    reasonBlocked: "Missing test validation",
+    relatedModule: "Project Operations",
+    riskLevel: "Medium",
+    requiredNextStep: "Run typecheck/tests before final approval."
+  }
+];
+
 function isAppTheme(value: string | null): value is AppTheme {
   return appThemeOptions.some(theme => theme.id === value);
 }
@@ -1574,8 +2008,6 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
             </div>
           </section>
 
-          {tableSections.slice(2).map(section => <BusinessTableSection section={section} key={section.id} />)}
-
           <section className="business-section finance-billing-section" id="finance-billing">
             <div className="business-section-heading">
               <span>Static commercial planning UI. No payment gateway, tax engine, invoice issue, or contract send is connected.</span>
@@ -1826,6 +2258,207 @@ export function BusinessControlCentre({ navigate }: { navigate: (path: string) =
                 </div>
                 <div>{hrApprovalRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
               </article>
+            </div>
+          </section>
+
+          <section className="business-section agent-operations-section" id="agent-operations">
+            <div className="business-section-heading">
+              <span>Static agent governance UI. No real agent execution, provider calls, or production action is connected.</span>
+              <h2>Agent Operations</h2>
+            </div>
+            <div className="business-boundary-notice governance-boundary-notice">
+              <strong>Agent Operations Boundary</strong>
+              <p>Agent Operations is an internal governance dashboard only. Agents remain governed by Agent Core, human approvals, sandboxing, Git checkpoints, tests, security review, audit logs, and final human authority. No autonomous production action may bypass approval.</p>
+            </div>
+            <div className="business-card-grid governance-overview-grid" aria-label="Agent Operations overview cards">
+              {agentOperationsOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="governance-reference-grid">
+              <article>
+                <span>Agent types</span>
+                <div>{agentTypes.map(type => <strong key={type}>{type}</strong>)}</div>
+              </article>
+              <article>
+                <span>Agent statuses</span>
+                <div>{agentStatuses.map(status => <strong className={`governance-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+            </div>
+            <div className="governance-subsection">
+              <div className="business-section-heading">
+                <span>Mock agent registry. Providers and activity are placeholders only.</span>
+                <h2>Agent Registry</h2>
+              </div>
+              <div className="agent-registry-grid">
+                {agentRegistry.map(agent => (
+                  <article className="governance-card" key={agent.agentName}>
+                    <div className="governance-card-header">
+                      <div>
+                        <span>{agent.agentType}</span>
+                        <h3>{agent.agentName}</h3>
+                        <small>{agent.assignedModule}</small>
+                      </div>
+                      <span className={`governance-status-badge ${badgeClassName(agent.status)}`}>{agent.status}</span>
+                    </div>
+                    <div className="governance-detail-grid">
+                      <div><span>Current task</span><strong>{agent.currentTask}</strong></div>
+                      <div><span>Approval requirement</span><strong>{agent.approvalRequirement}</strong></div>
+                      <div><span>Last activity</span><strong>{agent.lastActivity}</strong></div>
+                      <div><span>Risk level</span><strong className={`priority-text ${agent.riskLevel.toLowerCase()}`}>{agent.riskLevel}</strong></div>
+                      <div><span>Provider</span><strong>{agent.provider}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="governance-subsection">
+              <div className="business-section-heading">
+                <span>Mock task queue. No real execution or approval mutation is connected.</span>
+                <h2>Agent Task Queue</h2>
+              </div>
+              <div className="governance-status-grid">
+                <article>
+                  <span>Task statuses</span>
+                  <div>{agentTaskStatuses.map(status => <strong className={`governance-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+                </article>
+                <article>
+                  <span>Approval states</span>
+                  <div>{agentApprovalStates.map(state => <strong className={`governance-status-badge ${badgeClassName(state)}`} key={state}>{state}</strong>)}</div>
+                </article>
+              </div>
+              <div className="agent-task-grid">
+                {agentTaskQueue.map(task => (
+                  <article className="governance-card" key={task.taskId}>
+                    <div className="governance-card-header">
+                      <div>
+                        <span>{task.taskId}</span>
+                        <h3>{task.taskTitle}</h3>
+                        <small>{task.agent} / {task.module}</small>
+                      </div>
+                      <span className={`governance-status-badge ${badgeClassName(task.status)}`}>{task.status}</span>
+                    </div>
+                    <div className="governance-detail-grid">
+                      <div><span>Approval state</span><strong className={`governance-status-badge ${badgeClassName(task.approvalState)}`}>{task.approvalState}</strong></div>
+                      <div><span>Risk level</span><strong className={`priority-text ${task.riskLevel.toLowerCase()}`}>{task.riskLevel}</strong></div>
+                      <div><span>Owner</span><strong>{task.owner}</strong></div>
+                      <div><span>Last update</span><strong>{task.lastUpdate}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="governance-workflow-panel">
+              <div className="business-section-heading">
+                <span>Agent Governance Workflow</span>
+                <h2>Approval-Gated Agent Flow</h2>
+              </div>
+              <div className="governance-workflow-chain" aria-label="Agent governance workflow">
+                {agentGovernanceWorkflowSteps.map((step, index) => (
+                  <div className="governance-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="provider-health-panel">
+              <div className="business-section-heading">
+                <span>Provider Health Placeholder</span>
+                <h2>Provider Governance</h2>
+              </div>
+              <div>{providerHealthPlaceholders.map(item => <strong key={item}>{item}</strong>)}</div>
+            </div>
+          </section>
+
+          <section className="business-section audit-compliance-section" id="audit-compliance">
+            <div className="business-section-heading">
+              <span>Static audit and compliance UI. No real audit persistence, policy engine, or compliance enforcement is connected.</span>
+              <h2>Audit & Compliance</h2>
+            </div>
+            <div className="business-boundary-notice governance-boundary-notice">
+              <strong>Governance Dashboard Boundary</strong>
+              <p>Agent Operations and Audit/Compliance are internal governance dashboards only. They are not customer-facing and must not expose secrets, API keys, private employee data, or sensitive customer data.</p>
+            </div>
+            <div className="business-card-grid audit-overview-grid" aria-label="Audit and compliance overview cards">
+              {auditOverviewCards.map(card => (
+                <article className={`business-metric-card ${card.tone}`} key={card.label}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <p>{card.note}</p>
+                </article>
+              ))}
+            </div>
+            <div className="governance-reference-grid">
+              <article>
+                <span>Audit categories</span>
+                <div>{auditCategories.map(category => <strong key={category}>{category}</strong>)}</div>
+              </article>
+              <article>
+                <span>Severity</span>
+                <div>{auditSeverities.map(severity => <strong className={`severity-badge ${badgeClassName(severity)}`} key={severity}>{severity}</strong>)}</div>
+              </article>
+              <article>
+                <span>Audit statuses</span>
+                <div>{auditStatuses.map(status => <strong className={`governance-status-badge ${badgeClassName(status)}`} key={status}>{status}</strong>)}</div>
+              </article>
+            </div>
+            <div className="governance-subsection">
+              <div className="business-section-heading">
+                <span>Mock audit event log. Notes are placeholders and contain no secrets.</span>
+                <h2>Audit Event Log</h2>
+              </div>
+              <div className="audit-event-grid">
+                {auditEvents.map(event => (
+                  <article className="governance-card" key={event.eventId}>
+                    <div className="governance-card-header">
+                      <div>
+                        <span>{event.eventId} / {event.category}</span>
+                        <h3>{event.target}</h3>
+                        <small>{event.actor}</small>
+                      </div>
+                      <span className={`severity-badge ${badgeClassName(event.severity)}`}>{event.severity}</span>
+                    </div>
+                    <div className="governance-detail-grid">
+                      <div><span>Status</span><strong className={`governance-status-badge ${badgeClassName(event.status)}`}>{event.status}</strong></div>
+                      <div><span>Timestamp</span><strong>{event.timestamp}</strong></div>
+                      <div><span>Audit note</span><strong>{event.auditNote}</strong></div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="compliance-control-panel">
+              <div className="business-section-heading">
+                <span>Compliance Control Panel</span>
+                <h2>Required Controls</h2>
+              </div>
+              <div>{complianceControls.map(control => <strong key={control}>{control}</strong>)}</div>
+            </div>
+            <div className="blocked-actions-panel">
+              <div className="business-section-heading">
+                <span>Blocked Actions / Safety Events</span>
+                <h2>Safety Gate Queue</h2>
+              </div>
+              <div className="blocked-actions-grid">
+                {blockedSafetyEvents.map(event => (
+                  <article className="blocked-action-card" key={event.action}>
+                    <div className="governance-card-header">
+                      <div>
+                        <span>{event.relatedModule}</span>
+                        <h3>{event.action}</h3>
+                        <small>{event.reasonBlocked}</small>
+                      </div>
+                      <span className={`severity-badge ${badgeClassName(event.riskLevel)}`}>{event.riskLevel}</span>
+                    </div>
+                    <p>{event.requiredNextStep}</p>
+                  </article>
+                ))}
+              </div>
             </div>
           </section>
 
