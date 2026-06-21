@@ -1,5 +1,7 @@
 import { getInternalAuthApiBase } from "./internal-auth";
 
+export type BuildMissionQaChecklistStatus = "DRAFT" | "IN_PROGRESS" | "FIXES_REQUESTED" | "READY_FOR_APPROVAL" | "APPROVED" | "REJECTED" | "ARCHIVED";
+
 export type BuildMissionQueueAssignment = {
   id: string;
   assignmentStatus: string;
@@ -60,6 +62,7 @@ export type BuildMissionQueueItem = {
     updatedAt: string;
   } | null;
   executionStatus: BuildMissionExecutionStatusSummary | null;
+  qaChecklist: BuildMissionQaChecklistSummary | null;
 };
 
 export type BuildMissionExecutionStatusSummary = {
@@ -77,6 +80,31 @@ export type BuildMissionExecutionStatusSummary = {
   updatedByUserId: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type BuildMissionQaChecklistSummary = {
+  id: string;
+  buildMissionId: string;
+  executionStatusId: string | null;
+  qaStatus: BuildMissionQaChecklistStatus;
+  qaOwnerUserId: string | null;
+  requestedByUserId: string;
+  approvedByUserId: string | null;
+  rejectedByUserId: string | null;
+  approvalNote: string | null;
+  rejectionReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  archivedAt: string | null;
+  itemCount: number;
+  passCount: number;
+  failCount: number;
+  blockedCount: number;
+  notApplicableCount: number;
+  notCheckedCount: number;
+  readyForApproval: boolean;
 };
 
 export type AssignableUser = {

@@ -21,6 +21,24 @@ import {
   updateBuildMissionExecutionStatus,
   type BuildMissionExecutionPayload
 } from "./build-mission-execution";
+import {
+  archiveBuildMissionQaChecklist,
+  approveBuildMissionQaChecklist,
+  buildMissionQaChecklistItemStatuses,
+  buildMissionQaChecklistSeverities,
+  buildMissionQaChecklistStatuses,
+  createBuildMissionQaChecklist,
+  getBuildMissionQaDashboardItem,
+  listBuildMissionQaDashboard,
+  rejectBuildMissionQaChecklist,
+  type BuildMissionQaChecklistStatus,
+  type BuildMissionQaChecklistItemStatus,
+  type BuildMissionQaChecklistSeverity,
+  updateBuildMissionQaChecklistItem,
+  updateBuildMissionQaChecklistStatus,
+  type BuildMissionQaDashboardItem,
+  type BuildMissionQaDetailItem
+} from "./build-mission-qa";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
@@ -416,6 +434,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "create-project-prd", label: "Create Project / PRD", group: "Operations" },
   { id: "build-mission-queue", label: "Build Mission Queue", group: "Operations" },
   { id: "build-mission-execution", label: "Build Mission Execution", group: "Operations" },
+  { id: "build-mission-qa", label: "QA / Testing Approval", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -2295,6 +2314,19 @@ function buildProjectIntakeHandoffChecklist(intake: BusinessProjectIntake | null
   ];
 }
 
+type QaChecklistStatusForm = {
+  qaStatus: BuildMissionQaChecklistStatus;
+  note: string;
+  qaOwnerUserId: string;
+};
+
+type QaChecklistItemDraft = {
+  itemStatus: BuildMissionQaChecklistItemStatus;
+  severity: BuildMissionQaChecklistSeverity;
+  evidenceNote: string;
+  blockerReason: string;
+};
+
 export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; onLogout: () => Promise<void> }) {
   const { theme, setTheme } = useStoredAppTheme();
   const [activeSectionId, setActiveSectionId] = useState("company-dashboard");
@@ -2330,6 +2362,15 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionExecutionMessage, setBuildMissionExecutionMessage] = useState("");
   const [buildMissionExecutionError, setBuildMissionExecutionError] = useState("");
   const [buildMissionExecutionForm, setBuildMissionExecutionForm] = useState<BuildMissionExecutionPayload>(emptyBuildMissionExecutionForm);
+  const [buildMissionQaItems, setBuildMissionQaItems] = useState<BuildMissionQaDashboardItem[]>([]);
+  const [selectedBuildMissionQaId, setSelectedBuildMissionQaId] = useState("");
+  const [selectedBuildMissionQaDetail, setSelectedBuildMissionQaDetail] = useState<BuildMissionQaDetailItem | null>(null);
+  const [buildMissionQaLoading, setBuildMissionQaLoading] = useState(false);
+  const [buildMissionQaSaving, setBuildMissionQaSaving] = useState(false);
+  const [buildMissionQaMessage, setBuildMissionQaMessage] = useState("");
+  const [buildMissionQaError, setBuildMissionQaError] = useState("");
+  const [buildMissionQaStatusForm, setBuildMissionQaStatusForm] = useState<QaChecklistStatusForm>({ qaStatus: "DRAFT", note: "", qaOwnerUserId: "" });
+  const [buildMissionQaItemDrafts, setBuildMissionQaItemDrafts] = useState<Record<string, QaChecklistItemDraft>>({});
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2421,11 +2462,68 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     };
   }, [activeSection.id]);
 
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-qa") return;
+    let cancelled = false;
+    setBuildMissionQaLoading(true);
+    setAssignableUsersLoading(true);
+    setBuildMissionQaError("");
+    setAssignableUsersError("");
+    Promise.allSettled([listBuildMissionQaDashboard(), listAssignableUsers()])
+      .then(results => {
+        if (cancelled) return;
+        const [dashboardResult, usersResult] = results;
+        if (dashboardResult.status === "fulfilled") {
+          setBuildMissionQaItems(dashboardResult.value);
+          setSelectedBuildMissionQaId(current => current || dashboardResult.value[0]?.buildMissionId || "");
+        } else {
+          setBuildMissionQaError(dashboardResult.reason instanceof Error ? dashboardResult.reason.message : "Unable to load QA dashboard");
+        }
+        if (usersResult.status === "fulfilled") {
+          setAssignableUsers(usersResult.value);
+        } else {
+          setAssignableUsersError(usersResult.reason instanceof Error ? usersResult.reason.message : "Unable to load assignable internal users");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBuildMissionQaLoading(false);
+          setAssignableUsersLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-qa" || !selectedBuildMissionQaId) return;
+    let cancelled = false;
+    setBuildMissionQaLoading(true);
+    setBuildMissionQaError("");
+    getBuildMissionQaDashboardItem(selectedBuildMissionQaId)
+      .then(item => {
+        if (!cancelled) setSelectedBuildMissionQaDetail(item);
+      })
+      .catch(error => {
+        if (!cancelled) setBuildMissionQaError(error instanceof Error ? error.message : "Unable to load QA dashboard item");
+      })
+      .finally(() => {
+        if (!cancelled) setBuildMissionQaLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id, selectedBuildMissionQaId]);
+
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
   const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
   const selectedBuildMission = buildMissionQueue.find(item => item.buildMissionId === selectedBuildMissionId) ?? buildMissionQueue[0] ?? null;
   const selectedExecutionItem = buildMissionExecutionItems.find(item => item.buildMissionId === selectedExecutionBuildMissionId) ?? buildMissionExecutionItems[0] ?? null;
+  const selectedQaSummaryItem = selectedBuildMissionQaDetail ?? buildMissionQaItems.find(item => item.buildMissionId === selectedBuildMissionQaId) ?? null;
+  const selectedQaChecklist = selectedBuildMissionQaDetail?.qaChecklist ?? null;
+  const selectedQaChecklistTerminal = Boolean(selectedQaChecklist && ["APPROVED", "REJECTED", "ARCHIVED"].includes(selectedQaChecklist.qaStatus));
 
   useEffect(() => {
     if (!selectedBuildMission) {
@@ -2467,6 +2565,29 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       ownerUserId: execution?.ownerUserId ?? ""
     });
   }, [selectedExecutionItem?.buildMissionId, selectedExecutionItem?.executionStatus?.updatedAt]);
+  useEffect(() => {
+    const checklist = selectedBuildMissionQaDetail?.qaChecklist;
+    if (!selectedBuildMissionQaDetail || !checklist) {
+      setBuildMissionQaStatusForm({ qaStatus: "DRAFT", note: "", qaOwnerUserId: "" });
+      setBuildMissionQaItemDrafts({});
+      return;
+    }
+    setBuildMissionQaStatusForm({
+      qaStatus: checklist.qaStatus,
+      note: checklist.approvalNote ?? checklist.rejectionReason ?? "",
+      qaOwnerUserId: checklist.qaOwnerUserId ?? ""
+    });
+    const drafts: Record<string, QaChecklistItemDraft> = {};
+    for (const item of checklist.items) {
+      drafts[item.id] = {
+        itemStatus: item.itemStatus,
+        severity: item.severity,
+        evidenceNote: item.evidenceNote ?? "",
+        blockerReason: item.blockerReason ?? ""
+      };
+    }
+    setBuildMissionQaItemDrafts(drafts);
+  }, [selectedBuildMissionQaDetail?.buildMissionId, selectedBuildMissionQaDetail?.qaChecklist?.updatedAt]);
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
   };
@@ -2675,6 +2796,150 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setBuildMissionExecutionError(error instanceof Error ? error.message : "Unable to archive execution record");
     } finally {
       setBuildMissionExecutionSaving(false);
+    }
+  };
+  const refreshBuildMissionQaDashboard = async (selectedId?: string) => {
+    const dashboard = await listBuildMissionQaDashboard();
+    setBuildMissionQaItems(dashboard);
+    setSelectedBuildMissionQaId(selectedId || dashboard.find(item => item.buildMissionId === selectedQaSummaryItem?.buildMissionId)?.buildMissionId || dashboard[0]?.buildMissionId || "");
+  };
+  const updateBuildMissionQaStatusField = (field: keyof QaChecklistStatusForm, value: string) => {
+    setBuildMissionQaStatusForm(current => ({ ...current, [field]: value } as QaChecklistStatusForm));
+  };
+  const updateBuildMissionQaItemDraftField = (itemId: string, field: keyof QaChecklistItemDraft, value: string) => {
+    setBuildMissionQaItemDrafts(current => ({
+      ...current,
+      [itemId]: {
+        itemStatus: current[itemId]?.itemStatus ?? "NOT_CHECKED",
+        severity: current[itemId]?.severity ?? "MEDIUM",
+        evidenceNote: current[itemId]?.evidenceNote ?? "",
+        blockerReason: current[itemId]?.blockerReason ?? "",
+        [field]: value
+      } as QaChecklistItemDraft
+    }));
+  };
+  const handleCreateBuildMissionQaChecklist = async () => {
+    if (!selectedQaSummaryItem) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    try {
+      const item = await createBuildMissionQaChecklist(selectedQaSummaryItem.buildMissionId, {
+        qaOwnerUserId: buildMissionQaStatusForm.qaOwnerUserId || null
+      });
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist created. QA approval still does not deploy or start agents.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to create QA checklist");
+    } finally {
+      setBuildMissionQaSaving(false);
+    }
+  };
+  const handleUpdateBuildMissionQaChecklistStatus = async () => {
+    if (!selectedBuildMissionQaDetail?.qaChecklist) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    try {
+      const item = await updateBuildMissionQaChecklistStatus(selectedBuildMissionQaDetail.buildMissionId, {
+        qaStatus: buildMissionQaStatusForm.qaStatus,
+        note: buildMissionQaStatusForm.note,
+        qaOwnerUserId: buildMissionQaStatusForm.qaOwnerUserId || null
+      });
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist status updated.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to update QA checklist status");
+    } finally {
+      setBuildMissionQaSaving(false);
+    }
+  };
+  const handleUpdateBuildMissionQaChecklistItem = async (itemId: string) => {
+    if (!selectedBuildMissionQaDetail?.qaChecklist) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    const draft = buildMissionQaItemDrafts[itemId];
+    if (!draft) {
+      setBuildMissionQaSaving(false);
+      return;
+    }
+    try {
+      const item = await updateBuildMissionQaChecklistItem(selectedBuildMissionQaDetail.buildMissionId, itemId, {
+        itemStatus: draft.itemStatus,
+        severity: draft.severity,
+        evidenceNote: draft.evidenceNote,
+        blockerReason: draft.blockerReason
+      });
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist item updated.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to update QA checklist item");
+    } finally {
+      setBuildMissionQaSaving(false);
+    }
+  };
+  const handleApproveBuildMissionQaChecklist = async () => {
+    if (!selectedBuildMissionQaDetail?.qaChecklist) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    try {
+      const item = await approveBuildMissionQaChecklist(selectedBuildMissionQaDetail.buildMissionId, buildMissionQaStatusForm.note);
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist approved. Production readiness and deployment remain separate gates.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to approve QA checklist");
+    } finally {
+      setBuildMissionQaSaving(false);
+    }
+  };
+  const handleRejectBuildMissionQaChecklist = async () => {
+    if (!selectedBuildMissionQaDetail?.qaChecklist) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    try {
+      const item = await rejectBuildMissionQaChecklist(selectedBuildMissionQaDetail.buildMissionId, buildMissionQaStatusForm.note);
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist rejected. Fixes remain governed.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to reject QA checklist");
+    } finally {
+      setBuildMissionQaSaving(false);
+    }
+  };
+  const handleArchiveBuildMissionQaChecklist = async () => {
+    if (!selectedBuildMissionQaDetail?.qaChecklist) return;
+    setBuildMissionQaSaving(true);
+    setBuildMissionQaMessage("");
+    setBuildMissionQaError("");
+    try {
+      const item = await archiveBuildMissionQaChecklist(selectedBuildMissionQaDetail.buildMissionId);
+      setBuildMissionQaItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionQaId(item.buildMissionId);
+      setSelectedBuildMissionQaDetail(item);
+      setBuildMissionQaMessage("QA checklist archived. History is preserved.");
+      await refreshBuildMissionQaDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQaError(error instanceof Error ? error.message : "Unable to archive QA checklist");
+    } finally {
+      setBuildMissionQaSaving(false);
     }
   };
   const assignableUserLabel = (user: AssignableUser) => {
@@ -3369,6 +3634,25 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         </div>
                       ))}
                     </div>
+                    <section className="qa-summary-panel">
+                      <div className="business-section-heading">
+                        <span>QA checklist summary</span>
+                        <h2>Testing Readiness</h2>
+                      </div>
+                      {selectedExecutionItem.qaChecklist ? (
+                        <>
+                          <div className="recent-intake-meta">
+                            <div><span>QA status</span><strong>{selectedExecutionItem.qaChecklist.qaStatus}</strong></div>
+                            <div><span>Checklist items</span><strong>{selectedExecutionItem.qaChecklist.itemCount}</strong></div>
+                            <div><span>Passed</span><strong>{selectedExecutionItem.qaChecklist.passCount}</strong></div>
+                            <div><span>Failures</span><strong>{selectedExecutionItem.qaChecklist.failCount}</strong></div>
+                            <div><span>Blocked</span><strong>{selectedExecutionItem.qaChecklist.blockedCount}</strong></div>
+                            <div><span>Ready for approval</span><strong>{selectedExecutionItem.qaChecklist.readyForApproval ? "Yes" : "No"}</strong></div>
+                          </div>
+                          <p>QA approval does not deploy. Production readiness and deployment approval remain separate gates.</p>
+                        </>
+                      ) : <p>QA checklist not created yet.</p>}
+                    </section>
                     <section className="queue-assignment-card">
                       <div className="business-section-heading">
                         <span>Assigned internal team</span>
@@ -3408,6 +3692,158 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         <button type="button" onClick={() => void handleUpdateBuildMissionExecutionStatus()} disabled={buildMissionExecutionSaving || !selectedExecutionItem.executionStatus}>Update Execution Status</button>
                         <button type="button" onClick={() => void handleArchiveBuildMissionExecutionStatus()} disabled={buildMissionExecutionSaving || !selectedExecutionItem.executionStatus}>Archive Execution Record</button>
                       </div>
+                    </section>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+          ) : null}
+
+          {activeSection.id === "build-mission-qa" ? (
+          <section className="business-section build-mission-qa-section" id="build-mission-qa">
+            <div className="business-section-heading">
+              <span>Real QA checklist records only. No fake QA missions or sample progress are shown.</span>
+              <h2>QA / Testing Checklist and Approval Flow</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>QA governance boundary</strong>
+              <p>QA approval does not deploy. Production readiness and deployment approval remain separate gates.</p>
+            </div>
+            {buildMissionQaMessage ? <p className="success">{buildMissionQaMessage}</p> : null}
+            {buildMissionQaError ? <p className="error">{buildMissionQaError}</p> : null}
+            {assignableUsersError ? <p className="error">{assignableUsersError}</p> : null}
+            {buildMissionQaLoading ? <p>Loading QA dashboard...</p> : null}
+            {!buildMissionQaLoading && !buildMissionQaItems.length ? <p>No Build Missions are ready for QA yet.</p> : null}
+            {buildMissionQaItems.length ? (
+              <div className="build-mission-queue-layout">
+                <div className="build-mission-queue-list">
+                  {buildMissionQaItems.map(item => (
+                    <button type="button" className={item.buildMissionId === selectedQaSummaryItem?.buildMissionId ? "active" : ""} key={item.buildMissionId} onClick={() => setSelectedBuildMissionQaId(item.buildMissionId)}>
+                      <strong>{item.intake.projectName}</strong>
+                      <span>{item.targetModule} / {item.riskLevel}</span>
+                      <small>{item.qaChecklist?.qaStatus ?? "QA checklist not created yet"} / {item.executionStatus?.currentStage ?? "Execution pending"}</small>
+                    </button>
+                  ))}
+                </div>
+                {selectedQaSummaryItem ? (
+                  <article className="build-mission-queue-detail">
+                    <div className="build-mission-detail-header">
+                      <div>
+                        <span>Build Mission</span>
+                        <h3>{selectedQaSummaryItem.intake.projectName}</h3>
+                      </div>
+                      <strong className={`assignment-risk ${selectedQaSummaryItem.riskLevel}`}>{selectedQaSummaryItem.riskLevel} risk</strong>
+                    </div>
+                    <div className="recent-intake-meta">
+                      <div><span>Mission status</span><strong>{selectedQaSummaryItem.status}</strong></div>
+                      <div><span>Execution status</span><strong>{selectedQaSummaryItem.executionStatus?.executionStatus ?? "Not created"}</strong></div>
+                      <div><span>Current stage</span><strong>{selectedQaSummaryItem.executionStatus?.currentStage ?? "Pending record"}</strong></div>
+                      <div><span>QA checklist</span><strong>{selectedQaSummaryItem.qaChecklist?.qaStatus ?? "Not created"}</strong></div>
+                      <div><span>QA owner</span><strong>{displayAssignableUser(selectedQaSummaryItem.qaChecklist?.qaOwnerUserId ?? null)}</strong></div>
+                      <div><span>Updated</span><strong>{selectedQaSummaryItem.qaChecklist?.updatedAt ?? selectedQaSummaryItem.executionStatus?.updatedAt ?? "Not updated"}</strong></div>
+                    </div>
+                    <div className="execution-readiness-grid">
+                      {([
+                        ["Build Mission approved", selectedQaSummaryItem.status === "APPROVED"],
+                        ["Team assigned", ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedQaSummaryItem.assignment?.assignmentStatus ?? "")],
+                        ["Development start approved", selectedQaSummaryItem.developmentGate?.gateStatus === "APPROVED"],
+                        ["Execution record exists", Boolean(selectedQaSummaryItem.executionStatus)],
+                        ["Execution in QA-ready stage", Boolean(selectedQaSummaryItem.executionStatus && (["TESTING_QA", "PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"].includes(selectedQaSummaryItem.executionStatus.currentStage) || ["QA_REVIEW", "PRODUCTION_READINESS_REVIEW", "COMPLETED"].includes(selectedQaSummaryItem.executionStatus.executionStatus)))],
+                        ["QA checklist created", Boolean(selectedQaSummaryItem.qaChecklist)]
+                      ] as Array<[string, boolean]>).map(([label, ready]) => (
+                        <div className={ready ? "ready" : "pending"} key={String(label)}>
+                          <span>{ready ? "Ready" : "Pending"}</span>
+                          <strong>{label}</strong>
+                        </div>
+                      ))}
+                    </div>
+                    <section className="qa-summary-panel">
+                      <div className="business-section-heading">
+                        <span>QA checklist summary</span>
+                        <h2>Checklist Completion</h2>
+                      </div>
+                      {selectedQaSummaryItem.qaChecklist ? (
+                        <>
+                          <div className="recent-intake-meta">
+                            <div><span>Checklist items</span><strong>{selectedQaSummaryItem.qaChecklist.itemCount}</strong></div>
+                            <div><span>Passed</span><strong>{selectedQaSummaryItem.qaChecklist.passCount}</strong></div>
+                            <div><span>Failures</span><strong>{selectedQaSummaryItem.qaChecklist.failCount}</strong></div>
+                            <div><span>Blocked</span><strong>{selectedQaSummaryItem.qaChecklist.blockedCount}</strong></div>
+                            <div><span>Not applicable</span><strong>{selectedQaSummaryItem.qaChecklist.notApplicableCount}</strong></div>
+                            <div><span>Ready for approval</span><strong>{selectedQaSummaryItem.qaChecklist.readyForApproval ? "Yes" : "No"}</strong></div>
+                          </div>
+                          <p>QA approval does not deploy. Production readiness and deployment approval remain separate gates.</p>
+                        </>
+                      ) : <p>QA checklist not created yet.</p>}
+                    </section>
+                    <div className="queue-action-grid">
+                      <section className="queue-action-card">
+                        <h3>Create QA checklist</h3>
+                        <label>QA owner<select value={buildMissionQaStatusForm.qaOwnerUserId} onChange={event => updateBuildMissionQaStatusField("qaOwnerUserId", event.target.value)} disabled={assignableUsersLoading}><option value="">No owner selected</option>{assignableUsers.map(user => <option key={`qa-owner-${user.id}`} value={user.id}>{assignableUserLabel(user)}</option>)}</select></label>
+                        <button type="button" onClick={() => void handleCreateBuildMissionQaChecklist()} disabled={buildMissionQaSaving || Boolean(selectedQaSummaryItem.qaChecklist) || selectedQaSummaryItem.status !== "APPROVED" || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedQaSummaryItem.assignment?.assignmentStatus ?? "") || selectedQaSummaryItem.developmentGate?.gateStatus !== "APPROVED" || !selectedQaSummaryItem.executionStatus || !(["TESTING_QA", "PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"].includes(selectedQaSummaryItem.executionStatus.currentStage) || ["QA_REVIEW", "PRODUCTION_READINESS_REVIEW", "COMPLETED"].includes(selectedQaSummaryItem.executionStatus.executionStatus))}>Create QA Checklist</button>
+                        <small>Checklist templates are real QA requirements. They do not start agents or deployments.</small>
+                      </section>
+                      <section className="queue-action-card">
+                        <h3>QA status controls</h3>
+                        <label>QA status<select value={buildMissionQaStatusForm.qaStatus} onChange={event => updateBuildMissionQaStatusField("qaStatus", event.target.value)} disabled={!selectedQaChecklist || selectedQaChecklistTerminal}>{(selectedQaChecklistTerminal ? buildMissionQaChecklistStatuses : buildMissionQaChecklistStatuses.filter(status => !["APPROVED", "REJECTED", "ARCHIVED"].includes(status))).map(status => <option key={status} value={status}>{status}</option>)}</select></label>
+                        <label>Note<textarea value={buildMissionQaStatusForm.note} onChange={event => updateBuildMissionQaStatusField("note", event.target.value)} disabled={!selectedQaChecklist || selectedQaChecklistTerminal} placeholder="Use this for QA notes, fixes requested, or approval context." /></label>
+                        <div className="project-prd-actions">
+                          <button type="button" onClick={() => void handleUpdateBuildMissionQaChecklistStatus()} disabled={buildMissionQaSaving || !selectedQaChecklist || selectedQaChecklistTerminal || (buildMissionQaStatusForm.qaStatus === "FIXES_REQUESTED" && !buildMissionQaStatusForm.note.trim())}>Update QA Status</button>
+                          <button type="button" onClick={() => void handleApproveBuildMissionQaChecklist()} disabled={buildMissionQaSaving || !selectedQaChecklist || selectedQaChecklist.qaStatus !== "READY_FOR_APPROVAL"}>Approve QA</button>
+                          <button type="button" onClick={() => void handleRejectBuildMissionQaChecklist()} disabled={buildMissionQaSaving || !selectedQaChecklist || selectedQaChecklistTerminal || !buildMissionQaStatusForm.note.trim()}>Reject QA</button>
+                          <button type="button" onClick={() => void handleArchiveBuildMissionQaChecklist()} disabled={buildMissionQaSaving || !selectedQaChecklist}>Archive Checklist</button>
+                        </div>
+                      </section>
+                    </div>
+                    <section className="qa-checklist-panel">
+                      <div className="business-section-heading">
+                        <span>Checklist item table</span>
+                        <h2>Manual QA Items</h2>
+                      </div>
+                      {!selectedQaChecklist ? <p>QA checklist not created yet.</p> : null}
+                      {selectedQaChecklist ? (
+                        <div className="qa-checklist-table">
+                          <div className="qa-checklist-table-header">
+                            <span>Item</span>
+                            <span>Status</span>
+                            <span>Severity</span>
+                            <span>Evidence / Blocker</span>
+                            <span>Checked by / at</span>
+                            <span>Action</span>
+                          </div>
+                          {selectedQaChecklist.items.map(item => {
+                            const draft = buildMissionQaItemDrafts[item.id] ?? {
+                              itemStatus: item.itemStatus,
+                              severity: item.severity,
+                              evidenceNote: item.evidenceNote ?? "",
+                              blockerReason: item.blockerReason ?? ""
+                            };
+                            return (
+                              <article className="qa-checklist-row" key={item.id}>
+                                <div className="qa-checklist-item-info">
+                                  <strong>{item.itemTitle}</strong>
+                                  <span>{item.itemKey}</span>
+                                  <p>{item.itemDescription ?? "No description provided."}</p>
+                                </div>
+                                <label>Status<select value={draft.itemStatus} onChange={event => updateBuildMissionQaItemDraftField(item.id, "itemStatus", event.target.value)} disabled={!selectedQaChecklist}>{buildMissionQaChecklistItemStatuses.map(status => <option key={status} value={status}>{status}</option>)}</select></label>
+                                <label>Severity<select value={draft.severity} onChange={event => updateBuildMissionQaItemDraftField(item.id, "severity", event.target.value)} disabled={!selectedQaChecklist}>{buildMissionQaChecklistSeverities.map(severity => <option key={severity} value={severity}>{severity}</option>)}</select></label>
+                                <div className="qa-checklist-note-fields">
+                                  <label>Evidence<textarea value={draft.evidenceNote} onChange={event => updateBuildMissionQaItemDraftField(item.id, "evidenceNote", event.target.value)} disabled={!selectedQaChecklist} placeholder="Evidence note or validation detail." /></label>
+                                  <label>Blocker<textarea value={draft.blockerReason} onChange={event => updateBuildMissionQaItemDraftField(item.id, "blockerReason", event.target.value)} disabled={!selectedQaChecklist} placeholder="Blocker reason if the item fails or is blocked." /></label>
+                                </div>
+                                <div className="qa-checklist-meta">
+                                  <div><span>Checked by</span><strong>{displayAssignableUser(item.checkedByUserId)}</strong></div>
+                                  <div><span>Checked at</span><strong>{item.checkedAt ?? "Not checked yet"}</strong></div>
+                                </div>
+                                <div className="qa-checklist-row-action">
+                                  <button type="button" onClick={() => void handleUpdateBuildMissionQaChecklistItem(item.id)} disabled={buildMissionQaSaving || !selectedQaChecklist}>Save Item</button>
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      ) : null}
                     </section>
                   </article>
                 ) : null}

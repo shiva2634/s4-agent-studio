@@ -131,6 +131,9 @@ export const businessBuildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_
 export const businessBuildMissionDevelopmentGateStatuses = ["REQUESTED", "APPROVED", "BLOCKED", "CANCELLED", "ARCHIVED"] as const;
 export const businessBuildMissionExecutionStatuses = ["NOT_STARTED", "READY_TO_START", "IN_PROGRESS", "BLOCKED", "QA_REVIEW", "PRODUCTION_READINESS_REVIEW", "COMPLETED", "CANCELLED", "ARCHIVED"] as const;
 export const businessBuildMissionExecutionStages = ["DEVELOPMENT_START_APPROVED", "REQUIREMENTS_REVIEW", "FRONTEND_BUILD", "BACKEND_BUILD", "INTEGRATION", "TESTING_QA", "PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"] as const;
+export const businessBuildMissionQaChecklistStatuses = ["DRAFT", "IN_PROGRESS", "FIXES_REQUESTED", "READY_FOR_APPROVAL", "APPROVED", "REJECTED", "ARCHIVED"] as const;
+export const businessBuildMissionQaChecklistItemStatuses = ["NOT_CHECKED", "PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"] as const;
+export const businessBuildMissionQaChecklistSeverities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -142,6 +145,9 @@ type BusinessBuildMissionAssignmentStatus = (typeof businessBuildMissionAssignme
 type BusinessBuildMissionDevelopmentGateStatus = (typeof businessBuildMissionDevelopmentGateStatuses)[number];
 type BusinessBuildMissionExecutionStatus = (typeof businessBuildMissionExecutionStatuses)[number];
 type BusinessBuildMissionExecutionStage = (typeof businessBuildMissionExecutionStages)[number];
+type BusinessBuildMissionQaChecklistStatus = (typeof businessBuildMissionQaChecklistStatuses)[number];
+type BusinessBuildMissionQaChecklistItemStatus = (typeof businessBuildMissionQaChecklistItemStatuses)[number];
+type BusinessBuildMissionQaChecklistSeverity = (typeof businessBuildMissionQaChecklistSeverities)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -239,6 +245,33 @@ export type BuildMissionExecutionStatusInput = {
   blockerSummary?: string | null;
   nextAction?: string | null;
   ownerUserId?: string | null;
+  now?: string;
+};
+
+export type BuildMissionQaChecklistInput = {
+  buildMissionId: string;
+  actorUserId: string;
+  qaOwnerUserId?: string | null;
+  now?: string;
+};
+
+export type BuildMissionQaChecklistStatusInput = {
+  buildMissionId: string;
+  actorUserId: string;
+  qaStatus: BusinessBuildMissionQaChecklistStatus;
+  note?: string | null;
+  qaOwnerUserId?: string | null;
+  now?: string;
+};
+
+export type BuildMissionQaChecklistItemUpdateInput = {
+  buildMissionId: string;
+  itemId: string;
+  actorUserId: string;
+  itemStatus: BusinessBuildMissionQaChecklistItemStatus;
+  severity?: BusinessBuildMissionQaChecklistSeverity | null;
+  evidenceNote?: string | null;
+  blockerReason?: string | null;
   now?: string;
 };
 
@@ -887,6 +920,47 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(owner_user_id) REFERENCES business_users(id),
       FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
     );
+    CREATE TABLE IF NOT EXISTS business_build_mission_qa_checklists (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      execution_status_id TEXT,
+      qa_status TEXT NOT NULL CHECK(qa_status IN ('DRAFT','IN_PROGRESS','FIXES_REQUESTED','READY_FOR_APPROVAL','APPROVED','REJECTED','ARCHIVED')),
+      qa_owner_user_id TEXT,
+      requested_by_user_id TEXT NOT NULL,
+      approved_by_user_id TEXT,
+      rejected_by_user_id TEXT,
+      approval_note TEXT,
+      rejection_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      approved_at TEXT,
+      rejected_at TEXT,
+      archived_at TEXT,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE,
+      FOREIGN KEY(execution_status_id) REFERENCES business_build_mission_execution_statuses(id) ON DELETE SET NULL,
+      FOREIGN KEY(qa_owner_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(requested_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(approved_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(rejected_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS business_build_mission_qa_checklist_items (
+      id TEXT PRIMARY KEY,
+      qa_checklist_id TEXT NOT NULL,
+      item_key TEXT NOT NULL,
+      item_title TEXT NOT NULL,
+      item_description TEXT,
+      item_status TEXT NOT NULL CHECK(item_status IN ('NOT_CHECKED','PASS','FAIL','BLOCKED','NOT_APPLICABLE')),
+      severity TEXT NOT NULL CHECK(severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+      evidence_note TEXT,
+      blocker_reason TEXT,
+      checked_by_user_id TEXT,
+      checked_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(qa_checklist_id) REFERENCES business_build_mission_qa_checklists(id) ON DELETE CASCADE,
+      FOREIGN KEY(checked_by_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1297,6 +1371,12 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_execution_status ON business_build_mission_execution_statuses(execution_status, updated_at);
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_execution_owner ON business_build_mission_execution_statuses(owner_user_id, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_execution_active_unique ON business_build_mission_execution_statuses(build_mission_id) WHERE archived_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklists_mission ON business_build_mission_qa_checklists(build_mission_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklists_status ON business_build_mission_qa_checklists(qa_status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklists_active_unique ON business_build_mission_qa_checklists(build_mission_id) WHERE archived_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklist_items_checklist ON business_build_mission_qa_checklist_items(qa_checklist_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklist_items_status ON business_build_mission_qa_checklist_items(item_status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_qa_checklist_items_active_unique ON business_build_mission_qa_checklist_items(qa_checklist_id, item_key) WHERE archived_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -2449,12 +2529,12 @@ export function markBusinessProjectIntakeBuildMissionHandoff(database: Database.
 }
 
 export function listBuildMissionQueueItems(database: Database.Database) {
-  return database.prepare(buildMissionQueueSelectSql("ORDER BY bm.created_at DESC")).all().map(mapBuildMissionQueueRow);
+  return database.prepare(buildMissionQueueSelectSql("ORDER BY bm.created_at DESC")).all().map((row) => mapBuildMissionQueueRow(database, row));
 }
 
 export function getBuildMissionQueueItem(database: Database.Database, buildMissionId: string) {
   const row = database.prepare(buildMissionQueueSelectSql("WHERE bm.id=? LIMIT 1")).get(buildMissionId);
-  return row ? mapBuildMissionQueueRow(row) : undefined;
+  return row ? mapBuildMissionQueueRow(database, row) : undefined;
 }
 
 export function getBuildMissionTeamAssignment(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
@@ -2796,6 +2876,306 @@ export function recordBuildMissionExecutionEvent(database: Database.Database, in
   return recordBuildMissionQueueEvent(database, input);
 }
 
+type BuildMissionQaChecklistSummaryRow = {
+  id: string;
+  buildMissionId: string;
+  executionStatusId: string | null;
+  qaStatus: BusinessBuildMissionQaChecklistStatus;
+  qaOwnerUserId: string | null;
+  requestedByUserId: string;
+  approvedByUserId: string | null;
+  rejectedByUserId: string | null;
+  approvalNote: string | null;
+  rejectionReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  archivedAt: string | null;
+  itemCount: number;
+  passCount: number;
+  failCount: number;
+  blockedCount: number;
+  notApplicableCount: number;
+  notCheckedCount: number;
+  readyForApproval: boolean;
+};
+
+type BuildMissionQaChecklistItemRow = {
+  id: string;
+  qaChecklistId: string;
+  itemKey: string;
+  itemTitle: string;
+  itemDescription: string | null;
+  itemStatus: BusinessBuildMissionQaChecklistItemStatus;
+  severity: BusinessBuildMissionQaChecklistSeverity;
+  evidenceNote: string | null;
+  blockerReason: string | null;
+  checkedByUserId: string | null;
+  checkedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+const buildMissionQaChecklistTemplates: Array<Pick<BuildMissionQaChecklistItemRow, "itemKey" | "itemTitle" | "itemDescription" | "severity">> = [
+  { itemKey: "requirements_covered", itemTitle: "Requirements covered", itemDescription: "Confirm the approved PRD scope and acceptance criteria are reflected in the implementation.", severity: "HIGH" },
+  { itemKey: "frontend_basic_flow", itemTitle: "Frontend basic flow", itemDescription: "Verify the primary frontend path renders correctly and supports the intended interaction flow.", severity: "MEDIUM" },
+  { itemKey: "backend_api_validation", itemTitle: "Backend API validation", itemDescription: "Confirm the backend routes, validation, and response handling behave as expected.", severity: "HIGH" },
+  { itemKey: "auth_permission_check", itemTitle: "Auth and permission check", itemDescription: "Verify internal access, role gating, and permission checks remain enforced.", severity: "HIGH" },
+  { itemKey: "data_persistence_check", itemTitle: "Data persistence check", itemDescription: "Confirm database writes, updates, and retrievals behave safely for the governed flow.", severity: "HIGH" },
+  { itemKey: "error_empty_state_check", itemTitle: "Error and empty-state check", itemDescription: "Ensure empty states and validation messages are clear and honest.", severity: "MEDIUM" },
+  { itemKey: "no_mock_data_check", itemTitle: "No mock data check", itemDescription: "Confirm the touched workflow uses real backend data only and avoids fake dashboard data.", severity: "MEDIUM" },
+  { itemKey: "security_no_secret_exposure", itemTitle: "Security no secret exposure", itemDescription: "Verify no secrets, tokens, or internal identifiers leak into the UI, logs, or events.", severity: "CRITICAL" },
+  { itemKey: "regression_tests_passed", itemTitle: "Regression tests passed", itemDescription: "Confirm relevant automated tests passed for the touched workflow.", severity: "HIGH" },
+  { itemKey: "deployment_not_triggered", itemTitle: "Deployment not triggered", itemDescription: "Confirm QA approval does not start agents, create proposals, apply code, or deploy.", severity: "HIGH" }
+];
+
+export function getBuildMissionQaChecklist(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  const summary = getBuildMissionQaChecklistSummary(database, buildMissionId, options);
+  if (!summary) return undefined;
+  const items = database.prepare(`SELECT id,qa_checklist_id AS qaChecklistId,item_key AS itemKey,item_title AS itemTitle,
+      item_description AS itemDescription,item_status AS itemStatus,severity,evidence_note AS evidenceNote,blocker_reason AS blockerReason,
+      checked_by_user_id AS checkedByUserId,checked_at AS checkedAt,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_build_mission_qa_checklist_items
+    WHERE qa_checklist_id=?${options.includeArchived ? "" : " AND archived_at IS NULL"}
+    ORDER BY created_at ASC`).all(summary.id) as BuildMissionQaChecklistItemRow[];
+  return {
+    ...summary,
+    items: items.map((item) => ({ ...item }))
+  };
+}
+
+export function createBuildMissionQaChecklist(database: Database.Database, input: BuildMissionQaChecklistInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const readiness = assertBuildMissionQaReady(database, input.buildMissionId);
+  if (getBuildMissionQaChecklistSummary(database, input.buildMissionId)) throw new Error("Active QA checklist already exists for this Build Mission");
+  const qaOwner = normalizeOptionalText(input.qaOwnerUserId);
+  if (qaOwner) {
+    if (!getInternalAssignableUser(database, qaOwner)) throw new Error("qaOwnerUserId must be an active internal assignable user");
+  }
+  const checklistId = `business-build-mission-qa-checklist-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  const executionStatusId = readiness.execution.id;
+  const insertChecklist = database.prepare(`INSERT INTO business_build_mission_qa_checklists
+    (id,build_mission_id,execution_status_id,qa_status,qa_owner_user_id,requested_by_user_id,approved_by_user_id,rejected_by_user_id,
+      approval_note,rejection_reason,created_at,updated_at,approved_at,rejected_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`);
+  const insertItem = database.prepare(`INSERT INTO business_build_mission_qa_checklist_items
+    (id,qa_checklist_id,item_key,item_title,item_description,item_status,severity,evidence_note,blocker_reason,checked_by_user_id,checked_at,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`);
+  const transaction = database.transaction(() => {
+    insertChecklist.run(
+      checklistId,
+      readiness.mission.id,
+      executionStatusId,
+      "DRAFT",
+      qaOwner ?? null,
+      input.actorUserId,
+      null,
+      null,
+      null,
+      null,
+      timestamp,
+      timestamp,
+      null,
+      null
+    );
+    for (const template of buildMissionQaChecklistTemplates) {
+      insertItem.run(
+        `business-build-mission-qa-checklist-item-${template.itemKey}-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`,
+        checklistId,
+        template.itemKey,
+        template.itemTitle,
+        template.itemDescription ?? null,
+        "NOT_CHECKED",
+        template.severity,
+        null,
+        null,
+        null,
+        null,
+        timestamp,
+        timestamp
+      );
+    }
+    syncExecutionQaStatus(database, input.buildMissionId, "QA_CHECKLIST_CREATED", input.actorUserId, timestamp);
+    recordBuildMissionQaEvent(database, {
+      buildMissionId: input.buildMissionId,
+      eventType: "BUILD_MISSION_QA_CHECKLIST_CREATED",
+      summary: "QA checklist created for Build Mission",
+      actorUserId: input.actorUserId,
+      payload: { checklistId, qaOwnerUserId: qaOwner ?? null },
+      now: timestamp
+    });
+  });
+  transaction();
+  return getBuildMissionQaChecklist(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function updateBuildMissionQaChecklistStatus(database: Database.Database, input: BuildMissionQaChecklistStatusInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const checklist = getBuildMissionQaChecklistSummary(database, input.buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!checklist || checklist.archivedAt) throw new Error("QA checklist not found");
+  const qaStatus = validateEnum("qaStatus", input.qaStatus, businessBuildMissionQaChecklistStatuses);
+  if (["APPROVED", "REJECTED", "ARCHIVED"].includes(qaStatus)) throw new Error("Use approval, rejection, or archive actions for terminal QA checklist states");
+  if (qaStatus === "FIXES_REQUESTED" && !normalizeOptionalText(input.note)) throw new Error("note is required when QA fixes are requested");
+  if (qaStatus === "READY_FOR_APPROVAL" && !areBuildMissionQaChecklistItemsReady(database, checklist.id)) {
+    throw new Error("All required QA checklist items must pass or be not applicable before ready for approval");
+  }
+  if (qaStatus === "IN_PROGRESS" && input.qaOwnerUserId) {
+    if (!getInternalAssignableUser(database, input.qaOwnerUserId)) throw new Error("qaOwnerUserId must be an active internal assignable user");
+  }
+  const qaOwnerUserId = normalizeOptionalText(input.qaOwnerUserId);
+  if (qaOwnerUserId && !getInternalAssignableUser(database, qaOwnerUserId)) throw new Error("qaOwnerUserId must be an active internal assignable user");
+  database.prepare(`UPDATE business_build_mission_qa_checklists
+    SET qa_status=?,qa_owner_user_id=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(
+    qaStatus,
+    qaOwnerUserId ?? checklist.qaOwnerUserId,
+    timestamp,
+    checklist.id
+  );
+  syncExecutionQaStatus(database, input.buildMissionId, qaStatus, input.actorUserId, timestamp, qaStatus === "FIXES_REQUESTED" ? "QA_FIXES_REQUESTED" : undefined);
+  recordBuildMissionQaEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_QA_CHECKLIST_STATUS_UPDATED",
+    summary: "QA checklist status updated",
+    actorUserId: input.actorUserId,
+    payload: { qaStatus, note: input.note ?? null, qaOwnerUserId: qaOwnerUserId ?? checklist.qaOwnerUserId },
+    now: timestamp
+  });
+  return getBuildMissionQaChecklist(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function updateBuildMissionQaChecklistItem(database: Database.Database, input: BuildMissionQaChecklistItemUpdateInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const checklist = getBuildMissionQaChecklistSummary(database, input.buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!checklist || checklist.archivedAt) throw new Error("QA checklist not found");
+  if (["APPROVED", "REJECTED", "ARCHIVED"].includes(checklist.qaStatus)) throw new Error("Approved or archived QA checklists cannot be updated");
+  const existingItem = database.prepare(`SELECT id,qa_checklist_id AS qaChecklistId,item_key AS itemKey,item_title AS itemTitle,item_description AS itemDescription,
+      item_status AS itemStatus,severity,evidence_note AS evidenceNote,blocker_reason AS blockerReason,checked_by_user_id AS checkedByUserId,checked_at AS checkedAt,
+      created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_build_mission_qa_checklist_items
+    WHERE id=? AND qa_checklist_id=? AND archived_at IS NULL`).get(input.itemId, checklist.id) as BuildMissionQaChecklistItemRow | undefined;
+  if (!existingItem) throw new Error("QA checklist item not found");
+  const itemStatus = validateEnum("itemStatus", input.itemStatus, businessBuildMissionQaChecklistItemStatuses);
+  const severity = validateEnum("severity", input.severity ?? existingItem.severity, businessBuildMissionQaChecklistSeverities);
+  const evidenceNote = normalizeOptionalText(input.evidenceNote);
+  const blockerReason = normalizeOptionalText(input.blockerReason);
+  if (["FAIL", "BLOCKED"].includes(itemStatus) && !evidenceNote && !blockerReason) {
+    throw new Error("evidenceNote or blockerReason is required when a QA item fails or is blocked");
+  }
+  const checkedByUser = getInternalAssignableUser(database, input.actorUserId);
+  if (!checkedByUser) throw new Error("QA checklist updates require an active internal user");
+  database.prepare(`UPDATE business_build_mission_qa_checklist_items
+    SET item_status=?,severity=?,evidence_note=?,blocker_reason=?,checked_by_user_id=?,checked_at=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(
+    itemStatus,
+    severity,
+    evidenceNote,
+    blockerReason,
+    input.actorUserId,
+    timestamp,
+    timestamp,
+    existingItem.id
+  );
+  if (["FAIL", "BLOCKED"].includes(itemStatus) && checklist.qaStatus !== "FIXES_REQUESTED") {
+    database.prepare("UPDATE business_build_mission_qa_checklists SET qa_status='FIXES_REQUESTED',updated_at=? WHERE id=? AND archived_at IS NULL").run(timestamp, checklist.id);
+    syncExecutionQaStatus(database, input.buildMissionId, "FIXES_REQUESTED", input.actorUserId, timestamp, "QA_FIXES_REQUESTED");
+  } else {
+    syncExecutionQaStatus(database, input.buildMissionId, checklist.qaStatus, input.actorUserId, timestamp);
+  }
+  recordBuildMissionQaEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_QA_CHECKLIST_ITEM_UPDATED",
+    summary: "QA checklist item updated",
+    actorUserId: input.actorUserId,
+    payload: { itemId: existingItem.id, itemKey: existingItem.itemKey, itemStatus, severity, evidenceNote, blockerReason },
+    now: timestamp
+  });
+  return getBuildMissionQaChecklist(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function approveBuildMissionQaChecklist(database: Database.Database, input: { buildMissionId: string; actorUserId: string; note?: string | null; now?: string }) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const checklist = getBuildMissionQaChecklistSummary(database, input.buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!checklist || checklist.archivedAt) throw new Error("QA checklist not found");
+  if (checklist.qaStatus !== "READY_FOR_APPROVAL") throw new Error("QA checklist must be READY_FOR_APPROVAL before approval");
+  if (!areBuildMissionQaChecklistItemsReady(database, checklist.id)) throw new Error("All required QA checklist items must pass or be not applicable before approval");
+  database.prepare(`UPDATE business_build_mission_qa_checklists
+    SET qa_status='APPROVED',approved_by_user_id=?,approval_note=?,approved_at=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(input.actorUserId, sanitizeOptionalEventText(input.note), timestamp, timestamp, checklist.id);
+  syncExecutionQaStatus(database, input.buildMissionId, "APPROVED", input.actorUserId, timestamp, "QA_APPROVED");
+  recordBuildMissionQaEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_QA_CHECKLIST_APPROVED",
+    summary: "QA checklist approved",
+    actorUserId: input.actorUserId,
+    payload: { note: input.note ?? null, checklistId: checklist.id },
+    now: timestamp
+  });
+  return getBuildMissionQaChecklist(database, input.buildMissionId);
+}
+
+export function rejectBuildMissionQaChecklist(database: Database.Database, input: { buildMissionId: string; actorUserId: string; reason: string; now?: string }) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const checklist = getBuildMissionQaChecklistSummary(database, input.buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!checklist || checklist.archivedAt) throw new Error("QA checklist not found");
+  const reason = normalizeRequiredText("reason", input.reason);
+  database.prepare(`UPDATE business_build_mission_qa_checklists
+    SET qa_status='REJECTED',rejected_by_user_id=?,rejection_reason=?,rejected_at=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(input.actorUserId, sanitizeEventText(reason), timestamp, timestamp, checklist.id);
+  syncExecutionQaStatus(database, input.buildMissionId, "REJECTED", input.actorUserId, timestamp, "QA_REJECTED");
+  recordBuildMissionQaEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_QA_CHECKLIST_REJECTED",
+    summary: "QA checklist rejected",
+    actorUserId: input.actorUserId,
+    payload: { reason, checklistId: checklist.id },
+    now: timestamp
+  });
+  return getBuildMissionQaChecklist(database, input.buildMissionId);
+}
+
+export function archiveBuildMissionQaChecklist(database: Database.Database, input: { buildMissionId: string; actorUserId: string; now?: string }) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const checklist = getBuildMissionQaChecklistSummary(database, input.buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!checklist || checklist.archivedAt) throw new Error("QA checklist not found");
+  database.prepare("UPDATE business_build_mission_qa_checklists SET qa_status='ARCHIVED',archived_at=?,updated_at=? WHERE id=? AND archived_at IS NULL").run(timestamp, timestamp, checklist.id);
+  database.prepare("UPDATE business_build_mission_qa_checklist_items SET archived_at=?,updated_at=? WHERE qa_checklist_id=? AND archived_at IS NULL").run(timestamp, timestamp, checklist.id);
+  syncExecutionQaStatus(database, input.buildMissionId, "ARCHIVED", input.actorUserId, timestamp, "QA_ARCHIVED");
+  recordBuildMissionQaEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_QA_CHECKLIST_ARCHIVED",
+    summary: "QA checklist archived",
+    actorUserId: input.actorUserId,
+    payload: { checklistId: checklist.id },
+    now: timestamp
+  });
+  return getBuildMissionQaChecklist(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function listBuildMissionQaDashboardItems(database: Database.Database) {
+  return listBuildMissionExecutionDashboardItems(database)
+    .filter((item: any) => isBuildMissionQaDashboardEligible(item))
+    .map((item: any) => ({ ...item, qaChecklist: getBuildMissionQaChecklistSummary(database, item.buildMissionId) }));
+}
+
+export function getBuildMissionQaDashboardItem(database: Database.Database, buildMissionId: string) {
+  const item = getBuildMissionExecutionDashboardItem(database, buildMissionId) as any;
+  if (!item || !isBuildMissionQaDashboardEligible(item)) return undefined;
+  return { ...item, qaChecklist: getBuildMissionQaChecklist(database, buildMissionId) };
+}
+
+export function recordBuildMissionQaEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
+  return recordBuildMissionQueueEvent(database, input);
+}
+
 export function recordBuildMissionQueueEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
   const timestamp = input.now ?? new Date().toISOString();
   assertActiveBusinessUser(database, input.actorUserId);
@@ -2934,8 +3314,9 @@ function buildMissionQueueSelectSql(suffix: string) {
     ${suffix}`;
 }
 
-function mapBuildMissionQueueRow(row: unknown) {
+function mapBuildMissionQueueRow(database: Database.Database, row: unknown) {
   const value = row as Record<string, unknown>;
+  const qaChecklist = typeof value.buildMissionId === "string" ? getBuildMissionQaChecklistSummary(database, value.buildMissionId) : undefined;
   return {
     id: value.buildMissionId,
     buildMissionId: value.buildMissionId,
@@ -3008,7 +3389,8 @@ function mapBuildMissionQueueRow(row: unknown) {
       updatedByUserId: value.executionUpdatedByUserId,
       createdAt: value.executionCreatedAt,
       updatedAt: value.executionUpdatedAt
-    } : null
+    } : null,
+    qaChecklist: qaChecklist ?? null
   };
 }
 
@@ -3072,6 +3454,105 @@ function isBuildMissionExecutionDashboardEligible(item: any) {
     ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(item?.assignment?.assignmentStatus ?? "") &&
     item?.developmentGate?.gateStatus === "APPROVED"
   );
+}
+
+function isBuildMissionQaDashboardEligible(item: any) {
+  return Boolean(item?.qaChecklist) || Boolean(item?.executionStatus && isBuildMissionQaReadyExecution(item.executionStatus));
+}
+
+function isBuildMissionQaReadyExecution(execution: { currentStage?: string | null; executionStatus?: string | null } | null | undefined) {
+  if (!execution) return false;
+  return ["TESTING_QA", "PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"].includes(String(execution.currentStage ?? "")) ||
+    ["QA_REVIEW", "PRODUCTION_READINESS_REVIEW", "COMPLETED"].includes(String(execution.executionStatus ?? ""));
+}
+
+function getBuildMissionQaChecklistSummary(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  const row = database.prepare(`SELECT
+      qc.id,qc.build_mission_id AS buildMissionId,qc.execution_status_id AS executionStatusId,qc.qa_status AS qaStatus,
+      qc.qa_owner_user_id AS qaOwnerUserId,qc.requested_by_user_id AS requestedByUserId,qc.approved_by_user_id AS approvedByUserId,
+      qc.rejected_by_user_id AS rejectedByUserId,qc.approval_note AS approvalNote,qc.rejection_reason AS rejectionReason,
+      qc.created_at AS createdAt,qc.updated_at AS updatedAt,qc.approved_at AS approvedAt,qc.rejected_at AS rejectedAt,qc.archived_at AS archivedAt,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL),0) AS itemCount,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL AND i.item_status='PASS'),0) AS passCount,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL AND i.item_status='FAIL'),0) AS failCount,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL AND i.item_status='BLOCKED'),0) AS blockedCount,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL AND i.item_status='NOT_APPLICABLE'),0) AS notApplicableCount,
+      COALESCE((SELECT COUNT(*) FROM business_build_mission_qa_checklist_items i WHERE i.qa_checklist_id=qc.id AND i.archived_at IS NULL AND i.item_status='NOT_CHECKED'),0) AS notCheckedCount
+    FROM business_build_mission_qa_checklists qc
+    WHERE qc.build_mission_id=?${options.includeArchived ? "" : " AND qc.archived_at IS NULL"}
+    ORDER BY qc.updated_at DESC, qc.created_at DESC
+    LIMIT 1`).get(buildMissionId) as BuildMissionQaChecklistSummaryRow | undefined;
+  if (!row) return undefined;
+  return {
+    ...row,
+    readyForApproval: row.itemCount > 0 && row.failCount === 0 && row.blockedCount === 0 && row.notCheckedCount === 0
+  };
+}
+
+function getBuildMissionQaChecklistItems(database: Database.Database, qaChecklistId: string) {
+  return database.prepare(`SELECT id,qa_checklist_id AS qaChecklistId,item_key AS itemKey,item_title AS itemTitle,item_description AS itemDescription,
+      item_status AS itemStatus,severity,evidence_note AS evidenceNote,blocker_reason AS blockerReason,checked_by_user_id AS checkedByUserId,
+      checked_at AS checkedAt,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_build_mission_qa_checklist_items
+    WHERE qa_checklist_id=? AND archived_at IS NULL
+    ORDER BY created_at ASC`).all(qaChecklistId) as BuildMissionQaChecklistItemRow[];
+}
+
+function areBuildMissionQaChecklistItemsReady(database: Database.Database, qaChecklistId: string) {
+  const rows = getBuildMissionQaChecklistItems(database, qaChecklistId);
+  return rows.length > 0 && rows.every((item) => item.itemStatus === "PASS" || item.itemStatus === "NOT_APPLICABLE");
+}
+
+function syncExecutionQaStatus(database: Database.Database, buildMissionId: string, checklistStatus: BusinessBuildMissionQaChecklistStatus | "QA_CHECKLIST_CREATED", actorUserId: string, now: string, explicitExecutionStatus?: string) {
+  const execution = getBuildMissionExecutionStatus(database, buildMissionId) as { id: string } | undefined;
+  if (!execution) return;
+  const executionQaStatus = explicitExecutionStatus ?? ({
+    DRAFT: "QA_DRAFT",
+    IN_PROGRESS: "QA_IN_PROGRESS",
+    FIXES_REQUESTED: "QA_FIXES_REQUESTED",
+    READY_FOR_APPROVAL: "QA_READY_FOR_APPROVAL",
+    APPROVED: "QA_APPROVED",
+    REJECTED: "QA_REJECTED",
+    ARCHIVED: "QA_ARCHIVED",
+    QA_CHECKLIST_CREATED: "QA_CHECKLIST_CREATED"
+  } as Record<BusinessBuildMissionQaChecklistStatus | "QA_CHECKLIST_CREATED", string>)[checklistStatus];
+  database.prepare(`UPDATE business_build_mission_execution_statuses
+    SET qa_status=?,updated_by_user_id=?,updated_at=?
+    WHERE build_mission_id=? AND archived_at IS NULL`).run(executionQaStatus, actorUserId, now, buildMissionId);
+}
+
+function assertBuildMissionQaReady(database: Database.Database, buildMissionId: string) {
+  const mission = getBuildMissionRow(database, buildMissionId);
+  if (!mission) throw new Error("Build Mission not found");
+  if (mission.status !== "APPROVED") throw new Error("Build Mission must be approved before QA checklist creation");
+  const assignment = getBuildMissionTeamAssignment(database, buildMissionId) as { id: string; assignmentStatus: string; managerUserId: string | null } | undefined;
+  if (!assignment || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(assignment.assignmentStatus)) throw new Error("Finalized team assignment is required before QA checklist creation");
+  if (!assignment.managerUserId) throw new Error("Manager assignment is required before QA checklist creation");
+  const gate = getBuildMissionDevelopmentGate(database, buildMissionId) as { id: string; gateStatus: string } | undefined;
+  if (!gate || gate.gateStatus !== "APPROVED") throw new Error("Approved development-start gate is required before QA checklist creation");
+  const execution = getBuildMissionExecutionStatus(database, buildMissionId) as { id: string; executionStatus: string; currentStage: string } | undefined;
+  if (!execution) throw new Error("Execution record is required before QA checklist creation");
+  if (!isBuildMissionQaReadyExecution(execution)) throw new Error("Execution must be in QA/testing-ready stage before QA checklist creation");
+  const intake = getBusinessProjectIntakeByBuildMissionId(database, buildMissionId) as { id: string } | undefined;
+  if (!intake) throw new Error("Linked project intake is required before QA checklist creation");
+  return { mission, assignment, gate, execution, intake };
+}
+
+function normalizeBuildMissionQaChecklistStatusInput(input: BuildMissionQaChecklistStatusInput) {
+  return {
+    qaStatus: validateEnum("qaStatus", input.qaStatus, businessBuildMissionQaChecklistStatuses),
+    note: normalizeOptionalText(input.note),
+    qaOwnerUserId: normalizeOptionalText(input.qaOwnerUserId)
+  };
+}
+
+function normalizeBuildMissionQaChecklistItemUpdateInput(input: BuildMissionQaChecklistItemUpdateInput) {
+  return {
+    itemStatus: validateEnum("itemStatus", input.itemStatus, businessBuildMissionQaChecklistItemStatuses),
+    severity: validateEnum("severity", input.severity ?? "LOW", businessBuildMissionQaChecklistSeverities),
+    evidenceNote: normalizeOptionalText(input.evidenceNote),
+    blockerReason: normalizeOptionalText(input.blockerReason)
+  };
 }
 
 const buildMissionAssignmentUserFieldLabels = {

@@ -1412,4 +1412,224 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates and governs Build Mission QA checklists without mock data", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        createOrUpdateBuildMissionTeamAssignment,
+        requestBuildMissionDevelopmentStart,
+        approveBuildMissionDevelopmentStart,
+        createBuildMissionExecutionStatus,
+        updateBuildMissionExecutionStatus,
+        createBuildMissionQaChecklist,
+        updateBuildMissionQaChecklistItem,
+        updateBuildMissionQaChecklistStatus,
+        approveBuildMissionQaChecklist,
+        rejectBuildMissionQaChecklist,
+        archiveBuildMissionQaChecklist,
+        listBuildMissionQaDashboardItems,
+        getBuildMissionQaChecklist,
+        getBuildMissionExecutionDashboardItem
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .run("project-qa-flow", "QA Flow Project", "/tmp/project-qa-flow", "ACTIVE", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z");
+      db.prepare(`INSERT INTO build_missions
+        (id,project_id,task_id,readiness_run_id,target_module,scope,dependencies_json,risk_level,required_specialists_json,
+          scaffold_needs_json,git_mode,acceptance_criteria_json,rollback_plan,status,approval_id,plan_json,created_at,updated_at,approved_at,converted_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "build-mission-qa-flow",
+        "project-qa-flow",
+        null,
+        null,
+        "QA Flow Module",
+        "QA flow scope",
+        "[]",
+        "high",
+        "[]",
+        "{}",
+        "WORKTREE",
+        "[]",
+        "Rollback QA changes",
+        "DRAFT",
+        null,
+        "{}",
+        "2026-01-07T00:00:00.000Z",
+        "2026-01-07T00:00:00.000Z",
+        null,
+        null
+      );
+      const intake = createBusinessProjectIntake(db, {
+        projectName: "QA Flow Intake",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "Internal Tool",
+        priority: "High",
+        projectSource: "Admin instruction",
+        prdStatus: "Approved",
+        shortSummary: "QA flow intake for governed checklist testing.",
+        problemStatement: "Need a governed QA checklist after execution becomes QA-ready.",
+        targetUsers: "Internal QA and delivery team",
+        coreModulesRequired: "Auth, execution, QA approval",
+        keyFeatures: "Checklist, approvals, archive",
+        integrationsNeeded: "None",
+        designReferences: "Business Control Centre",
+        deliveryDeadline: "2026-07-15",
+        estimatedBudgetRange: "Placeholder",
+        risksAssumptions: "Governed approval required",
+        finalApprovalOwner: "Manager",
+        workflowStatus: "READY_FOR_APP_STUDIO",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-07T00:01:00.000Z"
+      }) as { id: string };
+      markBusinessProjectIntakeBuildMissionHandoff(db, {
+        intakeId: intake.id,
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-07T00:02:00.000Z"
+      });
+      db.prepare("UPDATE build_missions SET status='APPROVED',approval_id='approval-qa-flow',approved_at=?,updated_at=? WHERE id=?")
+        .run("2026-01-07T00:02:30.000Z", "2026-01-07T00:02:30.000Z", "build-mission-qa-flow");
+      createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "build-mission-qa-flow",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "business-user-shrinika",
+        teamLeaderUserId: "business-user-shiva",
+        frontendDeveloperUserId: "business-user-shiva",
+        backendDeveloperUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-07T00:03:00.000Z"
+      });
+      requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        note: "Request QA-ready execution tracking.",
+        now: "2026-01-07T00:04:00.000Z"
+      });
+      approveBuildMissionDevelopmentStart(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shiva",
+        note: "Approve governed development start.",
+        now: "2026-01-07T00:05:00.000Z"
+      });
+      createBuildMissionExecutionStatus(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-07T00:06:00.000Z"
+      });
+      updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shiva",
+        executionStatus: "QA_REVIEW",
+        currentStage: "TESTING_QA",
+        progressPercent: 82,
+        qaStatus: "QA_REVIEW",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-07T00:07:00.000Z"
+      });
+
+      assert.throws(() => createBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        qaOwnerUserId: "missing-user",
+        now: "2026-01-07T00:08:00.000Z"
+      }), /active internal assignable user/);
+
+      db.prepare("INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+        .run("business-user-qa-suspended", "qa-suspended@example.local", "QA Suspended", "INTERNAL", "SUSPENDED", "2026-01-07T00:08:30.000Z", "2026-01-07T00:08:30.000Z");
+      assert.throws(() => createBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        qaOwnerUserId: "business-user-qa-suspended",
+        now: "2026-01-07T00:08:40.000Z"
+      }), /active internal assignable user/);
+      const checklist = createBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        qaOwnerUserId: "business-user-shiva",
+        now: "2026-01-07T00:09:00.000Z"
+      });
+      assert.ok(checklist);
+      assert.equal(checklist?.qaStatus, "DRAFT");
+      assert.equal(checklist?.items.length, 10);
+      assert.ok(checklist?.items.some((item) => item.itemKey === "security_no_secret_exposure"));
+      assert.throws(() => rejectBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        reason: "",
+        now: "2026-01-07T00:09:10.000Z"
+      }), /reason is required/);
+      assert.throws(() => updateBuildMissionQaChecklistStatus(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shiva",
+        qaStatus: "READY_FOR_APPROVAL",
+        now: "2026-01-07T00:09:20.000Z"
+      }), /ready for approval/);
+
+      const queueItems = listBuildMissionQaDashboardItems(db) as Array<{ buildMissionId: string; qaChecklist: { id: string; qaStatus: string; readyForApproval: boolean; itemCount: number } | null }>;
+      assert.ok(queueItems.some((item) => item.buildMissionId === "build-mission-qa-flow" && item.qaChecklist?.itemCount === 10));
+      const dashboardItem = getBuildMissionExecutionDashboardItem(db, "build-mission-qa-flow") as { qaChecklist: { id: string; qaStatus: string } | null } | undefined;
+      assert.equal(dashboardItem?.qaChecklist?.qaStatus, "DRAFT");
+
+      const firstItem = checklist!.items[0]!;
+      assert.throws(() => updateBuildMissionQaChecklistItem(db, {
+        buildMissionId: "build-mission-qa-flow",
+        itemId: firstItem.id,
+        actorUserId: "business-user-shrinika",
+        itemStatus: "FAIL",
+        severity: "HIGH",
+        now: "2026-01-07T00:09:30.000Z"
+      }), /evidenceNote or blockerReason is required/);
+
+      for (const item of checklist!.items) {
+        updateBuildMissionQaChecklistItem(db, {
+          buildMissionId: "build-mission-qa-flow",
+          itemId: item.id,
+          actorUserId: "business-user-shiva",
+          itemStatus: "PASS",
+          severity: item.severity,
+          evidenceNote: `Checked ${item.itemKey}`,
+          now: "2026-01-07T00:09:40.000Z"
+        });
+      }
+
+      const readyChecklist = updateBuildMissionQaChecklistStatus(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        qaStatus: "READY_FOR_APPROVAL",
+        note: "QA items complete",
+        now: "2026-01-07T00:10:00.000Z"
+      });
+      assert.equal(readyChecklist?.qaStatus, "READY_FOR_APPROVAL");
+
+      const approved = approveBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shiva",
+        note: "QA approved without deployment",
+        now: "2026-01-07T00:10:30.000Z"
+      });
+      assert.equal(approved?.qaStatus, "APPROVED");
+
+      const execution = getBuildMissionExecutionDashboardItem(db, "build-mission-qa-flow") as { executionStatus: { qaStatus: string } | null } | undefined;
+      assert.equal(execution?.executionStatus?.qaStatus, "QA_APPROVED");
+
+      const archived = archiveBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-qa-flow",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-07T00:11:00.000Z"
+      });
+      assert.equal(archived?.qaStatus, "ARCHIVED");
+      const archivedChecklist = getBuildMissionQaChecklist(db, "build-mission-qa-flow", { includeArchived: true });
+      assert.equal(archivedChecklist?.archivedAt, "2026-01-07T00:11:00.000Z");
+      assert.equal(archivedChecklist?.items.every((item) => item.archivedAt), true);
+    } finally {
+      db.close();
+    }
+  });
 });

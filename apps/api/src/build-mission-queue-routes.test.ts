@@ -623,4 +623,190 @@ describe("Business Control Centre Build Mission queue API", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
   });
+
+  it("creates and governs QA checklists without starting agents or deploying", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-qa-token");
+    const limitedUserId = "business-user-qa-limited";
+    insertBusinessUser({ id: limitedUserId, email: "qa-limited@example.local" });
+    insertForcedSession({ id: "forced-qa-limited-session", userId: limitedUserId, rawToken: "qa-limited-token" });
+    insertBusinessUser({ id: "business-user-qa-external", email: "qa-external@example.local", userType: "EXTERNAL_CLIENT" });
+    insertForcedSession({ id: "forced-qa-external-session", userId: "business-user-qa-external", rawToken: "qa-external-token" });
+
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-qa"
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    const external = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-qa",
+      headers: { cookie: cookie("qa-external-token") }
+    });
+    assert.equal(external.statusCode, 403);
+
+    const inactiveUserId = "business-user-qa-inactive";
+    insertBusinessUser({ id: inactiveUserId, email: "qa-inactive@example.local", status: "SUSPENDED" });
+    insertForcedSession({ id: "forced-qa-inactive-session", userId: inactiveUserId, rawToken: "qa-inactive-token" });
+    const inactive = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-qa",
+      headers: { cookie: cookie("qa-inactive-token") }
+    });
+    assert.equal(inactive.statusCode, 403);
+
+    const handoff = await createQueueMission(sessionCookie, "Queue QA Mission");
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve for QA testing" }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "business-user-shrinika",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva"
+      }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Ready for QA approval flow." }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve QA-ready development gate." }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: { ownerUserId: "business-user-shiva" }
+    });
+    await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}`,
+      headers: { cookie: sessionCookie },
+      payload: { executionStatus: "QA_REVIEW", currentStage: "TESTING_QA", progressPercent: 85, qaStatus: "QA_REVIEW" }
+    });
+
+    const dashboard = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-qa",
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(dashboard.statusCode, 200);
+    assert.ok((dashboard.json() as { dashboard: Array<{ buildMissionId: string }> }).dashboard.some((item) => item.buildMissionId === handoff.buildMission.id));
+
+    const createBlockedByPermission = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/create`,
+      headers: { cookie: cookie("qa-limited-token") },
+      payload: { qaOwnerUserId: "business-user-shiva" }
+    });
+    assert.equal(createBlockedByPermission.statusCode, 403);
+
+    const create = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: { qaOwnerUserId: "business-user-shiva" }
+    });
+    assert.equal(create.statusCode, 201);
+    const createdItem = (create.json() as { item: { qaStatus: string; items: Array<{ id: string; itemKey: string; itemStatus: string }> } }).item;
+    assert.equal(createdItem.qaStatus, "DRAFT");
+    assert.equal(createdItem.items.length, 10);
+    assert.ok(!create.body.includes("scrypt$"));
+    assert.ok(!create.body.includes("session_token_hash"));
+
+    const itemId = createdItem.items[0]?.id;
+    assert.ok(itemId);
+    const invalidItemUpdate = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/items/${itemId}`,
+      headers: { cookie: sessionCookie },
+      payload: { itemStatus: "FAIL", severity: "HIGH" }
+    });
+    assert.equal(invalidItemUpdate.statusCode, 400);
+
+    const readyTooEarly = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/status`,
+      headers: { cookie: sessionCookie },
+      payload: { qaStatus: "READY_FOR_APPROVAL" }
+    });
+    assert.equal(readyTooEarly.statusCode, 400);
+
+    for (const item of createdItem.items) {
+      const update = await app.inject({
+        method: "PATCH",
+        url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/items/${item.id}`,
+        headers: { cookie: sessionCookie },
+        payload: {
+          itemStatus: "PASS",
+          severity: "HIGH",
+          evidenceNote: `Checked ${item.itemKey}`
+        }
+      });
+      assert.equal(update.statusCode, 200);
+    }
+
+    const limitedApprove = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/approve`,
+      headers: { cookie: cookie("qa-limited-token") },
+      payload: { note: "No approval permission" }
+    });
+    assert.equal(limitedApprove.statusCode, 403);
+
+    const ready = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/status`,
+      headers: { cookie: sessionCookie },
+      payload: { qaStatus: "READY_FOR_APPROVAL", note: "QA items complete" }
+    });
+    assert.equal(ready.statusCode, 200);
+
+    const rejectMissingReason = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/reject`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(rejectMissingReason.statusCode, 400);
+
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "QA approved without deploy" }
+    });
+    assert.equal(approved.statusCode, 200);
+    assert.ok(!approved.body.includes("scrypt$"));
+    assert.ok(!approved.body.includes("session_token_hash"));
+    const approvedBody = approved.json() as { item: { qaStatus: string } };
+    assert.equal(approvedBody.item.qaStatus, "APPROVED");
+    assert.equal((db.prepare("SELECT qa_status AS qaStatus FROM business_build_mission_execution_statuses WHERE build_mission_id=?").get(handoff.buildMission.id) as { qaStatus: string }).qaStatus, "QA_APPROVED");
+
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals").get() as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments").get() as { count: number }).count, 0);
+
+    const archive = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-qa/${handoff.buildMission.id}/archive`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(archive.statusCode, 200);
+    const archivedBody = archive.json() as { item: { qaStatus: string; archivedAt: string | null } };
+    assert.equal(archivedBody.item.qaStatus, "ARCHIVED");
+    assert.ok(archivedBody.item.archivedAt);
+  });
 });
