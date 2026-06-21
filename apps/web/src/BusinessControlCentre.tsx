@@ -1,4 +1,12 @@
 import { type FormEvent, useEffect, useState } from "react";
+import {
+  approveBuildMissionQueueItem,
+  listBuildMissionQueue,
+  requestBuildMissionQueueChanges,
+  saveBuildMissionTeamAssignment,
+  type BuildMissionQueueItem,
+  type BuildMissionTeamAssignmentPayload
+} from "./build-mission-queue";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
@@ -392,6 +400,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "access-boundary", label: "Access Boundary", group: "Company" },
   { id: "project-operations", label: "Project Operations", group: "Operations" },
   { id: "create-project-prd", label: "Create Project / PRD", group: "Operations" },
+  { id: "build-mission-queue", label: "Build Mission Queue", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -583,6 +592,22 @@ const emptyProjectIntakeForm: BusinessProjectIntakePayload = {
   finalApprovalOwner: "Manager",
   workflowStatus: "PROJECT_CREATED"
 };
+
+const emptyBuildMissionAssignmentForm: BuildMissionTeamAssignmentPayload = {
+  assignmentStatus: "DRAFT",
+  managerUserId: "",
+  teamLeaderUserId: "",
+  frontendDeveloperUserId: "",
+  backendDeveloperUserId: "",
+  qaUserId: "",
+  productionReadinessUserId: "",
+  supportOwnerUserId: "",
+  financeOwnerUserId: "",
+  hrOwnerUserId: "",
+  notes: ""
+};
+
+const buildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_REVIEW", "READY_FOR_DEVELOPMENT_APPROVAL", "CHANGES_REQUESTED"] as const;
 
 const roleDelegationCards: RoleDelegationRecord[] = [
   { role: "Admin / Main Admin", primaryAssignee: "Shrinika", backupAssignee: "Shiva", temporaryDelegate: "Company Admin placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "High", notes: "Owner authority remains active for sensitive actions." },
@@ -2254,6 +2279,15 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [projectIntakeHandoffSaving, setProjectIntakeHandoffSaving] = useState(false);
   const [projectIntakeMessage, setProjectIntakeMessage] = useState("");
   const [projectIntakeError, setProjectIntakeError] = useState("");
+  const [buildMissionQueue, setBuildMissionQueue] = useState<BuildMissionQueueItem[]>([]);
+  const [selectedBuildMissionId, setSelectedBuildMissionId] = useState("");
+  const [buildMissionQueueLoading, setBuildMissionQueueLoading] = useState(false);
+  const [buildMissionQueueSaving, setBuildMissionQueueSaving] = useState(false);
+  const [buildMissionQueueMessage, setBuildMissionQueueMessage] = useState("");
+  const [buildMissionQueueError, setBuildMissionQueueError] = useState("");
+  const [buildMissionApprovalNote, setBuildMissionApprovalNote] = useState("");
+  const [buildMissionChangeReason, setBuildMissionChangeReason] = useState("");
+  const [buildMissionAssignmentForm, setBuildMissionAssignmentForm] = useState<BuildMissionTeamAssignmentPayload>(emptyBuildMissionAssignmentForm);
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2277,9 +2311,52 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     };
   }, [activeSection.id]);
 
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-queue") return;
+    let cancelled = false;
+    setBuildMissionQueueLoading(true);
+    setBuildMissionQueueError("");
+    listBuildMissionQueue()
+      .then(queue => {
+        if (cancelled) return;
+        setBuildMissionQueue(queue);
+        setSelectedBuildMissionId(current => current || queue[0]?.buildMissionId || "");
+      })
+      .catch(error => {
+        if (!cancelled) setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to load Build Mission queue");
+      })
+      .finally(() => {
+        if (!cancelled) setBuildMissionQueueLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
   const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
+  const selectedBuildMission = buildMissionQueue.find(item => item.buildMissionId === selectedBuildMissionId) ?? buildMissionQueue[0] ?? null;
+
+  useEffect(() => {
+    if (!selectedBuildMission) {
+      setBuildMissionAssignmentForm(emptyBuildMissionAssignmentForm);
+      return;
+    }
+    setBuildMissionAssignmentForm({
+      assignmentStatus: selectedBuildMission.assignment?.assignmentStatus ?? "DRAFT",
+      managerUserId: selectedBuildMission.assignment?.managerUserId ?? "",
+      teamLeaderUserId: selectedBuildMission.assignment?.teamLeaderUserId ?? "",
+      frontendDeveloperUserId: selectedBuildMission.assignment?.frontendDeveloperUserId ?? "",
+      backendDeveloperUserId: selectedBuildMission.assignment?.backendDeveloperUserId ?? "",
+      qaUserId: selectedBuildMission.assignment?.qaUserId ?? "",
+      productionReadinessUserId: selectedBuildMission.assignment?.productionReadinessUserId ?? "",
+      supportOwnerUserId: selectedBuildMission.assignment?.supportOwnerUserId ?? "",
+      financeOwnerUserId: selectedBuildMission.assignment?.financeOwnerUserId ?? "",
+      hrOwnerUserId: selectedBuildMission.assignment?.hrOwnerUserId ?? "",
+      notes: selectedBuildMission.assignment?.notes ?? ""
+    });
+  }, [selectedBuildMission?.buildMissionId, selectedBuildMission?.assignment?.updatedAt]);
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
   };
@@ -2314,6 +2391,65 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setProjectIntakeError(error instanceof Error ? error.message : "Unable to create App Studio Build Mission draft");
     } finally {
       setProjectIntakeHandoffSaving(false);
+    }
+  };
+  const updateBuildMissionAssignmentField = (field: keyof BuildMissionTeamAssignmentPayload, value: string) => {
+    setBuildMissionAssignmentForm(current => ({ ...current, [field]: value }));
+  };
+  const refreshBuildMissionQueue = async (selectedId?: string) => {
+    const queue = await listBuildMissionQueue();
+    setBuildMissionQueue(queue);
+    setSelectedBuildMissionId(selectedId || queue.find(item => item.buildMissionId === selectedBuildMission?.buildMissionId)?.buildMissionId || queue[0]?.buildMissionId || "");
+  };
+  const handleApproveBuildMission = async () => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await approveBuildMissionQueueItem(selectedBuildMission.buildMissionId, buildMissionApprovalNote);
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setBuildMissionApprovalNote("");
+      setBuildMissionQueueMessage("Build Mission approved. Development still requires App Studio governed approval before execution.");
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to approve Build Mission");
+    } finally {
+      setBuildMissionQueueSaving(false);
+    }
+  };
+  const handleRequestBuildMissionChanges = async () => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await requestBuildMissionQueueChanges(selectedBuildMission.buildMissionId, buildMissionChangeReason);
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setBuildMissionChangeReason("");
+      setBuildMissionQueueMessage("Changes requested. Linked PRD intake moved back for review.");
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to request changes");
+    } finally {
+      setBuildMissionQueueSaving(false);
+    }
+  };
+  const handleSaveBuildMissionAssignment = async (assignmentStatus: "DRAFT" | "ASSIGNED") => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await saveBuildMissionTeamAssignment(selectedBuildMission.buildMissionId, { ...buildMissionAssignmentForm, assignmentStatus });
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setBuildMissionQueueMessage(assignmentStatus === "ASSIGNED" ? "Team assignment finalized. Implementation still starts only through App Studio governance." : "Team assignment draft saved.");
+      await refreshBuildMissionQueue(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to save team assignment");
+    } finally {
+      setBuildMissionQueueSaving(false);
     }
   };
 
@@ -2800,6 +2936,97 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                 ))}
               </div>
             </div>
+          </section>
+          ) : null}
+
+          {activeSection.id === "build-mission-queue" ? (
+          <section className="business-section build-mission-queue-section" id="build-mission-queue">
+            <div className="business-section-heading">
+              <span>Internal App Studio review queue. Approval and assignment do not start agents, generate code, or deploy.</span>
+              <h2>Build Mission Approval + Team Assignment Queue</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>Governed queue boundary</strong>
+              <p>Approval does not start agents. Assignment does not start implementation. Development starts only through App Studio governed approval, validation, and human authority.</p>
+            </div>
+            {buildMissionQueueMessage ? <p className="success">{buildMissionQueueMessage}</p> : null}
+            {buildMissionQueueError ? <p className="error">{buildMissionQueueError}</p> : null}
+            {buildMissionQueueLoading ? <p>Loading Build Mission queue...</p> : null}
+            {!buildMissionQueueLoading && !buildMissionQueue.length ? <p>No Build Mission drafts from Project Intake handoff are waiting in the queue.</p> : null}
+            {buildMissionQueue.length ? (
+              <div className="build-mission-queue-layout">
+                <div className="build-mission-queue-list">
+                  {buildMissionQueue.map(item => (
+                    <button type="button" className={item.buildMissionId === selectedBuildMission?.buildMissionId ? "active" : ""} key={item.buildMissionId} onClick={() => setSelectedBuildMissionId(item.buildMissionId)}>
+                      <strong>{item.intake.projectName}</strong>
+                      <span>{item.targetModule} / {item.riskLevel}</span>
+                      <small>{item.status} / {item.assignment?.assignmentStatus ?? "UNASSIGNED"}</small>
+                    </button>
+                  ))}
+                </div>
+                {selectedBuildMission ? (
+                  <article className="build-mission-queue-detail">
+                    <div className="build-mission-detail-header">
+                      <div>
+                        <span>Mission ID</span>
+                        <h3>{selectedBuildMission.buildMissionId}</h3>
+                      </div>
+                      <strong className={`assignment-risk ${selectedBuildMission.riskLevel}`}>{selectedBuildMission.riskLevel} risk</strong>
+                    </div>
+                    <div className="recent-intake-meta">
+                      <div><span>Linked intake</span><strong>{selectedBuildMission.intake.projectName}</strong></div>
+                      <div><span>Target module</span><strong>{selectedBuildMission.targetModule}</strong></div>
+                      <div><span>Approval state</span><strong>{selectedBuildMission.approvalState}</strong></div>
+                      <div><span>Assignment</span><strong>{selectedBuildMission.assignment?.assignmentStatus ?? "Not assigned"}</strong></div>
+                      <div><span>PRD status</span><strong>{selectedBuildMission.intake.prdStatus}</strong></div>
+                      <div><span>Workflow</span><strong>{selectedBuildMission.intake.workflowStatus}</strong></div>
+                    </div>
+                    <div className="mission-scope-preview">
+                      <span>Mission scope preview</span>
+                      <p>{selectedBuildMission.scopeSummary}</p>
+                    </div>
+                    <div className="queue-action-grid">
+                      <section className="queue-action-card">
+                        <h3>Approval Review</h3>
+                        <label>Approval note<textarea value={buildMissionApprovalNote} onChange={event => setBuildMissionApprovalNote(event.target.value)} placeholder="Manager/Admin approval note required." /></label>
+                        <button type="button" onClick={() => void handleApproveBuildMission()} disabled={buildMissionQueueSaving || !buildMissionApprovalNote.trim() || !["DRAFT", "AWAITING_APPROVAL"].includes(selectedBuildMission.status)}>Approve Build Mission Draft</button>
+                        <small>Approval keeps the mission governed. It does not convert, execute, or start agents.</small>
+                      </section>
+                      <section className="queue-action-card">
+                        <h3>Request Changes</h3>
+                        <label>Change reason<textarea value={buildMissionChangeReason} onChange={event => setBuildMissionChangeReason(event.target.value)} placeholder="Explain what PRD/scope changes are needed." /></label>
+                        <button type="button" onClick={() => void handleRequestBuildMissionChanges()} disabled={buildMissionQueueSaving || !buildMissionChangeReason.trim()}>Request Changes</button>
+                        <small>Linked intake returns to PRD review. The Build Mission draft remains for audit history.</small>
+                      </section>
+                    </div>
+                    <section className="queue-assignment-card">
+                      <div className="business-section-heading">
+                        <span>Team assignment form</span>
+                        <h2>Internal Work Chain</h2>
+                      </div>
+                      <div className="queue-assignment-grid">
+                        <label>Assignment status<select value={buildMissionAssignmentForm.assignmentStatus ?? "DRAFT"} onChange={event => updateBuildMissionAssignmentField("assignmentStatus", event.target.value)}>{buildMissionAssignmentStatuses.map(status => <option key={status}>{status}</option>)}</select></label>
+                        <label>Manager<input value={buildMissionAssignmentForm.managerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("managerUserId", event.target.value)} placeholder="Manager user/name" /></label>
+                        <label>Team Leader<input value={buildMissionAssignmentForm.teamLeaderUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("teamLeaderUserId", event.target.value)} placeholder="Optional if short-staffed" /></label>
+                        <label>Frontend Developer<input value={buildMissionAssignmentForm.frontendDeveloperUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("frontendDeveloperUserId", event.target.value)} placeholder="Developer 1" /></label>
+                        <label>Backend Developer<input value={buildMissionAssignmentForm.backendDeveloperUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("backendDeveloperUserId", event.target.value)} placeholder="Developer 2" /></label>
+                        <label>QA / Testing<input value={buildMissionAssignmentForm.qaUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("qaUserId", event.target.value)} placeholder="Developer 3" /></label>
+                        <label>Production Readiness<input value={buildMissionAssignmentForm.productionReadinessUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("productionReadinessUserId", event.target.value)} placeholder="Developer 4" /></label>
+                        <label>Support Owner<input value={buildMissionAssignmentForm.supportOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("supportOwnerUserId", event.target.value)} placeholder="Support owner" /></label>
+                        <label>Finance Owner<input value={buildMissionAssignmentForm.financeOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("financeOwnerUserId", event.target.value)} placeholder="Finance owner" /></label>
+                        <label>HR Owner<input value={buildMissionAssignmentForm.hrOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("hrOwnerUserId", event.target.value)} placeholder="HR owner" /></label>
+                        <label className="wide">Notes / short-staffing coverage<textarea value={buildMissionAssignmentForm.notes ?? ""} onChange={event => updateBuildMissionAssignmentField("notes", event.target.value)} placeholder="Document temporary role coverage, backup responsibility, and approval assumptions." /></label>
+                      </div>
+                      <div className="project-prd-actions">
+                        <button type="button" onClick={() => void handleSaveBuildMissionAssignment("DRAFT")} disabled={buildMissionQueueSaving}>Save Assignment Draft</button>
+                        <button type="button" onClick={() => void handleSaveBuildMissionAssignment("ASSIGNED")} disabled={buildMissionQueueSaving || !String(buildMissionAssignmentForm.managerUserId ?? "").trim()}>Finalize Assignment</button>
+                      </div>
+                      <p>Assignment records responsibility only. It does not create code proposals, start development agents, or approve deployment.</p>
+                    </section>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
           </section>
           ) : null}
 

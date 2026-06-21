@@ -827,4 +827,178 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates, updates, lists, and archives Build Mission team assignments", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        createOrUpdateBuildMissionTeamAssignment,
+        getBuildMissionTeamAssignment,
+        listBuildMissionQueueItems,
+        getBuildMissionQueueItem,
+        archiveBuildMissionTeamAssignment,
+        recordBuildMissionQueueEvent
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .run("queue-project", "S4 Agent Studio", "/tmp/queue-project", "ACTIVE", "created", "created");
+      db.prepare(`INSERT INTO build_missions
+        (id,project_id,task_id,readiness_run_id,target_module,scope,dependencies_json,risk_level,required_specialists_json,
+          scaffold_needs_json,git_mode,acceptance_criteria_json,rollback_plan,status,approval_id,plan_json,created_at,updated_at,approved_at,converted_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "mission-queue-1",
+        "queue-project",
+        null,
+        null,
+        "Client Portal",
+        "Plan a governed client portal build mission.",
+        "[]",
+        "high",
+        "[]",
+        "{}",
+        "WORKTREE",
+        "[]",
+        "Rollback via App Studio governance.",
+        "DRAFT",
+        null,
+        "{}",
+        "created",
+        "created",
+        null,
+        null
+      );
+      const intake = createBusinessProjectIntake(db, {
+        projectName: "Client Portal Queue",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "SaaS",
+        priority: "High",
+        projectSource: "Admin instruction",
+        prdStatus: "Approved",
+        shortSummary: "Queue intake summary.",
+        problemStatement: "Mission needs assignment.",
+        coreModulesRequired: "Portal, support",
+        keyFeatures: "Login, dashboard",
+        finalApprovalOwner: "Manager",
+        workflowStatus: "READY_FOR_APP_STUDIO",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-03T00:00:00.000Z"
+      }) as { id: string };
+      markBusinessProjectIntakeBuildMissionHandoff(db, {
+        intakeId: intake.id,
+        buildMissionId: "mission-queue-1",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-03T00:01:00.000Z"
+      });
+
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='business_build_mission_team_assignments'").get());
+      const draft = createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-queue-1",
+        assignmentStatus: "DRAFT",
+        teamLeaderUserId: "Team Leader Placeholder",
+        qaUserId: "Developer 3",
+        productionReadinessUserId: "Developer 3",
+        notes: "Short-staffing draft",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-03T00:02:00.000Z"
+      }) as { id: string; assignmentStatus: string; notes: string | null };
+      assert.equal(draft.assignmentStatus, "DRAFT");
+      assert.ok(draft.notes?.includes("Short-staffing draft"));
+      assert.ok(draft.notes?.includes("Warning: QA and production readiness"));
+
+      assert.throws(() => createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-queue-1",
+        assignmentStatus: "ASSIGNED",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-03T00:03:00.000Z"
+      }), /managerUserId is required/);
+      assert.throws(() => createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-queue-1",
+        assignmentStatus: "INVALID" as any,
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-03T00:03:00.000Z"
+      }), /assignmentStatus is invalid/);
+
+      const assigned = createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-queue-1",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "Manager Placeholder",
+        teamLeaderUserId: "Team Leader Placeholder",
+        frontendDeveloperUserId: "Developer 1",
+        backendDeveloperUserId: "Developer 2",
+        qaUserId: "Developer 3",
+        productionReadinessUserId: "Developer 4",
+        actorUserId: "business-user-shiva",
+        now: "2026-01-03T00:04:00.000Z"
+      }) as { id: string; assignmentStatus: string; managerUserId: string; updatedByUserId: string };
+      assert.equal(assigned.id, draft.id);
+      assert.equal(assigned.assignmentStatus, "ASSIGNED");
+      assert.equal(assigned.managerUserId, "Manager Placeholder");
+      assert.equal(assigned.updatedByUserId, "business-user-shiva");
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_build_mission_team_assignments WHERE build_mission_id='mission-queue-1'").get() as { count: number }).count, 1);
+
+      const queue = listBuildMissionQueueItems(db) as Array<{ buildMissionId: string; intake: { id: string }; assignment: { assignmentStatus: string } | null }>;
+      assert.equal(queue.length, 1);
+      assert.equal(queue[0].buildMissionId, "mission-queue-1");
+      assert.equal(queue[0].intake.id, intake.id);
+      assert.equal(queue[0].assignment?.assignmentStatus, "ASSIGNED");
+      assert.equal((getBuildMissionQueueItem(db, "mission-queue-1") as { buildMissionId: string }).buildMissionId, "mission-queue-1");
+
+      recordBuildMissionQueueEvent(db, {
+        buildMissionId: "mission-queue-1",
+        eventType: "BUILD_MISSION_APPROVED_FROM_BUSINESS_QUEUE",
+        actorUserId: "business-user-shrinika",
+        summary: "Mission approved from queue",
+        payload: { password: "do-not-store", note: "safe note" },
+        now: "2026-01-03T00:05:00.000Z"
+      });
+      const event = db.prepare("SELECT payload_json AS payloadJson FROM build_mission_events WHERE event_type='BUILD_MISSION_APPROVED_FROM_BUSINESS_QUEUE'").get() as { payloadJson: string };
+      assert.ok(event.payloadJson.includes("safe note"));
+      assert.ok(!event.payloadJson.includes("do-not-store"));
+
+      const archived = archiveBuildMissionTeamAssignment(db, "mission-queue-1", "business-user-shrinika", "2026-01-03T00:06:00.000Z") as { archivedAt: string | null; assignmentStatus: string };
+      assert.equal(archived.assignmentStatus, "ARCHIVED");
+      assert.equal(archived.archivedAt, "2026-01-03T00:06:00.000Z");
+      assert.equal(getBuildMissionTeamAssignment(db, "mission-queue-1"), undefined);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_build_mission_team_assignments WHERE build_mission_id='mission-queue-1'").get() as { count: number }).count, 1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("creates Build Mission assignment table without disturbing existing mission rows", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn } = await loadInitializer();
+      db.exec("CREATE TABLE projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,root_path TEXT NOT NULL UNIQUE,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)");
+      db.exec(`CREATE TABLE build_missions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        target_module TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        dependencies_json TEXT NOT NULL DEFAULT '[]',
+        risk_level TEXT NOT NULL,
+        required_specialists_json TEXT NOT NULL DEFAULT '[]',
+        scaffold_needs_json TEXT NOT NULL DEFAULT '{}',
+        git_mode TEXT NOT NULL,
+        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        rollback_plan TEXT NOT NULL,
+        status TEXT NOT NULL,
+        plan_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)").run("legacy-queue-project", "Legacy", "/tmp/legacy-queue", "ACTIVE", "created", "created");
+      db.prepare(`INSERT INTO build_missions
+        (id,project_id,target_module,scope,risk_level,git_mode,rollback_plan,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run("legacy-mission", "legacy-queue-project", "CRM", "Legacy scope", "medium", "WORKTREE", "Rollback", "DRAFT", "created", "created");
+      initializeDatabaseOn(db);
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='business_build_mission_team_assignments'").get());
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM build_missions WHERE id='legacy-mission'").get() as { count: number }).count, 1);
+    } finally {
+      db.close();
+    }
+  });
 });

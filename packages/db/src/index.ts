@@ -113,6 +113,7 @@ export const businessProjectWorkflowStatuses = [
   "MANAGER_APPROVAL_PENDING",
   "DEPLOYMENT_APPROVAL_PENDING"
 ] as const;
+export const businessBuildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_REVIEW", "READY_FOR_DEVELOPMENT_APPROVAL", "CHANGES_REQUESTED", "ARCHIVED"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -120,6 +121,7 @@ type BusinessProjectSource = (typeof businessProjectSources)[number];
 type BusinessProjectPrdStatus = (typeof businessProjectPrdStatuses)[number];
 type BusinessProjectFinalApprovalOwner = (typeof businessProjectFinalApprovalOwners)[number];
 type BusinessProjectWorkflowStatus = (typeof businessProjectWorkflowStatuses)[number];
+type BusinessBuildMissionAssignmentStatus = (typeof businessBuildMissionAssignmentStatuses)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -166,6 +168,33 @@ export type BusinessProjectIntakeBuildMissionHandoffInput = {
   intakeId: string;
   buildMissionId: string;
   actorUserId: string;
+  now?: string;
+};
+
+export type BusinessBuildMissionTeamAssignmentInput = {
+  buildMissionId: string;
+  projectIntakeId?: string | null;
+  managerUserId?: string | null;
+  teamLeaderUserId?: string | null;
+  frontendDeveloperUserId?: string | null;
+  backendDeveloperUserId?: string | null;
+  qaUserId?: string | null;
+  productionReadinessUserId?: string | null;
+  supportOwnerUserId?: string | null;
+  financeOwnerUserId?: string | null;
+  hrOwnerUserId?: string | null;
+  assignmentStatus: BusinessBuildMissionAssignmentStatus;
+  notes?: string | null;
+  actorUserId: string;
+  now?: string;
+};
+
+export type BuildMissionQueueEventInput = {
+  buildMissionId: string;
+  eventType: string;
+  summary: string;
+  actorUserId: string;
+  payload?: Record<string, unknown> | null;
   now?: string;
 };
 
@@ -737,6 +766,31 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(project_intake_id) REFERENCES business_project_intakes(id) ON DELETE CASCADE,
       FOREIGN KEY(actor_user_id) REFERENCES business_users(id)
     );
+    CREATE TABLE IF NOT EXISTS business_build_mission_team_assignments (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      project_intake_id TEXT,
+      manager_user_id TEXT,
+      team_leader_user_id TEXT,
+      frontend_developer_user_id TEXT,
+      backend_developer_user_id TEXT,
+      qa_user_id TEXT,
+      production_readiness_user_id TEXT,
+      support_owner_user_id TEXT,
+      finance_owner_user_id TEXT,
+      hr_owner_user_id TEXT,
+      assignment_status TEXT NOT NULL CHECK(assignment_status IN ('DRAFT','ASSIGNED','IN_REVIEW','READY_FOR_DEVELOPMENT_APPROVAL','CHANGES_REQUESTED','ARCHIVED')),
+      notes TEXT,
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_intake_id) REFERENCES business_project_intakes(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1136,6 +1190,10 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_project_intakes_workflow_status ON business_project_intakes(workflow_status);
     CREATE INDEX IF NOT EXISTS idx_business_project_intakes_created ON business_project_intakes(created_at);
     CREATE INDEX IF NOT EXISTS idx_business_project_prd_events_project_created ON business_project_prd_events(project_intake_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_mission ON business_build_mission_team_assignments(build_mission_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_intake ON business_build_mission_team_assignments(project_intake_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_status ON business_build_mission_team_assignments(assignment_status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_active_unique ON business_build_mission_team_assignments(build_mission_id) WHERE archived_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -2223,6 +2281,127 @@ export function markBusinessProjectIntakeBuildMissionHandoff(database: Database.
   return getBusinessProjectIntakeById(database, input.intakeId);
 }
 
+export function listBuildMissionQueueItems(database: Database.Database) {
+  return database.prepare(buildMissionQueueSelectSql("ORDER BY bm.created_at DESC")).all().map(mapBuildMissionQueueRow);
+}
+
+export function getBuildMissionQueueItem(database: Database.Database, buildMissionId: string) {
+  const row = database.prepare(buildMissionQueueSelectSql("WHERE bm.id=? LIMIT 1")).get(buildMissionId);
+  return row ? mapBuildMissionQueueRow(row) : undefined;
+}
+
+export function getBuildMissionTeamAssignment(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  const row = database.prepare(`SELECT id,build_mission_id AS buildMissionId,project_intake_id AS projectIntakeId,
+      manager_user_id AS managerUserId,team_leader_user_id AS teamLeaderUserId,frontend_developer_user_id AS frontendDeveloperUserId,
+      backend_developer_user_id AS backendDeveloperUserId,qa_user_id AS qaUserId,production_readiness_user_id AS productionReadinessUserId,
+      support_owner_user_id AS supportOwnerUserId,finance_owner_user_id AS financeOwnerUserId,hr_owner_user_id AS hrOwnerUserId,
+      assignment_status AS assignmentStatus,notes,created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,
+      created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_build_mission_team_assignments WHERE build_mission_id=?${options.includeArchived ? "" : " AND archived_at IS NULL"} ORDER BY created_at DESC LIMIT 1`).get(buildMissionId);
+  return row ?? undefined;
+}
+
+export function createOrUpdateBuildMissionTeamAssignment(database: Database.Database, input: BusinessBuildMissionTeamAssignmentInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const mission = getBuildMissionRow(database, input.buildMissionId);
+  if (!mission) throw new Error("Build mission not found");
+  const status = validateEnum("assignmentStatus", input.assignmentStatus, businessBuildMissionAssignmentStatuses);
+  const managerUserId = normalizeOptionalText(input.managerUserId);
+  if (status === "ASSIGNED" && !managerUserId) throw new Error("managerUserId is required to finalize assignment");
+  const linkedIntake = input.projectIntakeId ? getBusinessProjectIntakeById(database, input.projectIntakeId) : getBusinessProjectIntakeByBuildMissionId(database, input.buildMissionId);
+  if (input.projectIntakeId && !linkedIntake) throw new Error("Linked project intake not found");
+  const normalized = {
+    projectIntakeId: linkedIntake?.id ?? null,
+    managerUserId,
+    teamLeaderUserId: normalizeOptionalText(input.teamLeaderUserId),
+    frontendDeveloperUserId: normalizeOptionalText(input.frontendDeveloperUserId),
+    backendDeveloperUserId: normalizeOptionalText(input.backendDeveloperUserId),
+    qaUserId: normalizeOptionalText(input.qaUserId),
+    productionReadinessUserId: normalizeOptionalText(input.productionReadinessUserId),
+    supportOwnerUserId: normalizeOptionalText(input.supportOwnerUserId),
+    financeOwnerUserId: normalizeOptionalText(input.financeOwnerUserId),
+    hrOwnerUserId: normalizeOptionalText(input.hrOwnerUserId),
+    assignmentStatus: status,
+    notes: assignmentNotesWithWarnings(input.notes, input.qaUserId, input.productionReadinessUserId)
+  };
+  const existing = getBuildMissionTeamAssignment(database, input.buildMissionId) as { id: string } | undefined;
+  if (existing) {
+    database.prepare(`UPDATE business_build_mission_team_assignments SET
+      project_intake_id=?,manager_user_id=?,team_leader_user_id=?,frontend_developer_user_id=?,backend_developer_user_id=?,
+      qa_user_id=?,production_readiness_user_id=?,support_owner_user_id=?,finance_owner_user_id=?,hr_owner_user_id=?,
+      assignment_status=?,notes=?,updated_by_user_id=?,updated_at=?
+      WHERE id=? AND archived_at IS NULL`).run(
+      normalized.projectIntakeId,
+      normalized.managerUserId,
+      normalized.teamLeaderUserId,
+      normalized.frontendDeveloperUserId,
+      normalized.backendDeveloperUserId,
+      normalized.qaUserId,
+      normalized.productionReadinessUserId,
+      normalized.supportOwnerUserId,
+      normalized.financeOwnerUserId,
+      normalized.hrOwnerUserId,
+      normalized.assignmentStatus,
+      normalized.notes,
+      input.actorUserId,
+      timestamp,
+      existing.id
+    );
+    return getBuildMissionTeamAssignment(database, input.buildMissionId);
+  }
+  const id = `business-build-mission-assignment-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_build_mission_team_assignments
+    (id,build_mission_id,project_intake_id,manager_user_id,team_leader_user_id,frontend_developer_user_id,backend_developer_user_id,
+      qa_user_id,production_readiness_user_id,support_owner_user_id,finance_owner_user_id,hr_owner_user_id,assignment_status,notes,
+      created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    input.buildMissionId,
+    normalized.projectIntakeId,
+    normalized.managerUserId,
+    normalized.teamLeaderUserId,
+    normalized.frontendDeveloperUserId,
+    normalized.backendDeveloperUserId,
+    normalized.qaUserId,
+    normalized.productionReadinessUserId,
+    normalized.supportOwnerUserId,
+    normalized.financeOwnerUserId,
+    normalized.hrOwnerUserId,
+    normalized.assignmentStatus,
+    normalized.notes,
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return getBuildMissionTeamAssignment(database, input.buildMissionId);
+}
+
+export function archiveBuildMissionTeamAssignment(database: Database.Database, buildMissionId: string, actorUserId: string, now = new Date().toISOString()) {
+  assertActiveBusinessUser(database, actorUserId);
+  const existing = getBuildMissionTeamAssignment(database, buildMissionId) as { id: string } | undefined;
+  if (!existing) throw new Error("Build mission team assignment not found");
+  database.prepare(`UPDATE business_build_mission_team_assignments
+    SET assignment_status='ARCHIVED',archived_at=?,updated_by_user_id=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(now, actorUserId, now, existing.id);
+  return getBuildMissionTeamAssignment(database, buildMissionId, { includeArchived: true });
+}
+
+export function recordBuildMissionQueueEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const mission = getBuildMissionRow(database, input.buildMissionId);
+  if (!mission) throw new Error("Build mission not found");
+  const eventType = normalizeRequiredText("eventType", input.eventType);
+  const summary = sanitizeEventText(input.summary);
+  const payload = input.payload ? sanitizeDeniedAccessMetadata(input.payload) : {};
+  const id = `build-mission-queue-event-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare("INSERT INTO build_mission_events (id,project_id,build_mission_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(id, mission.projectId, input.buildMissionId, eventType, summary, JSON.stringify({ ...payload, actorUserId: input.actorUserId }), timestamp);
+  return database.prepare("SELECT id,event_type AS eventType,summary,payload_json AS payloadJson,created_at AS createdAt FROM build_mission_events WHERE id=?").get(id);
+}
+
 export function recordBusinessProjectPrdEvent(database: Database.Database, input: BusinessProjectPrdEventInput) {
   const timestamp = input.now ?? new Date().toISOString();
   assertActiveBusinessUser(database, input.actorUserId);
@@ -2305,6 +2484,97 @@ function businessProjectIntakeSelectSql() {
 
 function mapBusinessProjectIntakeRow(row: unknown) {
   return row as BusinessProjectIntakeRow;
+}
+
+function buildMissionQueueSelectSql(suffix: string) {
+  return `SELECT
+      bm.id AS buildMissionId,bm.project_id AS projectId,bm.task_id AS taskId,bm.target_module AS targetModule,bm.scope,
+      bm.risk_level AS riskLevel,bm.status AS missionStatus,bm.approval_id AS approvalId,bm.created_at AS missionCreatedAt,
+      bm.updated_at AS missionUpdatedAt,bm.approved_at AS approvedAt,bm.converted_at AS convertedAt,
+      bpi.id AS intakeId,bpi.project_name AS intakeProjectName,bpi.client_or_company_name AS intakeClientOrCompanyName,
+      bpi.prd_status AS intakePrdStatus,bpi.workflow_status AS intakeWorkflowStatus,bpi.short_summary AS intakeShortSummary,
+      bpi.priority AS intakePriority,bpi.app_studio_build_mission_id AS intakeBuildMissionId,bpi.handed_off_at AS handedOffAt,
+      bpi.handed_off_by_user_id AS handedOffByUserId,
+      assignment.id AS assignmentId,assignment.assignment_status AS assignmentStatus,assignment.manager_user_id AS managerUserId,
+      assignment.team_leader_user_id AS teamLeaderUserId,assignment.frontend_developer_user_id AS frontendDeveloperUserId,
+      assignment.backend_developer_user_id AS backendDeveloperUserId,assignment.qa_user_id AS qaUserId,
+      assignment.production_readiness_user_id AS productionReadinessUserId,assignment.support_owner_user_id AS supportOwnerUserId,
+      assignment.finance_owner_user_id AS financeOwnerUserId,assignment.hr_owner_user_id AS hrOwnerUserId,
+      assignment.notes AS assignmentNotes,assignment.updated_at AS assignmentUpdatedAt
+    FROM build_missions bm
+    JOIN business_project_intakes bpi ON bpi.app_studio_build_mission_id=bm.id AND bpi.archived_at IS NULL
+    LEFT JOIN business_build_mission_team_assignments assignment ON assignment.build_mission_id=bm.id AND assignment.archived_at IS NULL
+    ${suffix}`;
+}
+
+function mapBuildMissionQueueRow(row: unknown) {
+  const value = row as Record<string, unknown>;
+  return {
+    id: value.buildMissionId,
+    buildMissionId: value.buildMissionId,
+    projectId: value.projectId,
+    taskId: value.taskId,
+    targetModule: value.targetModule,
+    scope: value.scope,
+    scopeSummary: typeof value.scope === "string" && value.scope.length > 220 ? `${value.scope.slice(0, 220)}...` : value.scope,
+    riskLevel: value.riskLevel,
+    status: value.missionStatus,
+    approvalId: value.approvalId,
+    approvalState: value.approvalId ? value.missionStatus : "DRAFT_REVIEW_REQUIRED",
+    createdAt: value.missionCreatedAt,
+    updatedAt: value.missionUpdatedAt,
+    approvedAt: value.approvedAt,
+    convertedAt: value.convertedAt,
+    intake: {
+      id: value.intakeId,
+      projectName: value.intakeProjectName,
+      clientOrCompanyName: value.intakeClientOrCompanyName,
+      prdStatus: value.intakePrdStatus,
+      workflowStatus: value.intakeWorkflowStatus,
+      shortSummary: value.intakeShortSummary,
+      priority: value.intakePriority,
+      appStudioBuildMissionId: value.intakeBuildMissionId,
+      handedOffAt: value.handedOffAt,
+      handedOffByUserId: value.handedOffByUserId
+    },
+    assignment: value.assignmentId ? {
+      id: value.assignmentId,
+      assignmentStatus: value.assignmentStatus,
+      managerUserId: value.managerUserId,
+      teamLeaderUserId: value.teamLeaderUserId,
+      frontendDeveloperUserId: value.frontendDeveloperUserId,
+      backendDeveloperUserId: value.backendDeveloperUserId,
+      qaUserId: value.qaUserId,
+      productionReadinessUserId: value.productionReadinessUserId,
+      supportOwnerUserId: value.supportOwnerUserId,
+      financeOwnerUserId: value.financeOwnerUserId,
+      hrOwnerUserId: value.hrOwnerUserId,
+      notes: value.assignmentNotes,
+      updatedAt: value.assignmentUpdatedAt
+    } : null
+  };
+}
+
+function getBusinessProjectIntakeByBuildMissionId(database: Database.Database, buildMissionId: string) {
+  const row = database.prepare(`${businessProjectIntakeSelectSql()} WHERE app_studio_build_mission_id=? AND archived_at IS NULL LIMIT 1`).get(buildMissionId) as BusinessProjectIntakeRow | undefined;
+  return row ? mapBusinessProjectIntakeRow(row) : undefined;
+}
+
+function getBuildMissionRow(database: Database.Database, buildMissionId: string) {
+  return database.prepare("SELECT id,project_id AS projectId,task_id AS taskId,target_module AS targetModule,status,approval_id AS approvalId FROM build_missions WHERE id=?").get(buildMissionId) as { id: string; projectId: string; taskId: string | null; targetModule: string; status: string; approvalId: string | null } | undefined;
+}
+
+function assignmentNotesWithWarnings(notes: unknown, qaUserId: unknown, productionReadinessUserId: unknown) {
+  const cleanNotes = normalizeOptionalText(notes);
+  const qa = normalizeOptionalText(qaUserId);
+  const production = normalizeOptionalText(productionReadinessUserId);
+  const warning = qa && production && qa === production ? "Warning: QA and production readiness are assigned to the same person; manager approval should confirm short-staffing coverage." : "";
+  return [cleanNotes, warning].filter(Boolean).join("\n") || null;
+}
+
+function sanitizeEventText(value: unknown) {
+  const text = normalizeRequiredText("summary", value);
+  return looksSensitive(text) ? "[redacted]" : text;
 }
 
 function getBusinessProjectPrdEventById(database: Database.Database, id: string) {
