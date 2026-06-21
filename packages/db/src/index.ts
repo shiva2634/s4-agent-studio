@@ -96,6 +96,72 @@ type BusinessPasswordResetTokenPlaceholderInput = {
   now?: string;
 };
 
+export const businessProjectTypes = ["Website", "SaaS", "Mobile App", "Automation", "CRM", "Media System", "Trading System", "Internal Tool", "Other"] as const;
+export const businessProjectPriorities = ["Low", "Medium", "High", "Urgent"] as const;
+export const businessProjectSources = ["Client request", "Internal product idea", "Admin instruction", "Existing business workflow", "Product Discovery Agent"] as const;
+export const businessProjectPrdStatuses = ["Not started", "Drafting", "Under review", "Approved", "Changes requested"] as const;
+export const businessProjectFinalApprovalOwners = ["Admin", "Manager", "Shiva", "Shrinika"] as const;
+export const businessProjectWorkflowStatuses = [
+  "PROJECT_CREATED",
+  "PRD_DRAFTING",
+  "PRD_REVIEW",
+  "SCOPE_APPROVAL_PENDING",
+  "READY_FOR_APP_STUDIO",
+  "TEAM_ASSIGNMENT_PENDING",
+  "DEVELOPMENT_PENDING",
+  "QA_PENDING",
+  "MANAGER_APPROVAL_PENDING",
+  "DEPLOYMENT_APPROVAL_PENDING"
+] as const;
+
+type BusinessProjectType = (typeof businessProjectTypes)[number];
+type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
+type BusinessProjectSource = (typeof businessProjectSources)[number];
+type BusinessProjectPrdStatus = (typeof businessProjectPrdStatuses)[number];
+type BusinessProjectFinalApprovalOwner = (typeof businessProjectFinalApprovalOwners)[number];
+type BusinessProjectWorkflowStatus = (typeof businessProjectWorkflowStatuses)[number];
+
+export type BusinessProjectIntakeInput = {
+  projectName: string;
+  clientOrCompanyName: string;
+  projectType: BusinessProjectType;
+  priority: BusinessProjectPriority;
+  projectSource: BusinessProjectSource;
+  prdStatus: BusinessProjectPrdStatus;
+  shortSummary: string;
+  problemStatement: string;
+  targetUsers?: string | null;
+  coreModulesRequired?: string | null;
+  keyFeatures?: string | null;
+  integrationsNeeded?: string | null;
+  designReferences?: string | null;
+  deliveryDeadline?: string | null;
+  estimatedBudgetRange?: string | null;
+  risksAssumptions?: string | null;
+  finalApprovalOwner: BusinessProjectFinalApprovalOwner;
+  workflowStatus?: BusinessProjectWorkflowStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type BusinessProjectIntakePatch = Partial<Omit<BusinessProjectIntakeInput, "actorUserId" | "now">>;
+
+export type BusinessProjectIntakeFilters = {
+  includeArchived?: boolean;
+  prdStatus?: BusinessProjectPrdStatus;
+  priority?: BusinessProjectPriority;
+  workflowStatus?: BusinessProjectWorkflowStatus;
+};
+
+export type BusinessProjectPrdEventInput = {
+  projectIntakeId: string;
+  eventType: string;
+  actorUserId: string;
+  message: string;
+  metadata?: Record<string, unknown> | null;
+  now?: string;
+};
+
 const businessRoleSeeds = [
   ["main_admin_owner", "Main Admin / Owner Admin", "Shrinika owner authority for all internal Business Control Centre operations.", "INTERNAL"],
   ["system_guardian", "Founder-builder / System Guardian", "Shiva internal system guardian role for technical governance and safety oversight.", "INTERNAL"],
@@ -621,6 +687,45 @@ export function initializeDatabaseOn(database: Database.Database) {
       metadata_json TEXT,
       FOREIGN KEY(user_id) REFERENCES business_users(id) ON DELETE SET NULL
     );
+    CREATE TABLE IF NOT EXISTS business_project_intakes (
+      id TEXT PRIMARY KEY,
+      project_name TEXT NOT NULL,
+      client_or_company_name TEXT NOT NULL,
+      project_type TEXT NOT NULL CHECK(project_type IN ('Website','SaaS','Mobile App','Automation','CRM','Media System','Trading System','Internal Tool','Other')),
+      priority TEXT NOT NULL CHECK(priority IN ('Low','Medium','High','Urgent')),
+      project_source TEXT NOT NULL CHECK(project_source IN ('Client request','Internal product idea','Admin instruction','Existing business workflow','Product Discovery Agent')),
+      prd_status TEXT NOT NULL CHECK(prd_status IN ('Not started','Drafting','Under review','Approved','Changes requested')),
+      short_summary TEXT NOT NULL,
+      problem_statement TEXT NOT NULL,
+      target_users TEXT,
+      core_modules_required TEXT,
+      key_features TEXT,
+      integrations_needed TEXT,
+      design_references TEXT,
+      delivery_deadline TEXT,
+      estimated_budget_range TEXT,
+      risks_assumptions TEXT,
+      final_approval_owner TEXT NOT NULL CHECK(final_approval_owner IN ('Admin','Manager','Shiva','Shrinika')),
+      workflow_status TEXT NOT NULL CHECK(workflow_status IN ('PROJECT_CREATED','PRD_DRAFTING','PRD_REVIEW','SCOPE_APPROVAL_PENDING','READY_FOR_APP_STUDIO','TEAM_ASSIGNMENT_PENDING','DEVELOPMENT_PENDING','QA_PENDING','MANAGER_APPROVAL_PENDING','DEPLOYMENT_APPROVAL_PENDING')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS business_project_prd_events (
+      id TEXT PRIMARY KEY,
+      project_intake_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      actor_user_id TEXT NOT NULL,
+      message TEXT NOT NULL,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(project_intake_id) REFERENCES business_project_intakes(id) ON DELETE CASCADE,
+      FOREIGN KEY(actor_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1015,6 +1120,11 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_business_password_reset_tokens_hash ON business_password_reset_tokens(token_hash);
     CREATE INDEX IF NOT EXISTS idx_business_auth_security_events_user_created ON business_auth_security_events(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_business_auth_security_events_type_severity_created ON business_auth_security_events(event_type, severity, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_business_project_intakes_prd_status ON business_project_intakes(prd_status);
+    CREATE INDEX IF NOT EXISTS idx_business_project_intakes_priority ON business_project_intakes(priority);
+    CREATE INDEX IF NOT EXISTS idx_business_project_intakes_workflow_status ON business_project_intakes(workflow_status);
+    CREATE INDEX IF NOT EXISTS idx_business_project_intakes_created ON business_project_intakes(created_at);
+    CREATE INDEX IF NOT EXISTS idx_business_project_prd_events_project_created ON business_project_prd_events(project_intake_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -1913,11 +2023,285 @@ export function createBusinessPasswordResetTokenPlaceholder(database: Database.D
     FROM business_password_reset_tokens WHERE id=?`).get(id);
 }
 
+export function createBusinessProjectIntake(database: Database.Database, input: BusinessProjectIntakeInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const normalized = normalizeBusinessProjectIntakeInput(input);
+  const id = `business-project-intake-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  const transaction = database.transaction(() => {
+    database.prepare(`INSERT INTO business_project_intakes
+      (id,project_name,client_or_company_name,project_type,priority,project_source,prd_status,short_summary,problem_statement,
+        target_users,core_modules_required,key_features,integrations_needed,design_references,delivery_deadline,estimated_budget_range,
+        risks_assumptions,final_approval_owner,workflow_status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+      id,
+      normalized.projectName,
+      normalized.clientOrCompanyName,
+      normalized.projectType,
+      normalized.priority,
+      normalized.projectSource,
+      normalized.prdStatus,
+      normalized.shortSummary,
+      normalized.problemStatement,
+      normalized.targetUsers,
+      normalized.coreModulesRequired,
+      normalized.keyFeatures,
+      normalized.integrationsNeeded,
+      normalized.designReferences,
+      normalized.deliveryDeadline,
+      normalized.estimatedBudgetRange,
+      normalized.risksAssumptions,
+      normalized.finalApprovalOwner,
+      normalized.workflowStatus,
+      input.actorUserId,
+      input.actorUserId,
+      timestamp,
+      timestamp
+    );
+    recordBusinessProjectPrdEvent(database, {
+      projectIntakeId: id,
+      eventType: "PROJECT_INTAKE_CREATED",
+      actorUserId: input.actorUserId,
+      message: `Project intake created for ${normalized.projectName}`,
+      metadata: { prdStatus: normalized.prdStatus, workflowStatus: normalized.workflowStatus, priority: normalized.priority },
+      now: timestamp
+    });
+  });
+  transaction();
+  return getBusinessProjectIntakeById(database, id, { includeArchived: true });
+}
+
+export function listBusinessProjectIntakes(database: Database.Database, filters: BusinessProjectIntakeFilters = {}) {
+  validateOptionalEnum("prdStatus", filters.prdStatus, businessProjectPrdStatuses);
+  validateOptionalEnum("priority", filters.priority, businessProjectPriorities);
+  validateOptionalEnum("workflowStatus", filters.workflowStatus, businessProjectWorkflowStatuses);
+  const where = filters.includeArchived ? ["1=1"] : ["archived_at IS NULL"];
+  const values: string[] = [];
+  if (filters.prdStatus) {
+    where.push("prd_status=?");
+    values.push(filters.prdStatus);
+  }
+  if (filters.priority) {
+    where.push("priority=?");
+    values.push(filters.priority);
+  }
+  if (filters.workflowStatus) {
+    where.push("workflow_status=?");
+    values.push(filters.workflowStatus);
+  }
+  return database.prepare(`${businessProjectIntakeSelectSql()} WHERE ${where.join(" AND ")} ORDER BY created_at DESC`).all(...values).map(mapBusinessProjectIntakeRow);
+}
+
+export function getBusinessProjectIntakeById(database: Database.Database, id: string, options: { includeArchived?: boolean } = {}) {
+  const row = database.prepare(`${businessProjectIntakeSelectSql()} WHERE id=?${options.includeArchived ? "" : " AND archived_at IS NULL"} LIMIT 1`).get(id) as BusinessProjectIntakeRow | undefined;
+  return row ? mapBusinessProjectIntakeRow(row) : undefined;
+}
+
+export function updateBusinessProjectIntake(database: Database.Database, id: string, patch: BusinessProjectIntakePatch, actorUserId: string, now = new Date().toISOString()) {
+  assertActiveBusinessUser(database, actorUserId);
+  const existing = getBusinessProjectIntakeById(database, id);
+  if (!existing) throw new Error("Project intake not found");
+  const normalized = normalizeBusinessProjectIntakeInput({ ...existing, ...patch, actorUserId, now });
+  const transaction = database.transaction(() => {
+    database.prepare(`UPDATE business_project_intakes SET
+      project_name=?,client_or_company_name=?,project_type=?,priority=?,project_source=?,prd_status=?,short_summary=?,problem_statement=?,
+      target_users=?,core_modules_required=?,key_features=?,integrations_needed=?,design_references=?,delivery_deadline=?,estimated_budget_range=?,
+      risks_assumptions=?,final_approval_owner=?,workflow_status=?,updated_by_user_id=?,updated_at=?
+      WHERE id=? AND archived_at IS NULL`).run(
+      normalized.projectName,
+      normalized.clientOrCompanyName,
+      normalized.projectType,
+      normalized.priority,
+      normalized.projectSource,
+      normalized.prdStatus,
+      normalized.shortSummary,
+      normalized.problemStatement,
+      normalized.targetUsers,
+      normalized.coreModulesRequired,
+      normalized.keyFeatures,
+      normalized.integrationsNeeded,
+      normalized.designReferences,
+      normalized.deliveryDeadline,
+      normalized.estimatedBudgetRange,
+      normalized.risksAssumptions,
+      normalized.finalApprovalOwner,
+      normalized.workflowStatus,
+      actorUserId,
+      now,
+      id
+    );
+    recordBusinessProjectPrdEvent(database, {
+      projectIntakeId: id,
+      eventType: "PROJECT_INTAKE_UPDATED",
+      actorUserId,
+      message: `Project intake updated for ${normalized.projectName}`,
+      metadata: { prdStatus: normalized.prdStatus, workflowStatus: normalized.workflowStatus, priority: normalized.priority },
+      now
+    });
+  });
+  transaction();
+  return getBusinessProjectIntakeById(database, id);
+}
+
+export function archiveBusinessProjectIntake(database: Database.Database, id: string, actorUserId: string, now = new Date().toISOString()) {
+  assertActiveBusinessUser(database, actorUserId);
+  const existing = getBusinessProjectIntakeById(database, id);
+  if (!existing) throw new Error("Project intake not found");
+  const transaction = database.transaction(() => {
+    database.prepare("UPDATE business_project_intakes SET archived_at=?,updated_by_user_id=?,updated_at=? WHERE id=? AND archived_at IS NULL")
+      .run(now, actorUserId, now, id);
+    recordBusinessProjectPrdEvent(database, {
+      projectIntakeId: id,
+      eventType: "PROJECT_INTAKE_ARCHIVED",
+      actorUserId,
+      message: `Project intake archived for ${existing.projectName}`,
+      metadata: { workflowStatus: existing.workflowStatus },
+      now
+    });
+  });
+  transaction();
+  return getBusinessProjectIntakeById(database, id, { includeArchived: true });
+}
+
+export function recordBusinessProjectPrdEvent(database: Database.Database, input: BusinessProjectPrdEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const project = database.prepare("SELECT id FROM business_project_intakes WHERE id=?").get(input.projectIntakeId) as { id: string } | undefined;
+  if (!project) throw new Error("Project intake not found for PRD event");
+  const eventType = normalizeRequiredText("eventType", input.eventType);
+  const message = normalizeRequiredText("message", input.message);
+  const metadata = input.metadata ? sanitizeDeniedAccessMetadata(input.metadata) : null;
+  const id = `business-project-prd-event-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_project_prd_events
+    (id,project_intake_id,event_type,actor_user_id,message,metadata_json,created_at)
+    VALUES (?,?,?,?,?,?,?)`).run(
+    id,
+    input.projectIntakeId,
+    eventType,
+    input.actorUserId,
+    message,
+    metadata ? JSON.stringify(metadata) : null,
+    timestamp
+  );
+  return getBusinessProjectPrdEventById(database, id);
+}
+
+export function listBusinessProjectPrdEvents(database: Database.Database, projectIntakeId: string) {
+  const project = database.prepare("SELECT id FROM business_project_intakes WHERE id=?").get(projectIntakeId);
+  if (!project) throw new Error("Project intake not found");
+  return database.prepare(`SELECT id,project_intake_id AS projectIntakeId,event_type AS eventType,actor_user_id AS actorUserId,
+      message,metadata_json AS metadataJson,created_at AS createdAt
+    FROM business_project_prd_events WHERE project_intake_id=? ORDER BY created_at ASC`).all(projectIntakeId);
+}
+
 function getBusinessAuthSessionById(database: Database.Database, sessionId: string) {
   return database.prepare(`SELECT id,user_id AS userId,session_token_hash AS sessionTokenHash,status,created_at AS createdAt,
       last_seen_at AS lastSeenAt,expires_at AS expiresAt,revoked_at AS revokedAt,revoked_reason AS revokedReason,
       ip_address_hash AS ipAddressHash,user_agent_hash AS userAgentHash,metadata_json AS metadataJson
     FROM business_auth_sessions WHERE id=?`).get(sessionId);
+}
+
+type BusinessProjectIntakeRow = {
+  id: string;
+  projectName: string;
+  clientOrCompanyName: string;
+  projectType: BusinessProjectType;
+  priority: BusinessProjectPriority;
+  projectSource: BusinessProjectSource;
+  prdStatus: BusinessProjectPrdStatus;
+  shortSummary: string;
+  problemStatement: string;
+  targetUsers: string | null;
+  coreModulesRequired: string | null;
+  keyFeatures: string | null;
+  integrationsNeeded: string | null;
+  designReferences: string | null;
+  deliveryDeadline: string | null;
+  estimatedBudgetRange: string | null;
+  risksAssumptions: string | null;
+  finalApprovalOwner: BusinessProjectFinalApprovalOwner;
+  workflowStatus: BusinessProjectWorkflowStatus;
+  createdByUserId: string;
+  updatedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+function businessProjectIntakeSelectSql() {
+  return `SELECT id,project_name AS projectName,client_or_company_name AS clientOrCompanyName,project_type AS projectType,
+    priority,project_source AS projectSource,prd_status AS prdStatus,short_summary AS shortSummary,problem_statement AS problemStatement,
+    target_users AS targetUsers,core_modules_required AS coreModulesRequired,key_features AS keyFeatures,integrations_needed AS integrationsNeeded,
+    design_references AS designReferences,delivery_deadline AS deliveryDeadline,estimated_budget_range AS estimatedBudgetRange,
+    risks_assumptions AS risksAssumptions,final_approval_owner AS finalApprovalOwner,workflow_status AS workflowStatus,
+    created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_project_intakes`;
+}
+
+function mapBusinessProjectIntakeRow(row: unknown) {
+  return row as BusinessProjectIntakeRow;
+}
+
+function getBusinessProjectPrdEventById(database: Database.Database, id: string) {
+  return database.prepare(`SELECT id,project_intake_id AS projectIntakeId,event_type AS eventType,actor_user_id AS actorUserId,
+      message,metadata_json AS metadataJson,created_at AS createdAt
+    FROM business_project_prd_events WHERE id=?`).get(id);
+}
+
+function normalizeBusinessProjectIntakeInput(input: BusinessProjectIntakeInput) {
+  return {
+    projectName: normalizeRequiredText("projectName", input.projectName),
+    clientOrCompanyName: normalizeRequiredText("clientOrCompanyName", input.clientOrCompanyName),
+    projectType: validateEnum("projectType", input.projectType, businessProjectTypes),
+    priority: validateEnum("priority", input.priority, businessProjectPriorities),
+    projectSource: validateEnum("projectSource", input.projectSource, businessProjectSources),
+    prdStatus: validateEnum("prdStatus", input.prdStatus, businessProjectPrdStatuses),
+    shortSummary: normalizeRequiredText("shortSummary", input.shortSummary),
+    problemStatement: normalizeRequiredText("problemStatement", input.problemStatement),
+    targetUsers: normalizeOptionalText(input.targetUsers),
+    coreModulesRequired: normalizeOptionalText(input.coreModulesRequired),
+    keyFeatures: normalizeOptionalText(input.keyFeatures),
+    integrationsNeeded: normalizeOptionalText(input.integrationsNeeded),
+    designReferences: normalizeOptionalText(input.designReferences),
+    deliveryDeadline: normalizeOptionalText(input.deliveryDeadline),
+    estimatedBudgetRange: normalizeOptionalText(input.estimatedBudgetRange),
+    risksAssumptions: normalizeOptionalText(input.risksAssumptions),
+    finalApprovalOwner: validateEnum("finalApprovalOwner", input.finalApprovalOwner, businessProjectFinalApprovalOwners),
+    workflowStatus: validateEnum("workflowStatus", input.workflowStatus ?? "PROJECT_CREATED", businessProjectWorkflowStatuses)
+  };
+}
+
+function assertActiveBusinessUser(database: Database.Database, userId: string) {
+  const user = database.prepare("SELECT id,user_type AS userType,status FROM business_users WHERE id=?").get(userId) as { id: string; userType: BusinessUserType; status: BusinessUserStatus } | undefined;
+  if (!user) throw new Error("Business user not found");
+  if (user.userType !== "INTERNAL") throw new Error("Business project intake requires an internal user");
+  if (user.status !== "ACTIVE") throw new Error("Business user is not active");
+}
+
+function normalizeRequiredText(fieldName: string, value: unknown) {
+  if (typeof value !== "string") throw new Error(`${fieldName} is required`);
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${fieldName} is required`);
+  return trimmed;
+}
+
+function normalizeOptionalText(value: unknown) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function validateEnum<T extends readonly string[]>(fieldName: string, value: unknown, allowedValues: T): T[number] {
+  if (typeof value !== "string" || !allowedValues.includes(value)) {
+    throw new Error(`${fieldName} is invalid`);
+  }
+  return value as T[number];
+}
+
+function validateOptionalEnum<T extends readonly string[]>(fieldName: string, value: unknown, allowedValues: T) {
+  if (value === undefined || value === null) return;
+  validateEnum(fieldName, value, allowedValues);
 }
 
 function seedBusinessIdentityAccess(database: Database.Database, timestamp: string) {

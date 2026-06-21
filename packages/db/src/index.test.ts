@@ -583,4 +583,124 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates and manages Business Control Centre project PRD intake records", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        listBusinessProjectIntakes,
+        getBusinessProjectIntakeById,
+        updateBusinessProjectIntake,
+        archiveBusinessProjectIntake,
+        listBusinessProjectPrdEvents
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      for (const tableName of ["business_project_intakes", "business_project_prd_events"]) {
+        const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
+        assert.ok(table, `${tableName} should exist`);
+      }
+
+      const created = createBusinessProjectIntake(db, {
+        projectName: " Client Portal Foundation ",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "SaaS",
+        priority: "High",
+        projectSource: "Admin instruction",
+        prdStatus: "Drafting",
+        shortSummary: "Build the internal planning intake.",
+        problemStatement: "Project details need structured PRD review.",
+        targetUsers: "Managers\nAdmins",
+        coreModulesRequired: "Dashboard, approvals",
+        keyFeatures: "PRD intake and review",
+        integrationsNeeded: "None yet",
+        designReferences: "Business Control Centre",
+        deliveryDeadline: "2026-07-01",
+        estimatedBudgetRange: "Placeholder",
+        risksAssumptions: "Approval flow pending",
+        finalApprovalOwner: "Manager",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-01T00:00:00.000Z"
+      }) as { id: string; projectName: string; workflowStatus: string; archivedAt: string | null };
+
+      assert.equal(created.projectName, "Client Portal Foundation");
+      assert.equal(created.workflowStatus, "PROJECT_CREATED");
+      assert.equal(created.archivedAt, null);
+
+      const list = listBusinessProjectIntakes(db) as Array<{ id: string; projectName: string }>;
+      assert.deepEqual(list.map((item) => item.id), [created.id]);
+
+      const updated = updateBusinessProjectIntake(db, created.id, {
+        prdStatus: "Under review",
+        workflowStatus: "PRD_REVIEW",
+        keyFeatures: "PRD intake, review, approval"
+      }, "business-user-shiva", "2026-01-01T00:10:00.000Z") as { prdStatus: string; workflowStatus: string; updatedByUserId: string };
+      assert.equal(updated.prdStatus, "Under review");
+      assert.equal(updated.workflowStatus, "PRD_REVIEW");
+      assert.equal(updated.updatedByUserId, "business-user-shiva");
+
+      const archived = archiveBusinessProjectIntake(db, created.id, "business-user-shrinika", "2026-01-01T00:20:00.000Z") as { id: string; archivedAt: string | null };
+      assert.equal(archived.id, created.id);
+      assert.equal(archived.archivedAt, "2026-01-01T00:20:00.000Z");
+      assert.equal(getBusinessProjectIntakeById(db, created.id), undefined);
+      assert.equal((listBusinessProjectIntakes(db) as unknown[]).length, 0);
+      assert.equal((listBusinessProjectIntakes(db, { includeArchived: true }) as unknown[]).length, 1);
+
+      const events = listBusinessProjectPrdEvents(db, created.id) as Array<{ eventType: string }>;
+      assert.deepEqual(events.map((event) => event.eventType), ["PROJECT_INTAKE_CREATED", "PROJECT_INTAKE_UPDATED", "PROJECT_INTAKE_ARCHIVED"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("validates project PRD intake fields and redacts event metadata", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, createBusinessProjectIntake, recordBusinessProjectPrdEvent, listBusinessProjectPrdEvents } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const validInput = {
+        projectName: "Automation Intake",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "Automation",
+        priority: "Medium",
+        projectSource: "Internal product idea",
+        prdStatus: "Not started",
+        shortSummary: "Create project intake.",
+        problemStatement: "Need persistent intake data.",
+        finalApprovalOwner: "Shrinika",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-01T01:00:00.000Z"
+      } as const;
+
+      assert.throws(() => createBusinessProjectIntake(db, { ...validInput, projectName: " " }), /projectName is required/);
+      assert.throws(() => createBusinessProjectIntake(db, { ...validInput, projectType: "Invalid" as any }), /projectType is invalid/);
+      assert.throws(() => createBusinessProjectIntake(db, { ...validInput, priority: "Critical" as any }), /priority is invalid/);
+
+      const created = createBusinessProjectIntake(db, validInput) as { id: string };
+      recordBusinessProjectPrdEvent(db, {
+        projectIntakeId: created.id,
+        eventType: "SAFE_METADATA_CHECK",
+        actorUserId: "business-user-shrinika",
+        message: "Metadata redaction check",
+        metadata: {
+          route: "/api/business-control-centre/project-intakes",
+          password: "NeverStoreThisPassword",
+          token: "NeverStoreThisToken",
+          note: "Safe note"
+        },
+        now: "2026-01-01T01:01:00.000Z"
+      });
+      const events = listBusinessProjectPrdEvents(db, created.id) as Array<{ metadataJson: string | null }>;
+      const metadata = events.map((event) => event.metadataJson ?? "").join("\n");
+      assert.ok(metadata.includes("Safe note"));
+      assert.ok(!metadata.includes("NeverStoreThisPassword"));
+      assert.ok(!metadata.includes("NeverStoreThisToken"));
+      assert.ok(metadata.includes("[redacted]"));
+    } finally {
+      db.close();
+    }
+  });
 });

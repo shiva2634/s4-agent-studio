@@ -34,6 +34,7 @@ import { GitWorkflowError, applyApprovedProposalsToGitWorkflow, cleanupTaskWorkt
 import { SelfBuildReadinessError, convertApprovedBuildMission, createBuildMissionDraft, getBuildMission, getLatestReadinessReport, getReadinessReport, listBuildMissionEvents, listBuildMissions, listReadinessHistory, requestBuildMissionApproval, resolveBuildMissionApproval, runSelfBuildReadiness } from "./self-build-readiness.js";
 import { registerBusinessAuthRoutes } from "./business-auth.js";
 import { registerBusinessControlCentreRoutes } from "./business-control-centre-routes.js";
+import { registerBusinessProjectIntakeRoutes } from "./business-project-intake-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 
 const app = Fastify({ logger: true });
@@ -83,6 +84,7 @@ app.get("/health", async () => ({ status: "ok", service: "s4-agent-studio-api", 
 
 registerBusinessAuthRoutes(app);
 registerBusinessControlCentreRoutes(app);
+registerBusinessProjectIntakeRoutes(app);
 registerAppStudioInternalRoutes(app);
 
 app.get("/api/providers/status", async () => getProviderStatus());

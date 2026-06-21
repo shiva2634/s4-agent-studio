@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
+import { createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
 type AppTheme = "dark" | "midnight" | "purple" | "emerald" | "sunset" | "light" | "contrast";
@@ -561,6 +562,27 @@ const projectCreationWorkflowSteps = [
   "Manager Approval",
   "Deployment Approval"
 ];
+
+const emptyProjectIntakeForm: BusinessProjectIntakePayload = {
+  projectName: "",
+  clientOrCompanyName: "",
+  projectType: "SaaS",
+  priority: "Medium",
+  projectSource: "Admin instruction",
+  prdStatus: "Not started",
+  shortSummary: "",
+  problemStatement: "",
+  targetUsers: "",
+  coreModulesRequired: "",
+  keyFeatures: "",
+  integrationsNeeded: "",
+  designReferences: "",
+  deliveryDeadline: "",
+  estimatedBudgetRange: "",
+  risksAssumptions: "",
+  finalApprovalOwner: "Manager",
+  workflowStatus: "PROJECT_CREATED"
+};
 
 const roleDelegationCards: RoleDelegationRecord[] = [
   { role: "Admin / Main Admin", primaryAssignee: "Shrinika", backupAssignee: "Shiva", temporaryDelegate: "Company Admin placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "High", notes: "Owner authority remains active for sensitive actions." },
@@ -2210,6 +2232,57 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const { theme, setTheme } = useStoredAppTheme();
   const [activeSectionId, setActiveSectionId] = useState("company-dashboard");
   const activeSection = sidebarSections.find(section => section.id === activeSectionId) ?? sidebarSections[0];
+  const [projectIntakeForm, setProjectIntakeForm] = useState<BusinessProjectIntakePayload>(emptyProjectIntakeForm);
+  const [projectIntakes, setProjectIntakes] = useState<BusinessProjectIntake[]>([]);
+  const [selectedProjectIntakeId, setSelectedProjectIntakeId] = useState<string>("");
+  const [projectIntakeLoading, setProjectIntakeLoading] = useState(false);
+  const [projectIntakeSaving, setProjectIntakeSaving] = useState(false);
+  const [projectIntakeMessage, setProjectIntakeMessage] = useState("");
+  const [projectIntakeError, setProjectIntakeError] = useState("");
+
+  useEffect(() => {
+    if (activeSection.id !== "create-project-prd") return;
+    let cancelled = false;
+    setProjectIntakeLoading(true);
+    setProjectIntakeError("");
+    listBusinessProjectIntakes()
+      .then(intakes => {
+        if (cancelled) return;
+        setProjectIntakes(intakes);
+        setSelectedProjectIntakeId(current => current || intakes[0]?.id || "");
+      })
+      .catch(error => {
+        if (!cancelled) setProjectIntakeError(error instanceof Error ? error.message : "Unable to load project intakes");
+      })
+      .finally(() => {
+        if (!cancelled) setProjectIntakeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
+  const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
+    setProjectIntakeForm(current => ({ ...current, [field]: value }));
+  };
+  const handleProjectIntakeSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setProjectIntakeSaving(true);
+    setProjectIntakeMessage("");
+    setProjectIntakeError("");
+    try {
+      const intake = await createBusinessProjectIntake(projectIntakeForm);
+      setProjectIntakes(current => [intake, ...current]);
+      setSelectedProjectIntakeId(intake.id);
+      setProjectIntakeForm(emptyProjectIntakeForm);
+      setProjectIntakeMessage(`Project intake created: ${intake.projectName}`);
+    } catch (error) {
+      setProjectIntakeError(error instanceof Error ? error.message : "Unable to create project intake");
+    } finally {
+      setProjectIntakeSaving(false);
+    }
+  };
 
   return (
     <main className="app-shell app-studio-shell business-control-shell" data-theme={theme}>
@@ -2584,28 +2657,30 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <p>No project is sent to App Studio until PRD and scope are approved. Customer-facing communication remains outside Business Control Centre. This section is UI-only until backend project creation is connected.</p>
             </div>
             <div className="project-prd-layout">
-              <form className="project-prd-form" aria-label="Create internal project and PRD intake form">
+              <form className="project-prd-form" aria-label="Create internal project and PRD intake form" onSubmit={event => void handleProjectIntakeSubmit(event)}>
                 <div className="project-prd-form-grid">
-                  <label>Project name<input placeholder="Example: Client Portal Foundation" /></label>
-                  <label>Client / internal company name<input placeholder="Example: Shrinika Technologies or client company" /></label>
-                  <label>Project type<select defaultValue="SaaS">{projectTypeOptions.map(option => <option key={option}>{option}</option>)}</select></label>
-                  <label>Priority<select defaultValue="Medium">{projectPriorityOptions.map(option => <option key={option}>{option}</option>)}</select></label>
-                  <label>Project source<select defaultValue="Admin instruction">{projectSourceOptions.map(option => <option key={option}>{option}</option>)}</select></label>
-                  <label>PRD status<select defaultValue="Not started">{prdStatusOptions.map(option => <option key={option}>{option}</option>)}</select></label>
-                  <label>Delivery deadline<input type="date" /></label>
-                  <label>Estimated budget range<input placeholder="Placeholder range only" /></label>
-                  <label>Final approval owner<select defaultValue="Manager">{finalApprovalOwners.map(option => <option key={option}>{option}</option>)}</select></label>
-                  <label className="wide">Short project summary<textarea placeholder="Summarize the project objective and expected business outcome." /></label>
-                  <label className="wide">Problem statement<textarea placeholder="Describe the problem this project should solve." /></label>
-                  <label>Target users<textarea placeholder="Internal operators, customers, managers, support, etc." /></label>
-                  <label>Core modules required<textarea placeholder="Dashboard, auth, billing, support, reporting, etc." /></label>
-                  <label>Key features<textarea placeholder="List the primary features required for MVP scope." /></label>
-                  <label>Integrations needed<textarea placeholder="Email, payment, provider, CRM, analytics, etc." /></label>
-                  <label>Design references / notes<textarea placeholder="Brand, layout, UI references, accessibility notes." /></label>
-                  <label>Risks / assumptions<textarea placeholder="Delivery, data, integrations, staffing, approval, or compliance assumptions." /></label>
+                  <label>Project name<input value={projectIntakeForm.projectName} onChange={event => updateProjectIntakeField("projectName", event.target.value)} placeholder="Example: Client Portal Foundation" /></label>
+                  <label>Client / internal company name<input value={projectIntakeForm.clientOrCompanyName} onChange={event => updateProjectIntakeField("clientOrCompanyName", event.target.value)} placeholder="Example: Shrinika Technologies or client company" /></label>
+                  <label>Project type<select value={projectIntakeForm.projectType} onChange={event => updateProjectIntakeField("projectType", event.target.value)}>{projectTypeOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Priority<select value={projectIntakeForm.priority} onChange={event => updateProjectIntakeField("priority", event.target.value)}>{projectPriorityOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Project source<select value={projectIntakeForm.projectSource} onChange={event => updateProjectIntakeField("projectSource", event.target.value)}>{projectSourceOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>PRD status<select value={projectIntakeForm.prdStatus} onChange={event => updateProjectIntakeField("prdStatus", event.target.value)}>{prdStatusOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Delivery deadline<input type="date" value={projectIntakeForm.deliveryDeadline ?? ""} onChange={event => updateProjectIntakeField("deliveryDeadline", event.target.value)} /></label>
+                  <label>Estimated budget range<input value={projectIntakeForm.estimatedBudgetRange ?? ""} onChange={event => updateProjectIntakeField("estimatedBudgetRange", event.target.value)} placeholder="Placeholder range only" /></label>
+                  <label>Final approval owner<select value={projectIntakeForm.finalApprovalOwner} onChange={event => updateProjectIntakeField("finalApprovalOwner", event.target.value)}>{finalApprovalOwners.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label className="wide">Short project summary<textarea value={projectIntakeForm.shortSummary} onChange={event => updateProjectIntakeField("shortSummary", event.target.value)} placeholder="Summarize the project objective and expected business outcome." /></label>
+                  <label className="wide">Problem statement<textarea value={projectIntakeForm.problemStatement} onChange={event => updateProjectIntakeField("problemStatement", event.target.value)} placeholder="Describe the problem this project should solve." /></label>
+                  <label>Target users<textarea value={projectIntakeForm.targetUsers ?? ""} onChange={event => updateProjectIntakeField("targetUsers", event.target.value)} placeholder="Internal operators, customers, managers, support, etc." /></label>
+                  <label>Core modules required<textarea value={projectIntakeForm.coreModulesRequired ?? ""} onChange={event => updateProjectIntakeField("coreModulesRequired", event.target.value)} placeholder="Dashboard, auth, billing, support, reporting, etc." /></label>
+                  <label>Key features<textarea value={projectIntakeForm.keyFeatures ?? ""} onChange={event => updateProjectIntakeField("keyFeatures", event.target.value)} placeholder="List the primary features required for MVP scope." /></label>
+                  <label>Integrations needed<textarea value={projectIntakeForm.integrationsNeeded ?? ""} onChange={event => updateProjectIntakeField("integrationsNeeded", event.target.value)} placeholder="Email, payment, provider, CRM, analytics, etc." /></label>
+                  <label>Design references / notes<textarea value={projectIntakeForm.designReferences ?? ""} onChange={event => updateProjectIntakeField("designReferences", event.target.value)} placeholder="Brand, layout, UI references, accessibility notes." /></label>
+                  <label>Risks / assumptions<textarea value={projectIntakeForm.risksAssumptions ?? ""} onChange={event => updateProjectIntakeField("risksAssumptions", event.target.value)} placeholder="Delivery, data, integrations, staffing, approval, or compliance assumptions." /></label>
                 </div>
+                {projectIntakeMessage ? <p className="success">{projectIntakeMessage}</p> : null}
+                {projectIntakeError ? <p className="error">{projectIntakeError}</p> : null}
                 <div className="project-prd-actions">
-                  <button type="button" disabled>Create project placeholder</button>
+                  <button type="submit" disabled={projectIntakeSaving}>{projectIntakeSaving ? "Saving..." : "Create project intake"}</button>
                   <button type="button" disabled>Send to App Studio placeholder</button>
                 </div>
               </form>
@@ -2622,6 +2697,39 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                   {appStudioReadinessChecklist.map(item => <label key={item}><input type="checkbox" disabled />{item}</label>)}
                 </div>
               </aside>
+            </div>
+            <div className="recent-intakes-panel">
+              <div className="business-section-heading">
+                <span>Recent Project Intakes</span>
+                <h2>Saved PRD Intake Records</h2>
+              </div>
+              {projectIntakeLoading ? <p>Loading project intakes...</p> : null}
+              {!projectIntakeLoading && !projectIntakes.length ? <p>No project intakes saved yet.</p> : null}
+              {projectIntakes.length ? (
+                <div className="recent-intakes-layout">
+                  <div className="recent-intake-list">
+                    {projectIntakes.map(intake => (
+                      <button type="button" className={intake.id === selectedProjectIntake?.id ? "active" : ""} key={intake.id} onClick={() => setSelectedProjectIntakeId(intake.id)}>
+                        <strong>{intake.projectName}</strong>
+                        <span>{intake.prdStatus} / {intake.priority}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedProjectIntake ? (
+                    <article className="recent-intake-detail">
+                      <span>{selectedProjectIntake.projectType} / {selectedProjectIntake.workflowStatus}</span>
+                      <h3>{selectedProjectIntake.projectName}</h3>
+                      <p>{selectedProjectIntake.shortSummary}</p>
+                      <div className="recent-intake-meta">
+                        <div><span>Client/company</span><strong>{selectedProjectIntake.clientOrCompanyName}</strong></div>
+                        <div><span>Source</span><strong>{selectedProjectIntake.projectSource}</strong></div>
+                        <div><span>Final owner</span><strong>{selectedProjectIntake.finalApprovalOwner}</strong></div>
+                        <div><span>Updated</span><strong>{selectedProjectIntake.updatedAt}</strong></div>
+                      </div>
+                    </article>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
             <div className="project-prd-workflow-panel">
               <div className="business-section-heading">
