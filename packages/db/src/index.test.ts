@@ -1001,4 +1001,162 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("gates development start after Build Mission approval and finalized assignment", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        createOrUpdateBuildMissionTeamAssignment,
+        requestBuildMissionDevelopmentStart,
+        approveBuildMissionDevelopmentStart,
+        blockBuildMissionDevelopmentStart,
+        getBuildMissionDevelopmentGate,
+        listBuildMissionQueueItems
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .run("dev-gate-project", "S4 Agent Studio", "/tmp/dev-gate-project", "ACTIVE", "created", "created");
+      const createMission = (id: string, status: string) => {
+        db.prepare(`INSERT INTO build_missions
+          (id,project_id,task_id,readiness_run_id,target_module,scope,dependencies_json,risk_level,required_specialists_json,
+            scaffold_needs_json,git_mode,acceptance_criteria_json,rollback_plan,status,approval_id,plan_json,created_at,updated_at,approved_at,converted_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id,
+          "dev-gate-project",
+          null,
+          null,
+          "Client Portal",
+          `Scope for ${id}`,
+          "[]",
+          "high",
+          "[]",
+          "{}",
+          "WORKTREE",
+          "[]",
+          "Rollback via App Studio governance.",
+          status,
+          null,
+          "{}",
+          "created",
+          "created",
+          status === "APPROVED" ? "approved" : null,
+          null
+        );
+        const intake = createBusinessProjectIntake(db, {
+          projectName: `Gate Intake ${id}`,
+          clientOrCompanyName: "Shrinika Technologies",
+          projectType: "SaaS",
+          priority: "High",
+          projectSource: "Admin instruction",
+          prdStatus: "Approved",
+          shortSummary: "Development gate intake summary.",
+          problemStatement: "Mission needs development-start approval.",
+          coreModulesRequired: "Portal, support",
+          keyFeatures: "Login, dashboard",
+          finalApprovalOwner: "Manager",
+          workflowStatus: "READY_FOR_APP_STUDIO",
+          actorUserId: "business-user-shrinika",
+          now: `2026-01-04T00:00:0${id.endsWith("1") ? "1" : "2"}.000Z`
+        }) as { id: string };
+        markBusinessProjectIntakeBuildMissionHandoff(db, {
+          intakeId: intake.id,
+          buildMissionId: id,
+          actorUserId: "business-user-shrinika",
+          now: "2026-01-04T00:01:00.000Z"
+        });
+        return intake;
+      };
+
+      createMission("mission-dev-gate-draft", "DRAFT");
+      assert.throws(() => requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-draft",
+        actorUserId: "business-user-shrinika",
+        note: "not approved",
+        now: "2026-01-04T00:02:00.000Z"
+      }), /must be approved/);
+
+      createMission("mission-dev-gate-1", "APPROVED");
+      assert.throws(() => requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-1",
+        actorUserId: "business-user-shrinika",
+        note: "missing assignment",
+        now: "2026-01-04T00:03:00.000Z"
+      }), /Finalized team assignment/);
+      createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-dev-gate-1",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "Manager Placeholder",
+        qaUserId: "Developer 3",
+        productionReadinessUserId: "Developer 4",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-04T00:04:00.000Z"
+      });
+      const requested = requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-1",
+        actorUserId: "business-user-shrinika",
+        note: "Start planning after approval. password=do-not-store",
+        now: "2026-01-04T00:05:00.000Z"
+      }) as { gateStatus: string; requestNote: string | null };
+      assert.equal(requested.gateStatus, "REQUESTED");
+      assert.ok(!requested.requestNote?.includes("do-not-store"));
+      assert.throws(() => requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-1",
+        actorUserId: "business-user-shrinika",
+        note: "duplicate",
+        now: "2026-01-04T00:06:00.000Z"
+      }), /already exists/);
+      const approved = approveBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-1",
+        actorUserId: "business-user-shiva",
+        note: "Approved to begin development planning.",
+        now: "2026-01-04T00:07:00.000Z"
+      }) as { gateStatus: string; approvedByUserId: string; approvedAt: string };
+      assert.equal(approved.gateStatus, "APPROVED");
+      assert.equal(approved.approvedByUserId, "business-user-shiva");
+      assert.equal(approved.approvedAt, "2026-01-04T00:07:00.000Z");
+      const assignment = db.prepare("SELECT assignment_status AS assignmentStatus FROM business_build_mission_team_assignments WHERE build_mission_id='mission-dev-gate-1'").get() as { assignmentStatus: string };
+      assert.equal(assignment.assignmentStatus, "READY_FOR_DEVELOPMENT_APPROVAL");
+      const queue = listBuildMissionQueueItems(db) as Array<{ buildMissionId: string; developmentGate: { gateStatus: string } | null }>;
+      assert.ok(queue.some(item => item.buildMissionId === "mission-dev-gate-1" && item.developmentGate?.gateStatus === "APPROVED"));
+
+      createMission("mission-dev-gate-2", "APPROVED");
+      createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-dev-gate-2",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "Manager Placeholder",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-04T00:08:00.000Z"
+      });
+      requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-2",
+        actorUserId: "business-user-shrinika",
+        note: "Second request",
+        now: "2026-01-04T00:09:00.000Z"
+      });
+      assert.throws(() => blockBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-2",
+        actorUserId: "business-user-shiva",
+        reason: " ",
+        now: "2026-01-04T00:10:00.000Z"
+      }), /reason is required/);
+      const blocked = blockBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-dev-gate-2",
+        actorUserId: "business-user-shiva",
+        reason: "Testing plan missing",
+        now: "2026-01-04T00:11:00.000Z"
+      }) as { gateStatus: string; blockedByUserId: string; blockReason: string };
+      assert.equal(blocked.gateStatus, "BLOCKED");
+      assert.equal(blocked.blockedByUserId, "business-user-shiva");
+      assert.equal(blocked.blockReason, "Testing plan missing");
+      assert.equal((getBuildMissionDevelopmentGate(db, "mission-dev-gate-2") as { gateStatus: string }).gateStatus, "BLOCKED");
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE event_type='DEVELOPMENT_START_REQUESTED'").get());
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE event_type='DEVELOPMENT_START_APPROVED'").get());
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE event_type='DEVELOPMENT_START_BLOCKED'").get());
+    } finally {
+      db.close();
+    }
+  });
 });

@@ -45,6 +45,20 @@ export type BuildMissionQueueItem = {
     handedOffByUserId: string | null;
   };
   assignment: BuildMissionQueueAssignment | null;
+  developmentGate: {
+    id: string;
+    gateStatus: string;
+    requestedByUserId: string;
+    approvedByUserId: string | null;
+    blockedByUserId: string | null;
+    requestNote: string | null;
+    approvalNote: string | null;
+    blockReason: string | null;
+    requestedAt: string;
+    approvedAt: string | null;
+    blockedAt: string | null;
+    updatedAt: string;
+  } | null;
 };
 
 export type BuildMissionTeamAssignmentPayload = {
@@ -104,6 +118,18 @@ export async function requestBuildMissionQueueChanges(id: string, reason: string
 
 export async function saveBuildMissionTeamAssignment(id: string, payload: BuildMissionTeamAssignmentPayload): Promise<BuildMissionQueueItem> {
   return postQueueAction(`${id}/assign-team`, payload, "Unable to save Build Mission team assignment");
+}
+
+export async function requestDevelopmentStart(id: string, note: string): Promise<BuildMissionQueueItem> {
+  return postQueueAction(`${id}/request-development-start`, { note }, "Unable to request development start");
+}
+
+export async function approveDevelopmentStart(id: string, note: string): Promise<BuildMissionQueueItem> {
+  return postQueueAction(`${id}/approve-development-start`, { note }, "Unable to approve development start");
+}
+
+export async function blockDevelopmentStart(id: string, reason: string): Promise<BuildMissionQueueItem> {
+  return postQueueAction(`${id}/block-development-start`, { reason }, "Unable to block development start");
 }
 
 async function postQueueAction(path: string, payload: unknown, fallback: string): Promise<BuildMissionQueueItem> {

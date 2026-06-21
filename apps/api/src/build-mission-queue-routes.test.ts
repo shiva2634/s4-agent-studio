@@ -274,4 +274,151 @@ describe("Business Control Centre Build Mission queue API", () => {
     const deniedEvents = db.prepare("SELECT COUNT(*) AS count FROM denied_access_events WHERE attempted_module IN ('app_studio','auth')").get() as { count: number };
     assert.ok(deniedEvents.count >= 1);
   });
+
+  it("requests and approves development start without running agents or creating proposals", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-dev-start-token");
+    const handoff = await createQueueMission(sessionCookie, "Queue Development Start Mission");
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve before development-start gate." }
+    });
+    assert.equal(approved.statusCode, 200);
+    const assignment = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "ASSIGNED", managerUserId: "Manager Placeholder", qaUserId: "Developer 3", productionReadinessUserId: "Developer 4" }
+    });
+    assert.equal(assignment.statusCode, 200);
+
+    const requested = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Ready for development planning. token=do-not-store" }
+    });
+    assert.equal(requested.statusCode, 200);
+    const requestedItem = (requested.json() as { item: { developmentGate: { gateStatus: string; requestNote: string | null } } }).item;
+    assert.equal(requestedItem.developmentGate.gateStatus, "REQUESTED");
+    assert.ok(!String(requestedItem.developmentGate.requestNote).includes("do-not-store"));
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Duplicate request" }
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const devApproved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approved for development planning only." }
+    });
+    assert.equal(devApproved.statusCode, 200);
+    const approvedItem = (devApproved.json() as { item: { developmentGate: { gateStatus: string }; assignment: { assignmentStatus: string } } }).item;
+    assert.equal(approvedItem.developmentGate.gateStatus, "APPROVED");
+    assert.equal(approvedItem.assignment.assignmentStatus, "READY_FOR_DEVELOPMENT_APPROVAL");
+
+    const mission = db.prepare("SELECT task_id AS taskId,status FROM build_missions WHERE id=?").get(handoff.buildMission.id) as { taskId: string; status: string };
+    assert.equal(mission.status, "APPROVED");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
+    assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='DEVELOPMENT_START_REQUESTED'").get(handoff.buildMission.id));
+    assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='DEVELOPMENT_START_APPROVED'").get(handoff.buildMission.id));
+  });
+
+  it("rejects invalid development-start requests and blocks requested starts with a reason", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-dev-block-token");
+    const handoff = await createQueueMission(sessionCookie, "Queue Development Block Mission");
+
+    const notApproved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Too early" }
+    });
+    assert.equal(notApproved.statusCode, 400);
+
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve for gate validation." }
+    });
+    assert.equal(approved.statusCode, 200);
+    const missingAssignment = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Still no assignment" }
+    });
+    assert.equal(missingAssignment.statusCode, 400);
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "ASSIGNED", managerUserId: "Manager Placeholder" }
+    });
+    const requested = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Request to block later" }
+    });
+    assert.equal(requested.statusCode, 200);
+    const missingReason = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/block-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(missingReason.statusCode, 400);
+    const blocked = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/block-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { reason: "Testing plan missing." }
+    });
+    assert.equal(blocked.statusCode, 200);
+    const blockedItem = (blocked.json() as { item: { developmentGate: { gateStatus: string; blockReason: string } } }).item;
+    assert.equal(blockedItem.developmentGate.gateStatus, "BLOCKED");
+    assert.equal(blockedItem.developmentGate.blockReason, "Testing plan missing.");
+    assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='DEVELOPMENT_START_BLOCKED'").get(handoff.buildMission.id));
+  });
+
+  it("protects development-start endpoints with internal permissions", async () => {
+    const ownerCookie = createInternalSession("business-user-shrinika", "queue-dev-permission-owner-token");
+    const handoff = await createQueueMission(ownerCookie, "Queue Development Permission Mission");
+    insertBusinessUser({ id: "business-user-support-dev-start", email: "support-dev-start@example.local" });
+    assignBusinessRoleToUser(db, { userId: "business-user-support-dev-start", roleKey: "support_manager", now: "2026-01-01T00:00:00.000Z" });
+    const supportCookie = createInternalSession("business-user-support-dev-start", "queue-dev-support-token");
+    const forbiddenRequest = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: supportCookie },
+      payload: { note: "No permission" }
+    });
+    assert.equal(forbiddenRequest.statusCode, 403);
+
+    const unauthenticated = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve-development-start`,
+      payload: { note: "No session" }
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    insertBusinessUser({ id: "business-user-external-dev-start", email: "external-dev-start@example.local", userType: "EXTERNAL_CLIENT" });
+    insertForcedSession({ id: "forced-external-dev-start-session", userId: "business-user-external-dev-start", rawToken: "external-dev-start-token" });
+    const external = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/block-development-start`,
+      headers: { cookie: cookie("external-dev-start-token") },
+      payload: { reason: "External rejected" }
+    });
+    assert.equal(external.statusCode, 403);
+  });
 });

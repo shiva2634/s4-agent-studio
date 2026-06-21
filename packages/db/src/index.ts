@@ -114,6 +114,7 @@ export const businessProjectWorkflowStatuses = [
   "DEPLOYMENT_APPROVAL_PENDING"
 ] as const;
 export const businessBuildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_REVIEW", "READY_FOR_DEVELOPMENT_APPROVAL", "CHANGES_REQUESTED", "ARCHIVED"] as const;
+export const businessBuildMissionDevelopmentGateStatuses = ["REQUESTED", "APPROVED", "BLOCKED", "CANCELLED", "ARCHIVED"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -122,6 +123,7 @@ type BusinessProjectPrdStatus = (typeof businessProjectPrdStatuses)[number];
 type BusinessProjectFinalApprovalOwner = (typeof businessProjectFinalApprovalOwners)[number];
 type BusinessProjectWorkflowStatus = (typeof businessProjectWorkflowStatuses)[number];
 type BusinessBuildMissionAssignmentStatus = (typeof businessBuildMissionAssignmentStatuses)[number];
+type BusinessBuildMissionDevelopmentGateStatus = (typeof businessBuildMissionDevelopmentGateStatuses)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -195,6 +197,14 @@ export type BuildMissionQueueEventInput = {
   summary: string;
   actorUserId: string;
   payload?: Record<string, unknown> | null;
+  now?: string;
+};
+
+export type BuildMissionDevelopmentGateInput = {
+  buildMissionId: string;
+  actorUserId: string;
+  note?: string | null;
+  reason?: string | null;
   now?: string;
 };
 
@@ -791,6 +801,31 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
       FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
     );
+    CREATE TABLE IF NOT EXISTS business_build_mission_development_gates (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      project_intake_id TEXT,
+      assignment_id TEXT,
+      gate_status TEXT NOT NULL CHECK(gate_status IN ('REQUESTED','APPROVED','BLOCKED','CANCELLED','ARCHIVED')),
+      requested_by_user_id TEXT NOT NULL,
+      approved_by_user_id TEXT,
+      blocked_by_user_id TEXT,
+      request_note TEXT,
+      approval_note TEXT,
+      block_reason TEXT,
+      requested_at TEXT NOT NULL,
+      approved_at TEXT,
+      blocked_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_intake_id) REFERENCES business_project_intakes(id) ON DELETE SET NULL,
+      FOREIGN KEY(assignment_id) REFERENCES business_build_mission_team_assignments(id) ON DELETE SET NULL,
+      FOREIGN KEY(requested_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(approved_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(blocked_by_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1194,6 +1229,9 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_intake ON business_build_mission_team_assignments(project_intake_id, archived_at);
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_status ON business_build_mission_team_assignments(assignment_status, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_team_assignments_active_unique ON business_build_mission_team_assignments(build_mission_id) WHERE archived_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_mission ON business_build_mission_development_gates(build_mission_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_status ON business_build_mission_development_gates(gate_status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_active_unique ON business_build_mission_development_gates(build_mission_id) WHERE archived_at IS NULL AND gate_status IN ('REQUESTED','APPROVED');
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -2388,6 +2426,116 @@ export function archiveBuildMissionTeamAssignment(database: Database.Database, b
   return getBuildMissionTeamAssignment(database, buildMissionId, { includeArchived: true });
 }
 
+export function getBuildMissionDevelopmentGate(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  const row = database.prepare(`SELECT id,build_mission_id AS buildMissionId,project_intake_id AS projectIntakeId,assignment_id AS assignmentId,
+      gate_status AS gateStatus,requested_by_user_id AS requestedByUserId,approved_by_user_id AS approvedByUserId,
+      blocked_by_user_id AS blockedByUserId,request_note AS requestNote,approval_note AS approvalNote,block_reason AS blockReason,
+      requested_at AS requestedAt,approved_at AS approvedAt,blocked_at AS blockedAt,created_at AS createdAt,updated_at AS updatedAt,
+      archived_at AS archivedAt
+    FROM business_build_mission_development_gates WHERE build_mission_id=?${options.includeArchived ? "" : " AND archived_at IS NULL"} ORDER BY created_at DESC LIMIT 1`).get(buildMissionId);
+  return row ?? undefined;
+}
+
+export function requestBuildMissionDevelopmentStart(database: Database.Database, input: BuildMissionDevelopmentGateInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const mission = getBuildMissionRow(database, input.buildMissionId);
+  if (!mission) throw new Error("Build mission not found");
+  if (mission.status !== "APPROVED") throw new Error("Build mission must be approved before development start can be requested");
+  const assignment = getBuildMissionTeamAssignment(database, input.buildMissionId) as { id: string; projectIntakeId: string | null; assignmentStatus: string; managerUserId: string | null } | undefined;
+  if (!assignment || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(assignment.assignmentStatus)) throw new Error("Finalized team assignment is required before development start");
+  if (!assignment.managerUserId) throw new Error("Manager assignment is required before development start");
+  const intake = getBusinessProjectIntakeByBuildMissionId(database, input.buildMissionId);
+  if (!intake) throw new Error("Linked project intake is required before development start");
+  const activeGate = getBuildMissionDevelopmentGate(database, input.buildMissionId) as { gateStatus: string } | undefined;
+  if (activeGate && ["REQUESTED", "APPROVED"].includes(activeGate.gateStatus)) throw new Error("Active development-start gate already exists");
+  const id = `business-build-mission-dev-gate-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_build_mission_development_gates
+    (id,build_mission_id,project_intake_id,assignment_id,gate_status,requested_by_user_id,approved_by_user_id,blocked_by_user_id,
+      request_note,approval_note,block_reason,requested_at,approved_at,blocked_at,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    input.buildMissionId,
+    intake.id,
+    assignment.id,
+    "REQUESTED",
+    input.actorUserId,
+    null,
+    null,
+    sanitizeOptionalEventText(input.note),
+    null,
+    null,
+    timestamp,
+    null,
+    null,
+    timestamp,
+    timestamp
+  );
+  recordBuildMissionQueueEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "DEVELOPMENT_START_REQUESTED",
+    actorUserId: input.actorUserId,
+    summary: "Development start requested for Build Mission",
+    payload: { note: input.note ?? null, gateId: id },
+    now: timestamp
+  });
+  return getBuildMissionDevelopmentGate(database, input.buildMissionId);
+}
+
+export function approveBuildMissionDevelopmentStart(database: Database.Database, input: BuildMissionDevelopmentGateInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const gate = getBuildMissionDevelopmentGate(database, input.buildMissionId) as { id: string; gateStatus: string } | undefined;
+  if (!gate || gate.gateStatus !== "REQUESTED") throw new Error("Active development-start request not found");
+  database.prepare(`UPDATE business_build_mission_development_gates
+    SET gate_status='APPROVED',approved_by_user_id=?,approval_note=?,approved_at=?,updated_at=?
+    WHERE id=? AND gate_status='REQUESTED' AND archived_at IS NULL`).run(
+    input.actorUserId,
+    sanitizeOptionalEventText(input.note),
+    timestamp,
+    timestamp,
+    gate.id
+  );
+  database.prepare(`UPDATE business_build_mission_team_assignments
+    SET assignment_status='READY_FOR_DEVELOPMENT_APPROVAL',updated_by_user_id=?,updated_at=?
+    WHERE build_mission_id=? AND archived_at IS NULL AND assignment_status!='READY_FOR_DEVELOPMENT_APPROVAL'`).run(input.actorUserId, timestamp, input.buildMissionId);
+  recordBuildMissionQueueEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "DEVELOPMENT_START_APPROVED",
+    actorUserId: input.actorUserId,
+    summary: "Development start approved for Build Mission",
+    payload: { note: input.note ?? null, gateId: gate.id },
+    now: timestamp
+  });
+  return getBuildMissionDevelopmentGate(database, input.buildMissionId);
+}
+
+export function blockBuildMissionDevelopmentStart(database: Database.Database, input: BuildMissionDevelopmentGateInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const reason = normalizeRequiredText("reason", input.reason);
+  const gate = getBuildMissionDevelopmentGate(database, input.buildMissionId) as { id: string; gateStatus: string } | undefined;
+  if (!gate || gate.gateStatus !== "REQUESTED") throw new Error("Active development-start request not found");
+  database.prepare(`UPDATE business_build_mission_development_gates
+    SET gate_status='BLOCKED',blocked_by_user_id=?,block_reason=?,blocked_at=?,updated_at=?
+    WHERE id=? AND gate_status='REQUESTED' AND archived_at IS NULL`).run(
+    input.actorUserId,
+    sanitizeEventText(reason),
+    timestamp,
+    timestamp,
+    gate.id
+  );
+  recordBuildMissionQueueEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "DEVELOPMENT_START_BLOCKED",
+    actorUserId: input.actorUserId,
+    summary: "Development start blocked for Build Mission",
+    payload: { reason, gateId: gate.id },
+    now: timestamp
+  });
+  return getBuildMissionDevelopmentGate(database, input.buildMissionId);
+}
+
 export function recordBuildMissionQueueEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
   const timestamp = input.now ?? new Date().toISOString();
   assertActiveBusinessUser(database, input.actorUserId);
@@ -2500,10 +2648,22 @@ function buildMissionQueueSelectSql(suffix: string) {
       assignment.backend_developer_user_id AS backendDeveloperUserId,assignment.qa_user_id AS qaUserId,
       assignment.production_readiness_user_id AS productionReadinessUserId,assignment.support_owner_user_id AS supportOwnerUserId,
       assignment.finance_owner_user_id AS financeOwnerUserId,assignment.hr_owner_user_id AS hrOwnerUserId,
-      assignment.notes AS assignmentNotes,assignment.updated_at AS assignmentUpdatedAt
+      assignment.notes AS assignmentNotes,assignment.updated_at AS assignmentUpdatedAt,
+      gate.id AS developmentGateId,gate.gate_status AS developmentGateStatus,gate.requested_by_user_id AS developmentGateRequestedByUserId,
+      gate.approved_by_user_id AS developmentGateApprovedByUserId,gate.blocked_by_user_id AS developmentGateBlockedByUserId,
+      gate.request_note AS developmentGateRequestNote,gate.approval_note AS developmentGateApprovalNote,
+      gate.block_reason AS developmentGateBlockReason,gate.requested_at AS developmentGateRequestedAt,
+      gate.approved_at AS developmentGateApprovedAt,gate.blocked_at AS developmentGateBlockedAt,gate.updated_at AS developmentGateUpdatedAt
     FROM build_missions bm
     JOIN business_project_intakes bpi ON bpi.app_studio_build_mission_id=bm.id AND bpi.archived_at IS NULL
     LEFT JOIN business_build_mission_team_assignments assignment ON assignment.build_mission_id=bm.id AND assignment.archived_at IS NULL
+    LEFT JOIN business_build_mission_development_gates gate ON gate.id=(
+      SELECT latest_gate.id
+      FROM business_build_mission_development_gates latest_gate
+      WHERE latest_gate.build_mission_id=bm.id AND latest_gate.archived_at IS NULL
+      ORDER BY latest_gate.updated_at DESC, latest_gate.created_at DESC
+      LIMIT 1
+    )
     ${suffix}`;
 }
 
@@ -2551,6 +2711,20 @@ function mapBuildMissionQueueRow(row: unknown) {
       hrOwnerUserId: value.hrOwnerUserId,
       notes: value.assignmentNotes,
       updatedAt: value.assignmentUpdatedAt
+    } : null,
+    developmentGate: value.developmentGateId ? {
+      id: value.developmentGateId,
+      gateStatus: value.developmentGateStatus,
+      requestedByUserId: value.developmentGateRequestedByUserId,
+      approvedByUserId: value.developmentGateApprovedByUserId,
+      blockedByUserId: value.developmentGateBlockedByUserId,
+      requestNote: value.developmentGateRequestNote,
+      approvalNote: value.developmentGateApprovalNote,
+      blockReason: value.developmentGateBlockReason,
+      requestedAt: value.developmentGateRequestedAt,
+      approvedAt: value.developmentGateApprovedAt,
+      blockedAt: value.developmentGateBlockedAt,
+      updatedAt: value.developmentGateUpdatedAt
     } : null
   };
 }
@@ -2575,6 +2749,11 @@ function assignmentNotesWithWarnings(notes: unknown, qaUserId: unknown, producti
 function sanitizeEventText(value: unknown) {
   const text = normalizeRequiredText("summary", value);
   return looksSensitive(text) ? "[redacted]" : text;
+}
+
+function sanitizeOptionalEventText(value: unknown) {
+  const text = normalizeOptionalText(value);
+  return text ? sanitizeEventText(text) : null;
 }
 
 function getBusinessProjectPrdEventById(database: Database.Database, id: string) {

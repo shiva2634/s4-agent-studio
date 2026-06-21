@@ -1,8 +1,11 @@
 import { type FormEvent, useEffect, useState } from "react";
 import {
   approveBuildMissionQueueItem,
+  approveDevelopmentStart,
+  blockDevelopmentStart,
   listBuildMissionQueue,
   requestBuildMissionQueueChanges,
+  requestDevelopmentStart,
   saveBuildMissionTeamAssignment,
   type BuildMissionQueueItem,
   type BuildMissionTeamAssignmentPayload
@@ -2287,6 +2290,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionQueueError, setBuildMissionQueueError] = useState("");
   const [buildMissionApprovalNote, setBuildMissionApprovalNote] = useState("");
   const [buildMissionChangeReason, setBuildMissionChangeReason] = useState("");
+  const [developmentStartNote, setDevelopmentStartNote] = useState("");
+  const [developmentStartApprovalNote, setDevelopmentStartApprovalNote] = useState("");
+  const [developmentStartBlockReason, setDevelopmentStartBlockReason] = useState("");
   const [buildMissionAssignmentForm, setBuildMissionAssignmentForm] = useState<BuildMissionTeamAssignmentPayload>(emptyBuildMissionAssignmentForm);
 
   useEffect(() => {
@@ -2448,6 +2454,57 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       await refreshBuildMissionQueue(item.buildMissionId);
     } catch (error) {
       setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to save team assignment");
+    } finally {
+      setBuildMissionQueueSaving(false);
+    }
+  };
+  const handleRequestDevelopmentStart = async () => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await requestDevelopmentStart(selectedBuildMission.buildMissionId, developmentStartNote);
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setDevelopmentStartNote("");
+      setBuildMissionQueueMessage("Development-start approval requested. No agents or proposals were started.");
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to request development start");
+    } finally {
+      setBuildMissionQueueSaving(false);
+    }
+  };
+  const handleApproveDevelopmentStart = async () => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await approveDevelopmentStart(selectedBuildMission.buildMissionId, developmentStartApprovalNote);
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setDevelopmentStartApprovalNote("");
+      setBuildMissionQueueMessage("Development-start gate approved. This permits planning only; App Studio execution controls still apply.");
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to approve development start");
+    } finally {
+      setBuildMissionQueueSaving(false);
+    }
+  };
+  const handleBlockDevelopmentStart = async () => {
+    if (!selectedBuildMission) return;
+    setBuildMissionQueueSaving(true);
+    setBuildMissionQueueMessage("");
+    setBuildMissionQueueError("");
+    try {
+      const item = await blockDevelopmentStart(selectedBuildMission.buildMissionId, developmentStartBlockReason);
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionId(item.buildMissionId);
+      setDevelopmentStartBlockReason("");
+      setBuildMissionQueueMessage("Development-start gate blocked. Build Mission and assignment remain preserved.");
+    } catch (error) {
+      setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to block development start");
     } finally {
       setBuildMissionQueueSaving(false);
     }
@@ -3022,6 +3079,38 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         <button type="button" onClick={() => void handleSaveBuildMissionAssignment("ASSIGNED")} disabled={buildMissionQueueSaving || !String(buildMissionAssignmentForm.managerUserId ?? "").trim()}>Finalize Assignment</button>
                       </div>
                       <p>Assignment records responsibility only. It does not create code proposals, start development agents, or approve deployment.</p>
+                    </section>
+                    <section className="development-gate-card">
+                      <div className="business-section-heading">
+                        <span>Development Start Gate</span>
+                        <h2>Approval Before Planning Starts</h2>
+                      </div>
+                      <div className="development-gate-status">
+                        <div><span>Gate status</span><strong>{selectedBuildMission.developmentGate?.gateStatus ?? "Not requested"}</strong></div>
+                        <div><span>Requested by</span><strong>{selectedBuildMission.developmentGate?.requestedByUserId ?? "Pending"}</strong></div>
+                        <div><span>Requested at</span><strong>{selectedBuildMission.developmentGate?.requestedAt ?? "Pending"}</strong></div>
+                        <div><span>Approved by</span><strong>{selectedBuildMission.developmentGate?.approvedByUserId ?? "Pending"}</strong></div>
+                        <div><span>Approved at</span><strong>{selectedBuildMission.developmentGate?.approvedAt ?? "Pending"}</strong></div>
+                        <div><span>Block reason</span><strong>{selectedBuildMission.developmentGate?.blockReason ?? "None"}</strong></div>
+                      </div>
+                      <p>Approval permits development planning only. Agents still require App Studio governed execution controls.</p>
+                      <div className="queue-action-grid">
+                        <section className="queue-action-card">
+                          <h3>Request Development Start</h3>
+                          <label>Request note<textarea value={developmentStartNote} onChange={event => setDevelopmentStartNote(event.target.value)} placeholder="Explain why the approved and assigned mission is ready to start development planning." /></label>
+                          <button type="button" onClick={() => void handleRequestDevelopmentStart()} disabled={buildMissionQueueSaving || selectedBuildMission.status !== "APPROVED" || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedBuildMission.assignment?.assignmentStatus ?? "") || Boolean(selectedBuildMission.developmentGate && ["REQUESTED", "APPROVED"].includes(selectedBuildMission.developmentGate.gateStatus))}>Request Development Start</button>
+                        </section>
+                        <section className="queue-action-card">
+                          <h3>Approve Development Start</h3>
+                          <label>Approval note<textarea value={developmentStartApprovalNote} onChange={event => setDevelopmentStartApprovalNote(event.target.value)} placeholder="Optional approval note for the development-start gate." /></label>
+                          <button type="button" onClick={() => void handleApproveDevelopmentStart()} disabled={buildMissionQueueSaving || selectedBuildMission.developmentGate?.gateStatus !== "REQUESTED"}>Approve Development Start</button>
+                        </section>
+                        <section className="queue-action-card">
+                          <h3>Block Development Start</h3>
+                          <label>Block reason<textarea value={developmentStartBlockReason} onChange={event => setDevelopmentStartBlockReason(event.target.value)} placeholder="Reason is required to block development start." /></label>
+                          <button type="button" onClick={() => void handleBlockDevelopmentStart()} disabled={buildMissionQueueSaving || selectedBuildMission.developmentGate?.gateStatus !== "REQUESTED" || !developmentStartBlockReason.trim()}>Block Development Start</button>
+                        </section>
+                      </div>
                     </section>
                   </article>
                 ) : null}

@@ -2,10 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
 import {
   createOrUpdateBuildMissionTeamAssignment,
+  approveBuildMissionDevelopmentStart,
+  blockBuildMissionDevelopmentStart,
   db,
   getBuildMissionQueueItem,
   listBuildMissionQueueItems,
   recordBuildMissionQueueEvent,
+  requestBuildMissionDevelopmentStart,
   updateBusinessProjectIntake,
   type BusinessBuildMissionTeamAssignmentInput
 } from "@s4/db";
@@ -125,6 +128,66 @@ export function registerBuildMissionQueueRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to save Build Mission team assignment" });
     }
   }));
+
+  app.post("/api/business-control-centre/build-mission-queue/:id/request-development-start", withBusinessPermission("projects.update", async (request, reply, context) => {
+    const buildMissionId = readRouteId(request.params);
+    if (!getBuildMissionQueueItem(db, buildMissionId)) return reply.status(404).send({ error: "Build Mission queue item not found" });
+    try {
+      const timestamp = new Date().toISOString();
+      requestBuildMissionDevelopmentStart(db, {
+        buildMissionId,
+        actorUserId: context.user.id,
+        note: readOptionalNote(request.body, "note"),
+        now: timestamp
+      });
+      audit("DEVELOPMENT_START_REQUESTED", "Development start requested from Business Control Centre queue", {
+        payload: { buildMissionId }
+      });
+      return { item: getBuildMissionQueueItem(db, buildMissionId) };
+    } catch (error) {
+      return reply.status(errorStatus(error)).send({ error: error instanceof Error ? error.message : "Unable to request development start" });
+    }
+  }));
+
+  app.post("/api/business-control-centre/build-mission-queue/:id/approve-development-start", withBusinessPermission("app_studio.approve", async (request, reply, context) => {
+    const buildMissionId = readRouteId(request.params);
+    if (!getBuildMissionQueueItem(db, buildMissionId)) return reply.status(404).send({ error: "Build Mission queue item not found" });
+    try {
+      approveBuildMissionDevelopmentStart(db, {
+        buildMissionId,
+        actorUserId: context.user.id,
+        note: readOptionalNote(request.body, "note"),
+        now: new Date().toISOString()
+      });
+      audit("DEVELOPMENT_START_APPROVED", "Development start approved from Business Control Centre queue", {
+        payload: { buildMissionId }
+      });
+      return { item: getBuildMissionQueueItem(db, buildMissionId) };
+    } catch (error) {
+      return reply.status(errorStatus(error)).send({ error: error instanceof Error ? error.message : "Unable to approve development start" });
+    }
+  }));
+
+  app.post("/api/business-control-centre/build-mission-queue/:id/block-development-start", withBusinessPermission("app_studio.approve", async (request, reply, context) => {
+    const buildMissionId = readRouteId(request.params);
+    if (!getBuildMissionQueueItem(db, buildMissionId)) return reply.status(404).send({ error: "Build Mission queue item not found" });
+    const reason = readRequiredNote(request.body, "reason");
+    if (!reason.ok) return reply.status(400).send({ error: reason.error });
+    try {
+      blockBuildMissionDevelopmentStart(db, {
+        buildMissionId,
+        actorUserId: context.user.id,
+        reason: reason.value,
+        now: new Date().toISOString()
+      });
+      audit("DEVELOPMENT_START_BLOCKED", "Development start blocked from Business Control Centre queue", {
+        payload: { buildMissionId }
+      });
+      return { item: getBuildMissionQueueItem(db, buildMissionId) };
+    } catch (error) {
+      return reply.status(errorStatus(error)).send({ error: error instanceof Error ? error.message : "Unable to block development start" });
+    }
+  }));
 }
 
 function readRouteId(params: unknown) {
@@ -141,6 +204,11 @@ function readRequiredNote(body: unknown, key: "note" | "reason") {
   const value = readBody(body)[key];
   if (typeof value !== "string" || !value.trim()) return { ok: false as const, error: `${key} is required` };
   return { ok: true as const, value: value.trim() };
+}
+
+function readOptionalNote(body: unknown, key: "note" | "reason") {
+  const value = readBody(body)[key];
+  return typeof value === "string" ? value.trim() : null;
 }
 
 function readString(body: RequestBody, key: string) {
@@ -172,4 +240,18 @@ function audit(eventType: string, summary: string, values: { projectId?: string;
   const cleanPayload = values.payload ? JSON.parse(sanitizeForPolicy(db, JSON.stringify(values.payload), { projectId: values.projectId, taskId: values.taskId, source: "build-mission-queue-audit-payload", now: timestamp })) as unknown : null;
   db.prepare("INSERT INTO audit_events (id,project_id,task_id,agent_id,event_type,summary,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)")
     .run(nanoid(), values.projectId ?? null, values.taskId ?? null, values.agentId ?? null, eventType, cleanSummary, cleanPayload ? JSON.stringify(cleanPayload) : null, timestamp);
+}
+
+function errorStatus(error: unknown): 400 | 409 {
+  if (error instanceof Error && (
+    error.message.includes("must be approved") ||
+    error.message.includes("Finalized team assignment") ||
+    error.message.includes("Manager assignment") ||
+    error.message.includes("Linked project intake")
+  )) return 400;
+  if (error instanceof Error && (
+    error.message.includes("already exists") ||
+    error.message.includes("not found")
+  )) return 409;
+  return 400;
 }
