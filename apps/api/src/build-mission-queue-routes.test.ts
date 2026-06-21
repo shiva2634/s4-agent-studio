@@ -484,4 +484,143 @@ describe("Business Control Centre Build Mission queue API", () => {
     });
     assert.equal(external.statusCode, 403);
   });
+
+  it("protects and manages Build Mission execution dashboard records after all gates", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-execution-token");
+    const handoff = await createQueueMission(sessionCookie, "Queue Execution Dashboard Mission");
+
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-execution-dashboard"
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    const tooEarly = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(tooEarly.statusCode, 400);
+
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve before execution dashboard." }
+    });
+    const noAssignment = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(noAssignment.statusCode, 400);
+
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "ASSIGNED", managerUserId: "business-user-shrinika", qaUserId: "business-user-shiva", productionReadinessUserId: "business-user-shiva" }
+    });
+    const noGate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(noGate.statusCode, 400);
+
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Ready for execution dashboard tracking." }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve visibility only." }
+    });
+
+    const listReady = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-execution-dashboard",
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(listReady.statusCode, 200);
+    assert.ok((listReady.json() as { dashboard: Array<{ buildMissionId: string; executionStatus: unknown }> }).dashboard.some(item => item.buildMissionId === handoff.buildMission.id && item.executionStatus === null));
+
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: { ownerUserId: "business-user-shiva" }
+    });
+    assert.equal(created.statusCode, 201);
+    const createdItem = (created.json() as { item: { executionStatus: { executionStatus: string; currentStage: string; ownerUserId: string } } }).item;
+    assert.equal(createdItem.executionStatus.executionStatus, "READY_TO_START");
+    assert.equal(createdItem.executionStatus.currentStage, "DEVELOPMENT_START_APPROVED");
+    assert.equal(createdItem.executionStatus.ownerUserId, "business-user-shiva");
+    assert.ok(!created.body.includes("scrypt$"));
+    assert.ok(!created.body.includes("session_token_hash"));
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: {}
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const invalidProgress = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}`,
+      headers: { cookie: sessionCookie },
+      payload: { executionStatus: "IN_PROGRESS", currentStage: "FRONTEND_BUILD", progressPercent: 101 }
+    });
+    assert.equal(invalidProgress.statusCode, 400);
+
+    const missingBlocker = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}`,
+      headers: { cookie: sessionCookie },
+      payload: { executionStatus: "BLOCKED", currentStage: "INTEGRATION", progressPercent: 40 }
+    });
+    assert.equal(missingBlocker.statusCode, 400);
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        executionStatus: "BLOCKED",
+        currentStage: "INTEGRATION",
+        progressPercent: 40,
+        blockerSummary: "Integration contract pending",
+        nextAction: "Manager review required",
+        ownerUserId: "business-user-shrinika"
+      }
+    });
+    assert.equal(updated.statusCode, 200);
+    const updatedItem = (updated.json() as { item: { executionStatus: { executionStatus: string; blockerSummary: string; progressPercent: number } } }).item;
+    assert.equal(updatedItem.executionStatus.executionStatus, "BLOCKED");
+    assert.equal(updatedItem.executionStatus.blockerSummary, "Integration contract pending");
+    assert.equal(updatedItem.executionStatus.progressPercent, 40);
+
+    const archive = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/archive`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(archive.statusCode, 200);
+    const archivedItem = (archive.json() as { item: { executionStatus: unknown } }).item;
+    assert.equal(archivedItem.executionStatus, null);
+
+    const mission = db.prepare("SELECT task_id AS taskId,status FROM build_missions WHERE id=?").get(handoff.buildMission.id) as { taskId: string; status: string };
+    assert.equal(mission.status, "APPROVED");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
+  });
 });

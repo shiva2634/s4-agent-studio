@@ -36,6 +36,7 @@ import { registerBusinessAuthRoutes } from "./business-auth.js";
 import { registerBusinessControlCentreRoutes } from "./business-control-centre-routes.js";
 import { registerBusinessProjectIntakeRoutes } from "./business-project-intake-routes.js";
 import { registerBuildMissionQueueRoutes } from "./build-mission-queue-routes.js";
+import { registerBuildMissionExecutionRoutes } from "./build-mission-execution-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 
 const app = Fastify({ logger: true });
@@ -87,6 +88,7 @@ registerBusinessAuthRoutes(app);
 registerBusinessControlCentreRoutes(app);
 registerBusinessProjectIntakeRoutes(app);
 registerBuildMissionQueueRoutes(app);
+registerBuildMissionExecutionRoutes(app);
 registerAppStudioInternalRoutes(app);
 
 app.get("/api/providers/status", async () => getProviderStatus());

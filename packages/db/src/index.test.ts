@@ -1221,4 +1221,195 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("tracks Build Mission execution only after all governance gates are satisfied", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        createOrUpdateBuildMissionTeamAssignment,
+        requestBuildMissionDevelopmentStart,
+        approveBuildMissionDevelopmentStart,
+        createBuildMissionExecutionStatus,
+        updateBuildMissionExecutionStatus,
+        archiveBuildMissionExecutionStatus,
+        getBuildMissionExecutionStatus,
+        listBuildMissionExecutionDashboardItems
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='business_build_mission_execution_statuses'").get());
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .run("execution-project", "S4 Agent Studio", "/tmp/execution-project", "ACTIVE", "created", "created");
+      const createMission = (id: string, status: string) => {
+        db.prepare(`INSERT INTO build_missions
+          (id,project_id,task_id,readiness_run_id,target_module,scope,dependencies_json,risk_level,required_specialists_json,
+            scaffold_needs_json,git_mode,acceptance_criteria_json,rollback_plan,status,approval_id,plan_json,created_at,updated_at,approved_at,converted_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id,
+          "execution-project",
+          null,
+          null,
+          "Execution Dashboard",
+          `Execution scope for ${id}`,
+          "[]",
+          "high",
+          "[]",
+          "{}",
+          "WORKTREE",
+          "[]",
+          "Rollback via App Studio governance.",
+          status,
+          null,
+          "{}",
+          "created",
+          "created",
+          status === "APPROVED" ? "approved" : null,
+          null
+        );
+        const intake = createBusinessProjectIntake(db, {
+          projectName: `Execution Intake ${id}`,
+          clientOrCompanyName: "Shrinika Technologies",
+          projectType: "SaaS",
+          priority: "High",
+          projectSource: "Admin instruction",
+          prdStatus: "Approved",
+          shortSummary: "Execution dashboard intake summary.",
+          problemStatement: "Mission needs execution visibility.",
+          coreModulesRequired: "Dashboard, status tracking",
+          keyFeatures: "Manual status controls",
+          finalApprovalOwner: "Manager",
+          workflowStatus: "READY_FOR_APP_STUDIO",
+          actorUserId: "business-user-shrinika",
+          now: "2026-01-06T00:00:00.000Z"
+        }) as { id: string };
+        markBusinessProjectIntakeBuildMissionHandoff(db, {
+          intakeId: intake.id,
+          buildMissionId: id,
+          actorUserId: "business-user-shrinika",
+          now: "2026-01-06T00:01:00.000Z"
+        });
+      };
+
+      createMission("mission-execution-draft", "DRAFT");
+      assert.throws(() => createBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-draft",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:02:00.000Z"
+      }), /must be approved/);
+
+      createMission("mission-execution-ready", "APPROVED");
+      assert.throws(() => createBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:03:00.000Z"
+      }), /Finalized team assignment/);
+      createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "mission-execution-ready",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "business-user-shrinika",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:04:00.000Z"
+      });
+      assert.throws(() => createBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:05:00.000Z"
+      }), /Approved development-start gate/);
+      requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        note: "Request development start before execution dashboard.",
+        now: "2026-01-06T00:06:00.000Z"
+      });
+      approveBuildMissionDevelopmentStart(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shiva",
+        note: "Approved for execution tracking visibility.",
+        now: "2026-01-06T00:07:00.000Z"
+      });
+
+      const created = createBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-06T00:08:00.000Z"
+      }) as { executionStatus: string; currentStage: string; progressPercent: number; ownerUserId: string };
+      assert.equal(created.executionStatus, "READY_TO_START");
+      assert.equal(created.currentStage, "DEVELOPMENT_START_APPROVED");
+      assert.equal(created.progressPercent, 0);
+      assert.equal(created.ownerUserId, "business-user-shiva");
+      assert.throws(() => createBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:09:00.000Z"
+      }), /already exists/);
+      assert.throws(() => updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        executionStatus: "IN_PROGRESS",
+        currentStage: "FRONTEND_BUILD",
+        progressPercent: 101,
+        now: "2026-01-06T00:10:00.000Z"
+      }), /progressPercent/);
+      assert.throws(() => updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        executionStatus: "BLOCKED",
+        currentStage: "FRONTEND_BUILD",
+        progressPercent: 20,
+        now: "2026-01-06T00:11:00.000Z"
+      }), /blockerSummary/);
+      assert.throws(() => updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        executionStatus: "COMPLETED",
+        currentStage: "PRODUCTION_READINESS",
+        progressPercent: 100,
+        now: "2026-01-06T00:12:00.000Z"
+      }), /COMPLETED/);
+      assert.throws(() => updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        executionStatus: "IN_PROGRESS",
+        currentStage: "FRONTEND_BUILD",
+        progressPercent: 25,
+        ownerUserId: "missing-user",
+        now: "2026-01-06T00:13:00.000Z"
+      }), /ownerUserId/);
+
+      const blocked = updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shiva",
+        executionStatus: "BLOCKED",
+        currentStage: "INTEGRATION",
+        progressPercent: 45,
+        blockerSummary: "API contract review pending",
+        nextAction: "Manager to review integration blocker",
+        ownerUserId: "business-user-shrinika",
+        now: "2026-01-06T00:14:00.000Z"
+      }) as { executionStatus: string; blockerSummary: string; nextAction: string; updatedByUserId: string };
+      assert.equal(blocked.executionStatus, "BLOCKED");
+      assert.equal(blocked.blockerSummary, "API contract review pending");
+      assert.equal(blocked.updatedByUserId, "business-user-shiva");
+
+      const dashboard = listBuildMissionExecutionDashboardItems(db) as Array<{ buildMissionId: string; executionStatus: { executionStatus: string } | null }>;
+      assert.ok(dashboard.some(item => item.buildMissionId === "mission-execution-ready" && item.executionStatus?.executionStatus === "BLOCKED"));
+      const archived = archiveBuildMissionExecutionStatus(db, {
+        buildMissionId: "mission-execution-ready",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-06T00:15:00.000Z"
+      }) as { executionStatus: string; archivedAt: string | null };
+      assert.equal(archived.executionStatus, "ARCHIVED");
+      assert.equal(archived.archivedAt, "2026-01-06T00:15:00.000Z");
+      assert.equal(getBuildMissionExecutionStatus(db, "mission-execution-ready"), undefined);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_build_mission_execution_statuses WHERE build_mission_id='mission-execution-ready'").get() as { count: number }).count, 1);
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id='mission-execution-ready' AND event_type='BUILD_MISSION_EXECUTION_STATUS_UPDATED'").get());
+    } finally {
+      db.close();
+    }
+  });
 });

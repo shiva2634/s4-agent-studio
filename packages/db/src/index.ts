@@ -129,6 +129,8 @@ export const businessProjectWorkflowStatuses = [
 ] as const;
 export const businessBuildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_REVIEW", "READY_FOR_DEVELOPMENT_APPROVAL", "CHANGES_REQUESTED", "ARCHIVED"] as const;
 export const businessBuildMissionDevelopmentGateStatuses = ["REQUESTED", "APPROVED", "BLOCKED", "CANCELLED", "ARCHIVED"] as const;
+export const businessBuildMissionExecutionStatuses = ["NOT_STARTED", "READY_TO_START", "IN_PROGRESS", "BLOCKED", "QA_REVIEW", "PRODUCTION_READINESS_REVIEW", "COMPLETED", "CANCELLED", "ARCHIVED"] as const;
+export const businessBuildMissionExecutionStages = ["DEVELOPMENT_START_APPROVED", "REQUIREMENTS_REVIEW", "FRONTEND_BUILD", "BACKEND_BUILD", "INTEGRATION", "TESTING_QA", "PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -138,6 +140,8 @@ type BusinessProjectFinalApprovalOwner = (typeof businessProjectFinalApprovalOwn
 type BusinessProjectWorkflowStatus = (typeof businessProjectWorkflowStatuses)[number];
 type BusinessBuildMissionAssignmentStatus = (typeof businessBuildMissionAssignmentStatuses)[number];
 type BusinessBuildMissionDevelopmentGateStatus = (typeof businessBuildMissionDevelopmentGateStatuses)[number];
+type BusinessBuildMissionExecutionStatus = (typeof businessBuildMissionExecutionStatuses)[number];
+type BusinessBuildMissionExecutionStage = (typeof businessBuildMissionExecutionStages)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -219,6 +223,22 @@ export type BuildMissionDevelopmentGateInput = {
   actorUserId: string;
   note?: string | null;
   reason?: string | null;
+  now?: string;
+};
+
+export type BuildMissionExecutionStatusInput = {
+  buildMissionId: string;
+  actorUserId: string;
+  executionStatus?: BusinessBuildMissionExecutionStatus;
+  currentStage?: BusinessBuildMissionExecutionStage;
+  progressPercent?: number;
+  frontendStatus?: string | null;
+  backendStatus?: string | null;
+  qaStatus?: string | null;
+  productionReadinessStatus?: string | null;
+  blockerSummary?: string | null;
+  nextAction?: string | null;
+  ownerUserId?: string | null;
   now?: string;
 };
 
@@ -840,6 +860,33 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(approved_by_user_id) REFERENCES business_users(id),
       FOREIGN KEY(blocked_by_user_id) REFERENCES business_users(id)
     );
+    CREATE TABLE IF NOT EXISTS business_build_mission_execution_statuses (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      project_intake_id TEXT,
+      assignment_id TEXT,
+      development_gate_id TEXT,
+      execution_status TEXT NOT NULL CHECK(execution_status IN ('NOT_STARTED','READY_TO_START','IN_PROGRESS','BLOCKED','QA_REVIEW','PRODUCTION_READINESS_REVIEW','COMPLETED','CANCELLED','ARCHIVED')),
+      current_stage TEXT NOT NULL CHECK(current_stage IN ('DEVELOPMENT_START_APPROVED','REQUIREMENTS_REVIEW','FRONTEND_BUILD','BACKEND_BUILD','INTEGRATION','TESTING_QA','PRODUCTION_READINESS','DEPLOYMENT_APPROVAL_PENDING','COMPLETED')),
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      frontend_status TEXT,
+      backend_status TEXT,
+      qa_status TEXT,
+      production_readiness_status TEXT,
+      blocker_summary TEXT,
+      next_action TEXT,
+      owner_user_id TEXT,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_intake_id) REFERENCES business_project_intakes(id) ON DELETE SET NULL,
+      FOREIGN KEY(assignment_id) REFERENCES business_build_mission_team_assignments(id) ON DELETE SET NULL,
+      FOREIGN KEY(development_gate_id) REFERENCES business_build_mission_development_gates(id) ON DELETE SET NULL,
+      FOREIGN KEY(owner_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1246,6 +1293,10 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_mission ON business_build_mission_development_gates(build_mission_id, archived_at);
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_status ON business_build_mission_development_gates(gate_status, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_development_gates_active_unique ON business_build_mission_development_gates(build_mission_id) WHERE archived_at IS NULL AND gate_status IN ('REQUESTED','APPROVED');
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_execution_mission ON business_build_mission_execution_statuses(build_mission_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_execution_status ON business_build_mission_execution_statuses(execution_status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_execution_owner ON business_build_mission_execution_statuses(owner_user_id, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_execution_active_unique ON business_build_mission_execution_statuses(build_mission_id) WHERE archived_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -2615,6 +2666,136 @@ export function blockBuildMissionDevelopmentStart(database: Database.Database, i
   return getBuildMissionDevelopmentGate(database, input.buildMissionId);
 }
 
+export function getBuildMissionExecutionStatus(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  const row = database.prepare(`SELECT id,build_mission_id AS buildMissionId,project_intake_id AS projectIntakeId,assignment_id AS assignmentId,
+      development_gate_id AS developmentGateId,execution_status AS executionStatus,current_stage AS currentStage,progress_percent AS progressPercent,
+      frontend_status AS frontendStatus,backend_status AS backendStatus,qa_status AS qaStatus,production_readiness_status AS productionReadinessStatus,
+      blocker_summary AS blockerSummary,next_action AS nextAction,owner_user_id AS ownerUserId,updated_by_user_id AS updatedByUserId,
+      created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM business_build_mission_execution_statuses
+    WHERE build_mission_id=?${options.includeArchived ? "" : " AND archived_at IS NULL"}
+    ORDER BY updated_at DESC,created_at DESC LIMIT 1`).get(buildMissionId);
+  return row ?? undefined;
+}
+
+export function createBuildMissionExecutionStatus(database: Database.Database, input: BuildMissionExecutionStatusInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const readiness = assertBuildMissionExecutionReady(database, input.buildMissionId);
+  const existing = getBuildMissionExecutionStatus(database, input.buildMissionId);
+  if (existing) throw new Error("Active Build Mission execution record already exists");
+  const normalized = normalizeBuildMissionExecutionStatusInput(database, input, {
+    executionStatus: input.executionStatus ?? "READY_TO_START",
+    currentStage: input.currentStage ?? "DEVELOPMENT_START_APPROVED",
+    progressPercent: input.progressPercent ?? 0
+  });
+  const id = `business-build-mission-execution-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_build_mission_execution_statuses
+    (id,build_mission_id,project_intake_id,assignment_id,development_gate_id,execution_status,current_stage,progress_percent,
+      frontend_status,backend_status,qa_status,production_readiness_status,blocker_summary,next_action,owner_user_id,updated_by_user_id,
+      created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    input.buildMissionId,
+    readiness.intake.id,
+    readiness.assignment.id,
+    readiness.gate.id,
+    normalized.executionStatus,
+    normalized.currentStage,
+    normalized.progressPercent,
+    normalized.frontendStatus,
+    normalized.backendStatus,
+    normalized.qaStatus,
+    normalized.productionReadinessStatus,
+    normalized.blockerSummary,
+    normalized.nextAction,
+    normalized.ownerUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  recordBuildMissionExecutionEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_EXECUTION_RECORD_CREATED",
+    summary: "Build Mission execution tracking record created",
+    actorUserId: input.actorUserId,
+    payload: { executionStatus: normalized.executionStatus, currentStage: normalized.currentStage },
+    now: timestamp
+  });
+  return getBuildMissionExecutionStatus(database, input.buildMissionId);
+}
+
+export function updateBuildMissionExecutionStatus(database: Database.Database, input: BuildMissionExecutionStatusInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const existing = getBuildMissionExecutionStatus(database, input.buildMissionId) as { id: string; executionStatus: BusinessBuildMissionExecutionStatus; currentStage: BusinessBuildMissionExecutionStage; progressPercent: number } | undefined;
+  if (!existing) throw new Error("Build Mission execution record not found");
+  const normalized = normalizeBuildMissionExecutionStatusInput(database, input, {
+    executionStatus: input.executionStatus ?? existing.executionStatus,
+    currentStage: input.currentStage ?? existing.currentStage,
+    progressPercent: input.progressPercent ?? existing.progressPercent
+  });
+  database.prepare(`UPDATE business_build_mission_execution_statuses SET
+      execution_status=?,current_stage=?,progress_percent=?,frontend_status=?,backend_status=?,qa_status=?,production_readiness_status=?,
+      blocker_summary=?,next_action=?,owner_user_id=?,updated_by_user_id=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(
+    normalized.executionStatus,
+    normalized.currentStage,
+    normalized.progressPercent,
+    normalized.frontendStatus,
+    normalized.backendStatus,
+    normalized.qaStatus,
+    normalized.productionReadinessStatus,
+    normalized.blockerSummary,
+    normalized.nextAction,
+    normalized.ownerUserId,
+    input.actorUserId,
+    timestamp,
+    existing.id
+  );
+  recordBuildMissionExecutionEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_EXECUTION_STATUS_UPDATED",
+    summary: "Build Mission execution status updated manually",
+    actorUserId: input.actorUserId,
+    payload: { executionStatus: normalized.executionStatus, currentStage: normalized.currentStage, progressPercent: normalized.progressPercent },
+    now: timestamp
+  });
+  return getBuildMissionExecutionStatus(database, input.buildMissionId);
+}
+
+export function archiveBuildMissionExecutionStatus(database: Database.Database, input: { buildMissionId: string; actorUserId: string; now?: string }) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const existing = getBuildMissionExecutionStatus(database, input.buildMissionId) as { id: string } | undefined;
+  if (!existing) throw new Error("Build Mission execution record not found");
+  database.prepare(`UPDATE business_build_mission_execution_statuses
+    SET execution_status='ARCHIVED',archived_at=?,updated_by_user_id=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(timestamp, input.actorUserId, timestamp, existing.id);
+  recordBuildMissionExecutionEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_EXECUTION_RECORD_ARCHIVED",
+    summary: "Build Mission execution tracking record archived",
+    actorUserId: input.actorUserId,
+    payload: { executionStatus: "ARCHIVED" },
+    now: timestamp
+  });
+  return getBuildMissionExecutionStatus(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function listBuildMissionExecutionDashboardItems(database: Database.Database) {
+  return listBuildMissionQueueItems(database).filter((item: any) => isBuildMissionExecutionDashboardEligible(item));
+}
+
+export function getBuildMissionExecutionDashboardItem(database: Database.Database, buildMissionId: string) {
+  const item = getBuildMissionQueueItem(database, buildMissionId) as any;
+  return item && isBuildMissionExecutionDashboardEligible(item) ? item : undefined;
+}
+
+export function recordBuildMissionExecutionEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
+  return recordBuildMissionQueueEvent(database, input);
+}
+
 export function recordBuildMissionQueueEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
   const timestamp = input.now ?? new Date().toISOString();
   assertActiveBusinessUser(database, input.actorUserId);
@@ -2732,7 +2913,13 @@ function buildMissionQueueSelectSql(suffix: string) {
       gate.approved_by_user_id AS developmentGateApprovedByUserId,gate.blocked_by_user_id AS developmentGateBlockedByUserId,
       gate.request_note AS developmentGateRequestNote,gate.approval_note AS developmentGateApprovalNote,
       gate.block_reason AS developmentGateBlockReason,gate.requested_at AS developmentGateRequestedAt,
-      gate.approved_at AS developmentGateApprovedAt,gate.blocked_at AS developmentGateBlockedAt,gate.updated_at AS developmentGateUpdatedAt
+      gate.approved_at AS developmentGateApprovedAt,gate.blocked_at AS developmentGateBlockedAt,gate.updated_at AS developmentGateUpdatedAt,
+      execution.id AS executionId,execution.execution_status AS executionStatus,execution.current_stage AS executionCurrentStage,
+      execution.progress_percent AS executionProgressPercent,execution.frontend_status AS executionFrontendStatus,
+      execution.backend_status AS executionBackendStatus,execution.qa_status AS executionQaStatus,
+      execution.production_readiness_status AS executionProductionReadinessStatus,execution.blocker_summary AS executionBlockerSummary,
+      execution.next_action AS executionNextAction,execution.owner_user_id AS executionOwnerUserId,
+      execution.updated_by_user_id AS executionUpdatedByUserId,execution.created_at AS executionCreatedAt,execution.updated_at AS executionUpdatedAt
     FROM build_missions bm
     JOIN business_project_intakes bpi ON bpi.app_studio_build_mission_id=bm.id AND bpi.archived_at IS NULL
     LEFT JOIN business_build_mission_team_assignments assignment ON assignment.build_mission_id=bm.id AND assignment.archived_at IS NULL
@@ -2743,6 +2930,7 @@ function buildMissionQueueSelectSql(suffix: string) {
       ORDER BY latest_gate.updated_at DESC, latest_gate.created_at DESC
       LIMIT 1
     )
+    LEFT JOIN business_build_mission_execution_statuses execution ON execution.build_mission_id=bm.id AND execution.archived_at IS NULL
     ${suffix}`;
 }
 
@@ -2804,6 +2992,22 @@ function mapBuildMissionQueueRow(row: unknown) {
       approvedAt: value.developmentGateApprovedAt,
       blockedAt: value.developmentGateBlockedAt,
       updatedAt: value.developmentGateUpdatedAt
+    } : null,
+    executionStatus: value.executionId ? {
+      id: value.executionId,
+      executionStatus: value.executionStatus,
+      currentStage: value.executionCurrentStage,
+      progressPercent: value.executionProgressPercent,
+      frontendStatus: value.executionFrontendStatus,
+      backendStatus: value.executionBackendStatus,
+      qaStatus: value.executionQaStatus,
+      productionReadinessStatus: value.executionProductionReadinessStatus,
+      blockerSummary: value.executionBlockerSummary,
+      nextAction: value.executionNextAction,
+      ownerUserId: value.executionOwnerUserId,
+      updatedByUserId: value.executionUpdatedByUserId,
+      createdAt: value.executionCreatedAt,
+      updatedAt: value.executionUpdatedAt
     } : null
   };
 }
@@ -2815,6 +3019,59 @@ function getBusinessProjectIntakeByBuildMissionId(database: Database.Database, b
 
 function getBuildMissionRow(database: Database.Database, buildMissionId: string) {
   return database.prepare("SELECT id,project_id AS projectId,task_id AS taskId,target_module AS targetModule,status,approval_id AS approvalId FROM build_missions WHERE id=?").get(buildMissionId) as { id: string; projectId: string; taskId: string | null; targetModule: string; status: string; approvalId: string | null } | undefined;
+}
+
+function assertBuildMissionExecutionReady(database: Database.Database, buildMissionId: string) {
+  const mission = getBuildMissionRow(database, buildMissionId);
+  if (!mission) throw new Error("Build Mission not found");
+  if (mission.status !== "APPROVED") throw new Error("Build Mission must be approved before execution tracking can be created");
+  const assignment = getBuildMissionTeamAssignment(database, buildMissionId) as { id: string; assignmentStatus: string; managerUserId: string | null } | undefined;
+  if (!assignment || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(assignment.assignmentStatus)) throw new Error("Finalized team assignment is required before execution tracking can be created");
+  if (!assignment.managerUserId) throw new Error("Manager assignment is required before execution tracking can be created");
+  const gate = getBuildMissionDevelopmentGate(database, buildMissionId) as { id: string; gateStatus: string } | undefined;
+  if (!gate || gate.gateStatus !== "APPROVED") throw new Error("Approved development-start gate is required before execution tracking can be created");
+  const intake = getBusinessProjectIntakeByBuildMissionId(database, buildMissionId) as { id: string } | undefined;
+  if (!intake) throw new Error("Linked project intake is required before execution tracking can be created");
+  return { mission, assignment, gate, intake };
+}
+
+function normalizeBuildMissionExecutionStatusInput(database: Database.Database, input: BuildMissionExecutionStatusInput, fallback: { executionStatus: BusinessBuildMissionExecutionStatus; currentStage: BusinessBuildMissionExecutionStage; progressPercent: number }) {
+  const executionStatus = validateEnum("executionStatus", input.executionStatus ?? fallback.executionStatus, businessBuildMissionExecutionStatuses);
+  const currentStage = validateEnum("currentStage", input.currentStage ?? fallback.currentStage, businessBuildMissionExecutionStages);
+  const progressPercent = normalizeProgressPercent(input.progressPercent ?? fallback.progressPercent);
+  const blockerSummary = normalizeOptionalText(input.blockerSummary);
+  const productionReadinessStatus = normalizeOptionalText(input.productionReadinessStatus);
+  if (executionStatus === "BLOCKED" && !blockerSummary) throw new Error("blockerSummary is required when execution status is BLOCKED");
+  if (executionStatus === "COMPLETED" && currentStage !== "COMPLETED" && !String(productionReadinessStatus ?? "").toLowerCase().includes("ready")) {
+    throw new Error("COMPLETED execution status requires currentStage COMPLETED or production readiness status indicating ready");
+  }
+  const ownerUserId = normalizeOptionalText(input.ownerUserId);
+  if (ownerUserId && !getInternalAssignableUser(database, ownerUserId)) throw new Error("ownerUserId must be an active internal assignable user");
+  return {
+    executionStatus,
+    currentStage,
+    progressPercent,
+    frontendStatus: normalizeOptionalText(input.frontendStatus),
+    backendStatus: normalizeOptionalText(input.backendStatus),
+    qaStatus: normalizeOptionalText(input.qaStatus),
+    productionReadinessStatus,
+    blockerSummary,
+    nextAction: normalizeOptionalText(input.nextAction),
+    ownerUserId
+  };
+}
+
+function normalizeProgressPercent(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new Error("progressPercent must be an integer from 0 to 100");
+  return value;
+}
+
+function isBuildMissionExecutionDashboardEligible(item: any) {
+  return Boolean(item?.executionStatus) || (
+    item?.status === "APPROVED" &&
+    ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(item?.assignment?.assignmentStatus ?? "") &&
+    item?.developmentGate?.gateStatus === "APPROVED"
+  );
 }
 
 const buildMissionAssignmentUserFieldLabels = {

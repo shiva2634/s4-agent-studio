@@ -59,6 +59,24 @@ export type BuildMissionQueueItem = {
     blockedAt: string | null;
     updatedAt: string;
   } | null;
+  executionStatus: BuildMissionExecutionStatusSummary | null;
+};
+
+export type BuildMissionExecutionStatusSummary = {
+  id: string;
+  executionStatus: string;
+  currentStage: string;
+  progressPercent: number;
+  frontendStatus: string | null;
+  backendStatus: string | null;
+  qaStatus: string | null;
+  productionReadinessStatus: string | null;
+  blockerSummary: string | null;
+  nextAction: string | null;
+  ownerUserId: string | null;
+  updatedByUserId: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type AssignableUser = {

@@ -12,6 +12,15 @@ import {
   type BuildMissionQueueItem,
   type BuildMissionTeamAssignmentPayload
 } from "./build-mission-queue";
+import {
+  archiveBuildMissionExecutionStatus,
+  buildMissionExecutionStages,
+  buildMissionExecutionStatuses,
+  createBuildMissionExecutionStatus,
+  listBuildMissionExecutionDashboard,
+  updateBuildMissionExecutionStatus,
+  type BuildMissionExecutionPayload
+} from "./build-mission-execution";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
@@ -406,6 +415,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "project-operations", label: "Project Operations", group: "Operations" },
   { id: "create-project-prd", label: "Create Project / PRD", group: "Operations" },
   { id: "build-mission-queue", label: "Build Mission Queue", group: "Operations" },
+  { id: "build-mission-execution", label: "Build Mission Execution", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -610,6 +620,19 @@ const emptyBuildMissionAssignmentForm: BuildMissionTeamAssignmentPayload = {
   financeOwnerUserId: "",
   hrOwnerUserId: "",
   notes: ""
+};
+
+const emptyBuildMissionExecutionForm: BuildMissionExecutionPayload = {
+  executionStatus: "READY_TO_START",
+  currentStage: "DEVELOPMENT_START_APPROVED",
+  progressPercent: 0,
+  frontendStatus: "",
+  backendStatus: "",
+  qaStatus: "",
+  productionReadinessStatus: "",
+  blockerSummary: "",
+  nextAction: "",
+  ownerUserId: ""
 };
 
 const buildMissionAssignmentStatuses = ["DRAFT", "ASSIGNED", "IN_REVIEW", "READY_FOR_DEVELOPMENT_APPROVAL", "CHANGES_REQUESTED"] as const;
@@ -2300,6 +2323,13 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [assignableUsersLoading, setAssignableUsersLoading] = useState(false);
   const [assignableUsersError, setAssignableUsersError] = useState("");
   const [assignmentWarnings, setAssignmentWarnings] = useState<string[]>([]);
+  const [buildMissionExecutionItems, setBuildMissionExecutionItems] = useState<BuildMissionQueueItem[]>([]);
+  const [selectedExecutionBuildMissionId, setSelectedExecutionBuildMissionId] = useState("");
+  const [buildMissionExecutionLoading, setBuildMissionExecutionLoading] = useState(false);
+  const [buildMissionExecutionSaving, setBuildMissionExecutionSaving] = useState(false);
+  const [buildMissionExecutionMessage, setBuildMissionExecutionMessage] = useState("");
+  const [buildMissionExecutionError, setBuildMissionExecutionError] = useState("");
+  const [buildMissionExecutionForm, setBuildMissionExecutionForm] = useState<BuildMissionExecutionPayload>(emptyBuildMissionExecutionForm);
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2357,10 +2387,45 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     };
   }, [activeSection.id]);
 
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-execution") return;
+    let cancelled = false;
+    setBuildMissionExecutionLoading(true);
+    setAssignableUsersLoading(true);
+    setBuildMissionExecutionError("");
+    setAssignableUsersError("");
+    Promise.allSettled([listBuildMissionExecutionDashboard(), listAssignableUsers()])
+      .then(results => {
+        if (cancelled) return;
+        const [dashboardResult, usersResult] = results;
+        if (dashboardResult.status === "fulfilled") {
+          setBuildMissionExecutionItems(dashboardResult.value);
+          setSelectedExecutionBuildMissionId(current => current || dashboardResult.value[0]?.buildMissionId || "");
+        } else {
+          setBuildMissionExecutionError(dashboardResult.reason instanceof Error ? dashboardResult.reason.message : "Unable to load Build Mission execution dashboard");
+        }
+        if (usersResult.status === "fulfilled") {
+          setAssignableUsers(usersResult.value);
+        } else {
+          setAssignableUsersError(usersResult.reason instanceof Error ? usersResult.reason.message : "Unable to load assignable internal users");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBuildMissionExecutionLoading(false);
+          setAssignableUsersLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
   const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
   const selectedBuildMission = buildMissionQueue.find(item => item.buildMissionId === selectedBuildMissionId) ?? buildMissionQueue[0] ?? null;
+  const selectedExecutionItem = buildMissionExecutionItems.find(item => item.buildMissionId === selectedExecutionBuildMissionId) ?? buildMissionExecutionItems[0] ?? null;
 
   useEffect(() => {
     if (!selectedBuildMission) {
@@ -2383,6 +2448,25 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     });
     setAssignmentWarnings([]);
   }, [selectedBuildMission?.buildMissionId, selectedBuildMission?.assignment?.updatedAt]);
+  useEffect(() => {
+    const execution = selectedExecutionItem?.executionStatus;
+    if (!selectedExecutionItem) {
+      setBuildMissionExecutionForm(emptyBuildMissionExecutionForm);
+      return;
+    }
+    setBuildMissionExecutionForm({
+      executionStatus: execution?.executionStatus ?? "READY_TO_START",
+      currentStage: execution?.currentStage ?? "DEVELOPMENT_START_APPROVED",
+      progressPercent: execution?.progressPercent ?? 0,
+      frontendStatus: execution?.frontendStatus ?? "",
+      backendStatus: execution?.backendStatus ?? "",
+      qaStatus: execution?.qaStatus ?? "",
+      productionReadinessStatus: execution?.productionReadinessStatus ?? "",
+      blockerSummary: execution?.blockerSummary ?? "",
+      nextAction: execution?.nextAction ?? "",
+      ownerUserId: execution?.ownerUserId ?? ""
+    });
+  }, [selectedExecutionItem?.buildMissionId, selectedExecutionItem?.executionStatus?.updatedAt]);
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
   };
@@ -2426,6 +2510,14 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     const queue = await listBuildMissionQueue();
     setBuildMissionQueue(queue);
     setSelectedBuildMissionId(selectedId || queue.find(item => item.buildMissionId === selectedBuildMission?.buildMissionId)?.buildMissionId || queue[0]?.buildMissionId || "");
+  };
+  const updateBuildMissionExecutionField = (field: keyof BuildMissionExecutionPayload, value: string | number) => {
+    setBuildMissionExecutionForm(current => ({ ...current, [field]: value }));
+  };
+  const refreshBuildMissionExecutionDashboard = async (selectedId?: string) => {
+    const dashboard = await listBuildMissionExecutionDashboard();
+    setBuildMissionExecutionItems(dashboard);
+    setSelectedExecutionBuildMissionId(selectedId || dashboard.find(item => item.buildMissionId === selectedExecutionItem?.buildMissionId)?.buildMissionId || dashboard[0]?.buildMissionId || "");
   };
   const handleApproveBuildMission = async () => {
     if (!selectedBuildMission) return;
@@ -2531,9 +2623,68 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setBuildMissionQueueSaving(false);
     }
   };
+  const handleCreateBuildMissionExecutionStatus = async () => {
+    if (!selectedExecutionItem) return;
+    setBuildMissionExecutionSaving(true);
+    setBuildMissionExecutionMessage("");
+    setBuildMissionExecutionError("");
+    try {
+      const item = await createBuildMissionExecutionStatus(selectedExecutionItem.buildMissionId);
+      setBuildMissionExecutionItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedExecutionBuildMissionId(item.buildMissionId);
+      setBuildMissionExecutionMessage("Execution record created. No agents, proposals, file changes, or deployment were started.");
+      await refreshBuildMissionExecutionDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionExecutionError(error instanceof Error ? error.message : "Unable to create execution record");
+    } finally {
+      setBuildMissionExecutionSaving(false);
+    }
+  };
+  const handleUpdateBuildMissionExecutionStatus = async () => {
+    if (!selectedExecutionItem) return;
+    setBuildMissionExecutionSaving(true);
+    setBuildMissionExecutionMessage("");
+    setBuildMissionExecutionError("");
+    try {
+      const item = await updateBuildMissionExecutionStatus(selectedExecutionItem.buildMissionId, {
+        ...buildMissionExecutionForm,
+        progressPercent: Number(buildMissionExecutionForm.progressPercent ?? 0)
+      });
+      setBuildMissionExecutionItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedExecutionBuildMissionId(item.buildMissionId);
+      setBuildMissionExecutionMessage("Execution status updated manually.");
+      await refreshBuildMissionExecutionDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionExecutionError(error instanceof Error ? error.message : "Unable to update execution status");
+    } finally {
+      setBuildMissionExecutionSaving(false);
+    }
+  };
+  const handleArchiveBuildMissionExecutionStatus = async () => {
+    if (!selectedExecutionItem) return;
+    setBuildMissionExecutionSaving(true);
+    setBuildMissionExecutionMessage("");
+    setBuildMissionExecutionError("");
+    try {
+      const item = await archiveBuildMissionExecutionStatus(selectedExecutionItem.buildMissionId);
+      setBuildMissionExecutionItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedExecutionBuildMissionId(item.buildMissionId);
+      setBuildMissionExecutionMessage("Execution record archived. Historical database record is preserved.");
+      await refreshBuildMissionExecutionDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionExecutionError(error instanceof Error ? error.message : "Unable to archive execution record");
+    } finally {
+      setBuildMissionExecutionSaving(false);
+    }
+  };
   const assignableUserLabel = (user: AssignableUser) => {
     const roleSummary = user.roleKeys.length ? user.roleKeys.join(", ") : user.title || "internal user";
     return `${user.displayName} (${user.email}) - ${roleSummary}`;
+  };
+  const displayAssignableUser = (userId: string | null | undefined) => {
+    if (!userId) return "Not assigned";
+    const user = assignableUsers.find(entry => entry.id === userId);
+    return user ? `${user.displayName} (${user.email})` : userId;
   };
   const renderAssignableUserSelect = (label: string, field: keyof BuildMissionTeamAssignmentPayload, placeholder: string) => (
     <label>
@@ -3153,6 +3304,109 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                           <label>Block reason<textarea value={developmentStartBlockReason} onChange={event => setDevelopmentStartBlockReason(event.target.value)} placeholder="Reason is required to block development start." /></label>
                           <button type="button" onClick={() => void handleBlockDevelopmentStart()} disabled={buildMissionQueueSaving || selectedBuildMission.developmentGate?.gateStatus !== "REQUESTED" || !developmentStartBlockReason.trim()}>Block Development Start</button>
                         </section>
+                      </div>
+                    </section>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+          ) : null}
+
+          {activeSection.id === "build-mission-execution" ? (
+          <section className="business-section build-mission-execution-section" id="build-mission-execution">
+            <div className="business-section-heading">
+              <span>Real backend execution visibility. No demo Build Missions or fake progress are shown.</span>
+              <h2>Build Mission Execution Dashboard</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>Execution tracking boundary</strong>
+              <p>This dashboard tracks execution only. It does not start agents, create proposals, apply code, deploy, or expose customer access.</p>
+            </div>
+            {buildMissionExecutionMessage ? <p className="success">{buildMissionExecutionMessage}</p> : null}
+            {buildMissionExecutionError ? <p className="error">{buildMissionExecutionError}</p> : null}
+            {assignableUsersError ? <p className="error">{assignableUsersError}</p> : null}
+            {buildMissionExecutionLoading ? <p>Loading Build Mission execution dashboard...</p> : null}
+            {!buildMissionExecutionLoading && !buildMissionExecutionItems.length ? <p>No Build Missions are ready for execution yet.</p> : null}
+            {buildMissionExecutionItems.length ? (
+              <div className="build-mission-queue-layout">
+                <div className="build-mission-queue-list">
+                  {buildMissionExecutionItems.map(item => (
+                    <button type="button" className={item.buildMissionId === selectedExecutionItem?.buildMissionId ? "active" : ""} key={item.buildMissionId} onClick={() => setSelectedExecutionBuildMissionId(item.buildMissionId)}>
+                      <strong>{item.intake.projectName}</strong>
+                      <span>{item.targetModule} / {item.riskLevel}</span>
+                      <small>{item.executionStatus?.executionStatus ?? "Execution record not created yet"} / {item.developmentGate?.gateStatus ?? "Gate pending"}</small>
+                    </button>
+                  ))}
+                </div>
+                {selectedExecutionItem ? (
+                  <article className="build-mission-queue-detail">
+                    <div className="build-mission-detail-header">
+                      <div>
+                        <span>Build Mission</span>
+                        <h3>{selectedExecutionItem.intake.projectName}</h3>
+                      </div>
+                      <strong className={`assignment-risk ${selectedExecutionItem.riskLevel}`}>{selectedExecutionItem.riskLevel} risk</strong>
+                    </div>
+                    <div className="recent-intake-meta">
+                      <div><span>Mission status</span><strong>{selectedExecutionItem.status}</strong></div>
+                      <div><span>Execution status</span><strong>{selectedExecutionItem.executionStatus?.executionStatus ?? "Not created"}</strong></div>
+                      <div><span>Current stage</span><strong>{selectedExecutionItem.executionStatus?.currentStage ?? "Pending record"}</strong></div>
+                      <div><span>Progress</span><strong>{selectedExecutionItem.executionStatus ? `${selectedExecutionItem.executionStatus.progressPercent}%` : "0%"}</strong></div>
+                      <div><span>Owner</span><strong>{displayAssignableUser(selectedExecutionItem.executionStatus?.ownerUserId)}</strong></div>
+                      <div><span>Updated</span><strong>{selectedExecutionItem.executionStatus?.updatedAt ?? "Not updated"}</strong></div>
+                    </div>
+                    <div className="execution-readiness-grid">
+                      {([
+                        ["Build Mission approved", selectedExecutionItem.status === "APPROVED"],
+                        ["Team assigned", ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedExecutionItem.assignment?.assignmentStatus ?? "")],
+                        ["Development start approved", selectedExecutionItem.developmentGate?.gateStatus === "APPROVED"],
+                        ["Execution record created", Boolean(selectedExecutionItem.executionStatus)]
+                      ] as Array<[string, boolean]>).map(([label, ready]) => (
+                        <div className={ready ? "ready" : "pending"} key={String(label)}>
+                          <span>{ready ? "Ready" : "Pending"}</span>
+                          <strong>{label}</strong>
+                        </div>
+                      ))}
+                    </div>
+                    <section className="queue-assignment-card">
+                      <div className="business-section-heading">
+                        <span>Assigned internal team</span>
+                        <h2>Execution Responsibility</h2>
+                      </div>
+                      <div className="recent-intake-meta">
+                        <div><span>Manager</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.managerUserId)}</strong></div>
+                        <div><span>Team Leader</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.teamLeaderUserId)}</strong></div>
+                        <div><span>Frontend</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.frontendDeveloperUserId)}</strong></div>
+                        <div><span>Backend</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.backendDeveloperUserId)}</strong></div>
+                        <div><span>QA</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.qaUserId)}</strong></div>
+                        <div><span>Production Readiness</span><strong>{displayAssignableUser(selectedExecutionItem.assignment?.productionReadinessUserId)}</strong></div>
+                      </div>
+                    </section>
+                    <section className="development-gate-card">
+                      <div className="business-section-heading">
+                        <span>Manual status controls</span>
+                        <h2>Execution Record</h2>
+                      </div>
+                      {!selectedExecutionItem.executionStatus ? <p>Execution record not created yet.</p> : null}
+                      <div className="project-prd-actions">
+                        <button type="button" onClick={() => void handleCreateBuildMissionExecutionStatus()} disabled={buildMissionExecutionSaving || Boolean(selectedExecutionItem.executionStatus) || selectedExecutionItem.status !== "APPROVED" || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedExecutionItem.assignment?.assignmentStatus ?? "") || selectedExecutionItem.developmentGate?.gateStatus !== "APPROVED"}>Create Execution Record</button>
+                      </div>
+                      <div className="queue-assignment-grid">
+                        <label>Execution status<select value={buildMissionExecutionForm.executionStatus ?? "READY_TO_START"} onChange={event => updateBuildMissionExecutionField("executionStatus", event.target.value)} disabled={!selectedExecutionItem.executionStatus}>{buildMissionExecutionStatuses.map(status => <option key={status}>{status}</option>)}</select></label>
+                        <label>Current stage<select value={buildMissionExecutionForm.currentStage ?? "DEVELOPMENT_START_APPROVED"} onChange={event => updateBuildMissionExecutionField("currentStage", event.target.value)} disabled={!selectedExecutionItem.executionStatus}>{buildMissionExecutionStages.map(stage => <option key={stage}>{stage}</option>)}</select></label>
+                        <label>Progress percent<input type="number" min={0} max={100} value={Number(buildMissionExecutionForm.progressPercent ?? 0)} onChange={event => updateBuildMissionExecutionField("progressPercent", Number(event.target.value))} disabled={!selectedExecutionItem.executionStatus} /></label>
+                        <label>Owner<select value={String(buildMissionExecutionForm.ownerUserId ?? "")} onChange={event => updateBuildMissionExecutionField("ownerUserId", event.target.value)} disabled={!selectedExecutionItem.executionStatus || assignableUsersLoading}><option value="">No owner selected</option>{assignableUsers.map(user => <option key={`execution-owner-${user.id}`} value={user.id}>{assignableUserLabel(user)}</option>)}</select></label>
+                        <label>Frontend status<input value={buildMissionExecutionForm.frontendStatus ?? ""} onChange={event => updateBuildMissionExecutionField("frontendStatus", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Backend connected status only" /></label>
+                        <label>Backend status<input value={buildMissionExecutionForm.backendStatus ?? ""} onChange={event => updateBuildMissionExecutionField("backendStatus", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Backend connected status only" /></label>
+                        <label>QA status<input value={buildMissionExecutionForm.qaStatus ?? ""} onChange={event => updateBuildMissionExecutionField("qaStatus", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Backend connected status only" /></label>
+                        <label>Production readiness status<input value={buildMissionExecutionForm.productionReadinessStatus ?? ""} onChange={event => updateBuildMissionExecutionField("productionReadinessStatus", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Backend connected status only" /></label>
+                        <label className="wide">Blocker summary<textarea value={buildMissionExecutionForm.blockerSummary ?? ""} onChange={event => updateBuildMissionExecutionField("blockerSummary", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Required when execution status is BLOCKED." /></label>
+                        <label className="wide">Next action<textarea value={buildMissionExecutionForm.nextAction ?? ""} onChange={event => updateBuildMissionExecutionField("nextAction", event.target.value)} disabled={!selectedExecutionItem.executionStatus} placeholder="Manual next action for manager/team review." /></label>
+                      </div>
+                      <div className="project-prd-actions">
+                        <button type="button" onClick={() => void handleUpdateBuildMissionExecutionStatus()} disabled={buildMissionExecutionSaving || !selectedExecutionItem.executionStatus}>Update Execution Status</button>
+                        <button type="button" onClick={() => void handleArchiveBuildMissionExecutionStatus()} disabled={buildMissionExecutionSaving || !selectedExecutionItem.executionStatus}>Archive Execution Record</button>
                       </div>
                     </section>
                   </article>
