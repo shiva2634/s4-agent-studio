@@ -1,4 +1,5 @@
 import { getInternalAuthApiBase } from "./internal-auth";
+import type { BuildMissionProductionReadinessChecklistSummary } from "./build-mission-production-readiness";
 
 export type BuildMissionQaChecklistStatus = "DRAFT" | "IN_PROGRESS" | "FIXES_REQUESTED" | "READY_FOR_APPROVAL" | "APPROVED" | "REJECTED" | "ARCHIVED";
 
@@ -63,6 +64,7 @@ export type BuildMissionQueueItem = {
   } | null;
   executionStatus: BuildMissionExecutionStatusSummary | null;
   qaChecklist: BuildMissionQaChecklistSummary | null;
+  productionReadinessChecklist: BuildMissionProductionReadinessChecklistSummary | null;
 };
 
 export type BuildMissionExecutionStatusSummary = {

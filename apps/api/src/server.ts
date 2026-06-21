@@ -38,6 +38,7 @@ import { registerBusinessProjectIntakeRoutes } from "./business-project-intake-r
 import { registerBuildMissionQueueRoutes } from "./build-mission-queue-routes.js";
 import { registerBuildMissionExecutionRoutes } from "./build-mission-execution-routes.js";
 import { registerBuildMissionQaRoutes } from "./build-mission-qa-routes.js";
+import { registerBuildMissionProductionReadinessRoutes } from "./build-mission-production-readiness-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 
 const app = Fastify({ logger: true });
@@ -91,6 +92,7 @@ registerBusinessProjectIntakeRoutes(app);
 registerBuildMissionQueueRoutes(app);
 registerBuildMissionExecutionRoutes(app);
 registerBuildMissionQaRoutes(app);
+registerBuildMissionProductionReadinessRoutes(app);
 registerAppStudioInternalRoutes(app);
 
 app.get("/api/providers/status", async () => getProviderStatus());

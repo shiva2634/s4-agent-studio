@@ -39,6 +39,24 @@ import {
   type BuildMissionQaDashboardItem,
   type BuildMissionQaDetailItem
 } from "./build-mission-qa";
+import {
+  archiveBuildMissionProductionReadiness,
+  approveBuildMissionProductionReadiness,
+  buildMissionProductionReadinessChecklistItemStatuses,
+  buildMissionProductionReadinessChecklistSeverities,
+  buildMissionProductionReadinessChecklistStatuses,
+  createBuildMissionProductionReadinessChecklist,
+  getBuildMissionProductionReadinessDashboardItem,
+  listBuildMissionProductionReadinessDashboard,
+  rejectBuildMissionProductionReadiness,
+  updateBuildMissionProductionReadinessItem,
+  updateBuildMissionProductionReadinessStatus,
+  type BuildMissionProductionReadinessChecklistStatus,
+  type BuildMissionProductionReadinessChecklistItemStatus,
+  type BuildMissionProductionReadinessChecklistSeverity,
+  type BuildMissionProductionReadinessDashboardItem,
+  type BuildMissionProductionReadinessDetailItem
+} from "./build-mission-production-readiness";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
@@ -435,6 +453,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "build-mission-queue", label: "Build Mission Queue", group: "Operations" },
   { id: "build-mission-execution", label: "Build Mission Execution", group: "Operations" },
   { id: "build-mission-qa", label: "QA / Testing Approval", group: "Operations" },
+  { id: "build-mission-production-readiness", label: "Production Readiness", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -2327,6 +2346,19 @@ type QaChecklistItemDraft = {
   blockerReason: string;
 };
 
+type ProductionReadinessChecklistStatusForm = {
+  readinessStatus: BuildMissionProductionReadinessChecklistStatus;
+  note: string;
+  readinessOwnerUserId: string;
+};
+
+type ProductionReadinessChecklistItemDraft = {
+  itemStatus: BuildMissionProductionReadinessChecklistItemStatus;
+  severity: BuildMissionProductionReadinessChecklistSeverity;
+  evidenceNote: string;
+  blockerReason: string;
+};
+
 export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; onLogout: () => Promise<void> }) {
   const { theme, setTheme } = useStoredAppTheme();
   const [activeSectionId, setActiveSectionId] = useState("company-dashboard");
@@ -2371,6 +2403,15 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionQaError, setBuildMissionQaError] = useState("");
   const [buildMissionQaStatusForm, setBuildMissionQaStatusForm] = useState<QaChecklistStatusForm>({ qaStatus: "DRAFT", note: "", qaOwnerUserId: "" });
   const [buildMissionQaItemDrafts, setBuildMissionQaItemDrafts] = useState<Record<string, QaChecklistItemDraft>>({});
+  const [buildMissionProductionReadinessItems, setBuildMissionProductionReadinessItems] = useState<BuildMissionProductionReadinessDashboardItem[]>([]);
+  const [selectedBuildMissionProductionReadinessId, setSelectedBuildMissionProductionReadinessId] = useState("");
+  const [selectedBuildMissionProductionReadinessDetail, setSelectedBuildMissionProductionReadinessDetail] = useState<BuildMissionProductionReadinessDetailItem | null>(null);
+  const [buildMissionProductionReadinessLoading, setBuildMissionProductionReadinessLoading] = useState(false);
+  const [buildMissionProductionReadinessSaving, setBuildMissionProductionReadinessSaving] = useState(false);
+  const [buildMissionProductionReadinessMessage, setBuildMissionProductionReadinessMessage] = useState("");
+  const [buildMissionProductionReadinessError, setBuildMissionProductionReadinessError] = useState("");
+  const [buildMissionProductionReadinessStatusForm, setBuildMissionProductionReadinessStatusForm] = useState<ProductionReadinessChecklistStatusForm>({ readinessStatus: "DRAFT", note: "", readinessOwnerUserId: "" });
+  const [buildMissionProductionReadinessItemDrafts, setBuildMissionProductionReadinessItemDrafts] = useState<Record<string, ProductionReadinessChecklistItemDraft>>({});
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2516,6 +2557,60 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     };
   }, [activeSection.id, selectedBuildMissionQaId]);
 
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-production-readiness") return;
+    let cancelled = false;
+    setBuildMissionProductionReadinessLoading(true);
+    setAssignableUsersLoading(true);
+    setBuildMissionProductionReadinessError("");
+    setAssignableUsersError("");
+    Promise.allSettled([listBuildMissionProductionReadinessDashboard(), listAssignableUsers()])
+      .then(results => {
+        if (cancelled) return;
+        const [dashboardResult, usersResult] = results;
+        if (dashboardResult.status === "fulfilled") {
+          setBuildMissionProductionReadinessItems(dashboardResult.value);
+          setSelectedBuildMissionProductionReadinessId(current => current || dashboardResult.value[0]?.buildMissionId || "");
+        } else {
+          setBuildMissionProductionReadinessError(dashboardResult.reason instanceof Error ? dashboardResult.reason.message : "Unable to load production readiness dashboard");
+        }
+        if (usersResult.status === "fulfilled") {
+          setAssignableUsers(usersResult.value);
+        } else {
+          setAssignableUsersError(usersResult.reason instanceof Error ? usersResult.reason.message : "Unable to load assignable internal users");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBuildMissionProductionReadinessLoading(false);
+          setAssignableUsersLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-production-readiness" || !selectedBuildMissionProductionReadinessId) return;
+    let cancelled = false;
+    setBuildMissionProductionReadinessLoading(true);
+    setBuildMissionProductionReadinessError("");
+    getBuildMissionProductionReadinessDashboardItem(selectedBuildMissionProductionReadinessId)
+      .then(item => {
+        if (!cancelled) setSelectedBuildMissionProductionReadinessDetail(item);
+      })
+      .catch(error => {
+        if (!cancelled) setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to load production readiness dashboard item");
+      })
+      .finally(() => {
+        if (!cancelled) setBuildMissionProductionReadinessLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id, selectedBuildMissionProductionReadinessId]);
+
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
   const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
@@ -2524,6 +2619,10 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const selectedQaSummaryItem = selectedBuildMissionQaDetail ?? buildMissionQaItems.find(item => item.buildMissionId === selectedBuildMissionQaId) ?? null;
   const selectedQaChecklist = selectedBuildMissionQaDetail?.qaChecklist ?? null;
   const selectedQaChecklistTerminal = Boolean(selectedQaChecklist && ["APPROVED", "REJECTED", "ARCHIVED"].includes(selectedQaChecklist.qaStatus));
+  const selectedBuildMissionProductionReadinessDetailResolved = selectedBuildMissionProductionReadinessDetail ?? buildMissionProductionReadinessItems.find(item => item.buildMissionId === selectedBuildMissionProductionReadinessId) ?? null;
+  const selectedBuildMissionProductionReadinessChecklistSummary = selectedBuildMissionProductionReadinessDetailResolved?.productionReadinessChecklist ?? null;
+  const selectedBuildMissionProductionReadinessChecklist = selectedBuildMissionProductionReadinessDetail?.productionReadinessChecklist ?? null;
+  const selectedBuildMissionProductionReadinessChecklistTerminal = Boolean(selectedBuildMissionProductionReadinessChecklistSummary && ["APPROVED", "REJECTED", "ARCHIVED"].includes(selectedBuildMissionProductionReadinessChecklistSummary.readinessStatus));
 
   useEffect(() => {
     if (!selectedBuildMission) {
@@ -2588,6 +2687,30 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     }
     setBuildMissionQaItemDrafts(drafts);
   }, [selectedBuildMissionQaDetail?.buildMissionId, selectedBuildMissionQaDetail?.qaChecklist?.updatedAt]);
+
+  useEffect(() => {
+    const checklist = selectedBuildMissionProductionReadinessChecklist;
+    if (!selectedBuildMissionProductionReadinessDetailResolved || !checklist) {
+      setBuildMissionProductionReadinessStatusForm({ readinessStatus: "DRAFT", note: "", readinessOwnerUserId: "" });
+      setBuildMissionProductionReadinessItemDrafts({});
+      return;
+    }
+    setBuildMissionProductionReadinessStatusForm({
+      readinessStatus: checklist.readinessStatus,
+      note: checklist.approvalNote ?? checklist.rejectionReason ?? "",
+      readinessOwnerUserId: checklist.readinessOwnerUserId ?? ""
+    });
+    const drafts: Record<string, ProductionReadinessChecklistItemDraft> = {};
+    for (const item of checklist.items) {
+      drafts[item.id] = {
+        itemStatus: item.itemStatus,
+        severity: item.severity,
+        evidenceNote: item.evidenceNote ?? "",
+        blockerReason: item.blockerReason ?? ""
+      };
+    }
+    setBuildMissionProductionReadinessItemDrafts(drafts);
+  }, [selectedBuildMissionProductionReadinessDetail?.buildMissionId, selectedBuildMissionProductionReadinessChecklist?.updatedAt]);
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
   };
@@ -2940,6 +3063,150 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setBuildMissionQaError(error instanceof Error ? error.message : "Unable to archive QA checklist");
     } finally {
       setBuildMissionQaSaving(false);
+    }
+  };
+  const refreshBuildMissionProductionReadinessDashboard = async (selectedId?: string) => {
+    const dashboard = await listBuildMissionProductionReadinessDashboard();
+    setBuildMissionProductionReadinessItems(dashboard);
+    setSelectedBuildMissionProductionReadinessId(selectedId || dashboard.find(item => item.buildMissionId === selectedBuildMissionProductionReadinessDetailResolved?.buildMissionId)?.buildMissionId || dashboard[0]?.buildMissionId || "");
+  };
+  const updateBuildMissionProductionReadinessStatusField = (field: keyof ProductionReadinessChecklistStatusForm, value: string) => {
+    setBuildMissionProductionReadinessStatusForm(current => ({ ...current, [field]: value } as ProductionReadinessChecklistStatusForm));
+  };
+  const updateBuildMissionProductionReadinessItemDraftField = (itemId: string, field: keyof ProductionReadinessChecklistItemDraft, value: string) => {
+    setBuildMissionProductionReadinessItemDrafts(current => ({
+      ...current,
+      [itemId]: {
+        itemStatus: current[itemId]?.itemStatus ?? "NOT_CHECKED",
+        severity: current[itemId]?.severity ?? "MEDIUM",
+        evidenceNote: current[itemId]?.evidenceNote ?? "",
+        blockerReason: current[itemId]?.blockerReason ?? "",
+        [field]: value
+      } as ProductionReadinessChecklistItemDraft
+    }));
+  };
+  const handleCreateBuildMissionProductionReadinessChecklist = async () => {
+    if (!selectedBuildMissionProductionReadinessDetailResolved) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    try {
+      const item = await createBuildMissionProductionReadinessChecklist(selectedBuildMissionProductionReadinessDetailResolved.buildMissionId, {
+        readinessOwnerUserId: buildMissionProductionReadinessStatusForm.readinessOwnerUserId || null
+      });
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist created. Deployment approval remains separate.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to create production readiness checklist");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const handleUpdateBuildMissionProductionReadinessChecklistStatus = async () => {
+    if (!selectedBuildMissionProductionReadinessChecklistSummary) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    try {
+      const item = await updateBuildMissionProductionReadinessStatus(selectedBuildMissionProductionReadinessChecklistSummary.buildMissionId, {
+        readinessStatus: buildMissionProductionReadinessStatusForm.readinessStatus,
+        note: buildMissionProductionReadinessStatusForm.note,
+        readinessOwnerUserId: buildMissionProductionReadinessStatusForm.readinessOwnerUserId || null
+      });
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist status updated.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to update production readiness checklist status");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const handleUpdateBuildMissionProductionReadinessChecklistItem = async (itemId: string) => {
+    if (!selectedBuildMissionProductionReadinessChecklistSummary) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    const draft = buildMissionProductionReadinessItemDrafts[itemId];
+    if (!draft) {
+      setBuildMissionProductionReadinessSaving(false);
+      return;
+    }
+    try {
+      const item = await updateBuildMissionProductionReadinessItem(selectedBuildMissionProductionReadinessChecklistSummary.buildMissionId, itemId, {
+        itemStatus: draft.itemStatus,
+        severity: draft.severity,
+        evidenceNote: draft.evidenceNote,
+        blockerReason: draft.blockerReason
+      });
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist item updated.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to update production readiness checklist item");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const handleApproveBuildMissionProductionReadinessChecklist = async () => {
+    if (!selectedBuildMissionProductionReadinessChecklistSummary) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    try {
+      const item = await approveBuildMissionProductionReadiness(selectedBuildMissionProductionReadinessChecklistSummary.buildMissionId, buildMissionProductionReadinessStatusForm.note);
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist approved. Deployment approval remains separate.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to approve production readiness checklist");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const handleRejectBuildMissionProductionReadinessChecklist = async () => {
+    if (!selectedBuildMissionProductionReadinessChecklistSummary) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    try {
+      const item = await rejectBuildMissionProductionReadiness(selectedBuildMissionProductionReadinessChecklistSummary.buildMissionId, buildMissionProductionReadinessStatusForm.note);
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist rejected. Deployment approval remains separate.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to reject production readiness checklist");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const handleArchiveBuildMissionProductionReadinessChecklist = async () => {
+    if (!selectedBuildMissionProductionReadinessChecklistSummary) return;
+    setBuildMissionProductionReadinessSaving(true);
+    setBuildMissionProductionReadinessMessage("");
+    setBuildMissionProductionReadinessError("");
+    try {
+      const item = await archiveBuildMissionProductionReadiness(selectedBuildMissionProductionReadinessChecklistSummary.buildMissionId);
+      setBuildMissionProductionReadinessItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionProductionReadinessId(item.buildMissionId);
+      setSelectedBuildMissionProductionReadinessDetail(item);
+      setBuildMissionProductionReadinessMessage("Production readiness checklist archived. History is preserved.");
+      await refreshBuildMissionProductionReadinessDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to archive production readiness checklist");
+    } finally {
+      setBuildMissionProductionReadinessSaving(false);
     }
   };
   const assignableUserLabel = (user: AssignableUser) => {
@@ -3653,6 +3920,25 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         </>
                       ) : <p>QA checklist not created yet.</p>}
                     </section>
+                    <section className="qa-summary-panel">
+                      <div className="business-section-heading">
+                        <span>Production readiness summary</span>
+                        <h2>Release Readiness</h2>
+                      </div>
+                      {selectedExecutionItem.productionReadinessChecklist ? (
+                        <>
+                          <div className="recent-intake-meta">
+                            <div><span>Readiness status</span><strong>{selectedExecutionItem.productionReadinessChecklist.readinessStatus}</strong></div>
+                            <div><span>Checklist items</span><strong>{selectedExecutionItem.productionReadinessChecklist.itemCount}</strong></div>
+                            <div><span>Passed</span><strong>{selectedExecutionItem.productionReadinessChecklist.passCount}</strong></div>
+                            <div><span>Failures</span><strong>{selectedExecutionItem.productionReadinessChecklist.failCount}</strong></div>
+                            <div><span>Blocked</span><strong>{selectedExecutionItem.productionReadinessChecklist.blockedCount}</strong></div>
+                            <div><span>Ready for approval</span><strong>{selectedExecutionItem.productionReadinessChecklist.readyForApproval ? "Yes" : "No"}</strong></div>
+                          </div>
+                          <p>Production readiness approval does not deploy. Deployment approval remains a separate Step 32 gate.</p>
+                        </>
+                      ) : <p>Production readiness checklist not created yet.</p>}
+                    </section>
                     <section className="queue-assignment-card">
                       <div className="business-section-heading">
                         <span>Assigned internal team</span>
@@ -3844,6 +4130,171 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                           })}
                         </div>
                       ) : null}
+                    </section>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+          ) : null}
+
+          {activeSection.id === "build-mission-production-readiness" ? (
+          <section className="business-section build-mission-production-readiness-section" id="build-mission-production-readiness">
+            <div className="business-section-heading">
+              <span>Real production-readiness records only. No fake missions or sample progress are shown.</span>
+              <h2>Production Readiness Checklist</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>Production readiness boundary</strong>
+              <p>Production readiness approval does not deploy. Deployment approval remains a separate Step 32 gate.</p>
+            </div>
+            {buildMissionProductionReadinessMessage ? <p className="success">{buildMissionProductionReadinessMessage}</p> : null}
+            {buildMissionProductionReadinessError ? <p className="error">{buildMissionProductionReadinessError}</p> : null}
+            {assignableUsersError ? <p className="error">{assignableUsersError}</p> : null}
+            {buildMissionProductionReadinessLoading ? <p>Loading production readiness dashboard...</p> : null}
+            {!buildMissionProductionReadinessLoading && !buildMissionProductionReadinessItems.length ? <p>No Build Missions are ready for production readiness review yet.</p> : null}
+            {buildMissionProductionReadinessItems.length ? (
+              <div className="build-mission-queue-layout">
+                <div className="build-mission-queue-list">
+                  {buildMissionProductionReadinessItems.map(item => (
+                    <button type="button" className={item.buildMissionId === selectedBuildMissionProductionReadinessDetailResolved?.buildMissionId ? "active" : ""} key={item.buildMissionId} onClick={() => setSelectedBuildMissionProductionReadinessId(item.buildMissionId)}>
+                      <strong>{item.intake.projectName}</strong>
+                      <span>{item.targetModule} / {item.riskLevel}</span>
+                      <small>{item.productionReadinessChecklist?.readinessStatus ?? "Production readiness checklist not created yet"} / {item.executionStatus?.currentStage ?? "Execution pending"}</small>
+                    </button>
+                  ))}
+                </div>
+                {selectedBuildMissionProductionReadinessDetailResolved ? (
+                  <article className="build-mission-queue-detail">
+                    <div className="build-mission-detail-header">
+                      <div>
+                        <span>Build Mission</span>
+                        <h3>{selectedBuildMissionProductionReadinessDetailResolved.intake.projectName}</h3>
+                      </div>
+                      <strong className={`assignment-risk ${selectedBuildMissionProductionReadinessDetailResolved.riskLevel}`}>{selectedBuildMissionProductionReadinessDetailResolved.riskLevel} risk</strong>
+                    </div>
+                    <div className="recent-intake-meta">
+                      <div><span>Mission status</span><strong>{selectedBuildMissionProductionReadinessDetailResolved.status}</strong></div>
+                      <div><span>Execution status</span><strong>{selectedBuildMissionProductionReadinessDetailResolved.executionStatus?.executionStatus ?? "Not created"}</strong></div>
+                      <div><span>Current stage</span><strong>{selectedBuildMissionProductionReadinessDetailResolved.executionStatus?.currentStage ?? "Pending record"}</strong></div>
+                      <div><span>QA checklist</span><strong>{selectedBuildMissionProductionReadinessDetailResolved.qaChecklist?.qaStatus ?? "Not created"}</strong></div>
+                      <div><span>Production readiness</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary?.readinessStatus ?? "Not created"}</strong></div>
+                      <div><span>Readiness owner</span><strong>{displayAssignableUser(selectedBuildMissionProductionReadinessChecklistSummary?.readinessOwnerUserId ?? null)}</strong></div>
+                      <div><span>Updated</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary?.updatedAt ?? selectedBuildMissionProductionReadinessDetailResolved.executionStatus?.updatedAt ?? "Not updated"}</strong></div>
+                    </div>
+                    <div className="execution-readiness-grid">
+                      {([
+                        ["Build Mission approved", selectedBuildMissionProductionReadinessDetailResolved.status === "APPROVED"],
+                        ["Team assigned", ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedBuildMissionProductionReadinessDetailResolved.assignment?.assignmentStatus ?? "")],
+                        ["Development start approved", selectedBuildMissionProductionReadinessDetailResolved.developmentGate?.gateStatus === "APPROVED"],
+                        ["Execution record exists", Boolean(selectedBuildMissionProductionReadinessDetailResolved.executionStatus)],
+                        ["QA checklist approved", selectedBuildMissionProductionReadinessDetailResolved.qaChecklist?.qaStatus === "APPROVED"],
+                        ["Production readiness checklist created", Boolean(selectedBuildMissionProductionReadinessChecklistSummary)],
+                        ["Execution in readiness-ready stage", Boolean(selectedBuildMissionProductionReadinessDetailResolved.executionStatus && (["PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"].includes(selectedBuildMissionProductionReadinessDetailResolved.executionStatus.currentStage) || ["PRODUCTION_READINESS_REVIEW", "COMPLETED"].includes(selectedBuildMissionProductionReadinessDetailResolved.executionStatus.executionStatus)))]
+                      ] as Array<[string, boolean]>).map(([label, ready]) => (
+                        <div className={ready ? "ready" : "pending"} key={String(label)}>
+                          <span>{ready ? "Ready" : "Pending"}</span>
+                          <strong>{label}</strong>
+                        </div>
+                      ))}
+                    </div>
+                    <section className="qa-summary-panel">
+                      <div className="business-section-heading">
+                        <span>Production readiness summary</span>
+                        <h2>Release Readiness</h2>
+                      </div>
+                      {selectedBuildMissionProductionReadinessChecklistSummary ? (
+                        <>
+                          <div className="recent-intake-meta">
+                            <div><span>Checklist items</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.itemCount}</strong></div>
+                            <div><span>Passed</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.passCount}</strong></div>
+                            <div><span>Failures</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.failCount}</strong></div>
+                            <div><span>Blocked</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.blockedCount}</strong></div>
+                            <div><span>Not applicable</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.notApplicableCount}</strong></div>
+                            <div><span>Ready for approval</span><strong>{selectedBuildMissionProductionReadinessChecklistSummary.readyForApproval ? "Yes" : "No"}</strong></div>
+                          </div>
+                          <p>Production readiness approval does not deploy. Deployment approval remains a separate Step 32 gate.</p>
+                        </>
+                      ) : <p>Production readiness checklist not created yet.</p>}
+                    </section>
+                    <div className="queue-action-grid">
+                      <section className="queue-action-card">
+                        <h3>Create Production Readiness Checklist</h3>
+                        <label>Readiness owner<select value={buildMissionProductionReadinessStatusForm.readinessOwnerUserId} onChange={event => updateBuildMissionProductionReadinessStatusField("readinessOwnerUserId", event.target.value)} disabled={assignableUsersLoading}><option value="">No owner selected</option>{assignableUsers.map(user => <option key={`production-readiness-owner-${user.id}`} value={user.id}>{assignableUserLabel(user)}</option>)}</select></label>
+                        <button type="button" onClick={() => void handleCreateBuildMissionProductionReadinessChecklist()} disabled={buildMissionProductionReadinessSaving || Boolean(selectedBuildMissionProductionReadinessChecklistSummary) || selectedBuildMissionProductionReadinessDetailResolved.status !== "APPROVED" || !["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedBuildMissionProductionReadinessDetailResolved.assignment?.assignmentStatus ?? "") || selectedBuildMissionProductionReadinessDetailResolved.developmentGate?.gateStatus !== "APPROVED" || !selectedBuildMissionProductionReadinessDetailResolved.executionStatus || !(["PRODUCTION_READINESS", "DEPLOYMENT_APPROVAL_PENDING", "COMPLETED"].includes(selectedBuildMissionProductionReadinessDetailResolved.executionStatus.currentStage) || ["PRODUCTION_READINESS_REVIEW", "COMPLETED"].includes(selectedBuildMissionProductionReadinessDetailResolved.executionStatus.executionStatus)) || selectedBuildMissionProductionReadinessDetailResolved.qaChecklist?.qaStatus !== "APPROVED"}>Create Production Readiness Checklist</button>
+                        <small>Checklist requirements are real production readiness controls. They do not deploy or create deployment approval.</small>
+                      </section>
+                      <section className="queue-action-card">
+                        <h3>Production readiness status controls</h3>
+                        <label>Readiness status<select value={buildMissionProductionReadinessStatusForm.readinessStatus} onChange={event => updateBuildMissionProductionReadinessStatusField("readinessStatus", event.target.value)} disabled={!selectedBuildMissionProductionReadinessChecklistSummary || selectedBuildMissionProductionReadinessChecklistTerminal}>{(selectedBuildMissionProductionReadinessChecklistTerminal ? buildMissionProductionReadinessChecklistStatuses : buildMissionProductionReadinessChecklistStatuses.filter(status => !["APPROVED", "REJECTED", "ARCHIVED"].includes(status))).map(status => <option key={status} value={status}>{status}</option>)}</select></label>
+                        <label>Note<textarea value={buildMissionProductionReadinessStatusForm.note} onChange={event => updateBuildMissionProductionReadinessStatusField("note", event.target.value)} disabled={!selectedBuildMissionProductionReadinessChecklistSummary || selectedBuildMissionProductionReadinessChecklistTerminal} placeholder="Use this for fixes required, approval context, or rejection notes." /></label>
+                        <div className="project-prd-actions">
+                          <button type="button" onClick={() => void handleUpdateBuildMissionProductionReadinessChecklistStatus()} disabled={buildMissionProductionReadinessSaving || !selectedBuildMissionProductionReadinessChecklistSummary || selectedBuildMissionProductionReadinessChecklistTerminal || (buildMissionProductionReadinessStatusForm.readinessStatus === "FIXES_REQUIRED" && !buildMissionProductionReadinessStatusForm.note.trim())}>Update Status</button>
+                          <button type="button" onClick={() => void handleApproveBuildMissionProductionReadinessChecklist()} disabled={buildMissionProductionReadinessSaving || !selectedBuildMissionProductionReadinessChecklistSummary || selectedBuildMissionProductionReadinessChecklistSummary.readinessStatus !== "READY_FOR_APPROVAL"}>Approve Production Readiness</button>
+                          <button type="button" onClick={() => void handleRejectBuildMissionProductionReadinessChecklist()} disabled={buildMissionProductionReadinessSaving || !selectedBuildMissionProductionReadinessChecklistSummary || selectedBuildMissionProductionReadinessChecklistTerminal || !buildMissionProductionReadinessStatusForm.note.trim()}>Reject Production Readiness</button>
+                          <button type="button" onClick={() => void handleArchiveBuildMissionProductionReadinessChecklist()} disabled={buildMissionProductionReadinessSaving || !selectedBuildMissionProductionReadinessChecklistSummary}>Archive Checklist</button>
+                        </div>
+                      </section>
+                    </div>
+                    <section className="qa-checklist-panel">
+                      <div className="business-section-heading">
+                        <span>Checklist item table</span>
+                        <h2>Manual Production Readiness Items</h2>
+                      </div>
+                      {selectedBuildMissionProductionReadinessChecklist ? (
+                        <div className="qa-checklist-table">
+                          <div className="qa-checklist-table-header">
+                            <span>Item</span>
+                            <span>Status</span>
+                            <span>Severity</span>
+                            <span>Notes</span>
+                            <span>Checked</span>
+                            <span>Action</span>
+                          </div>
+                          {selectedBuildMissionProductionReadinessChecklist.items.map(item => {
+                            const draft = buildMissionProductionReadinessItemDrafts[item.id] ?? {
+                              itemStatus: item.itemStatus,
+                              severity: item.severity,
+                              evidenceNote: item.evidenceNote ?? "",
+                              blockerReason: item.blockerReason ?? ""
+                            };
+                            return (
+                              <article className="qa-checklist-row" key={item.id}>
+                                <div className="qa-checklist-item-info">
+                                  <span>{item.itemKey}</span>
+                                  <strong>{item.itemTitle}</strong>
+                                  <p>{item.itemDescription ?? "Production readiness requirement."}</p>
+                                </div>
+                                <label>
+                                  Status
+                                  <select value={draft.itemStatus} onChange={event => updateBuildMissionProductionReadinessItemDraftField(item.id, "itemStatus", event.target.value)} disabled={buildMissionProductionReadinessSaving || selectedBuildMissionProductionReadinessChecklistTerminal}>{buildMissionProductionReadinessChecklistItemStatuses.map(status => <option key={status} value={status}>{status}</option>)}</select>
+                                </label>
+                                <label>
+                                  Severity
+                                  <select value={draft.severity} onChange={event => updateBuildMissionProductionReadinessItemDraftField(item.id, "severity", event.target.value)} disabled={buildMissionProductionReadinessSaving || selectedBuildMissionProductionReadinessChecklistTerminal}>{buildMissionProductionReadinessChecklistSeverities.map(severity => <option key={severity} value={severity}>{severity}</option>)}</select>
+                                </label>
+                                <div className="qa-checklist-note-fields">
+                                  <label>
+                                    Evidence note
+                                    <textarea value={draft.evidenceNote} onChange={event => updateBuildMissionProductionReadinessItemDraftField(item.id, "evidenceNote", event.target.value)} disabled={buildMissionProductionReadinessSaving || selectedBuildMissionProductionReadinessChecklistTerminal} placeholder="Evidence or validation notes." />
+                                  </label>
+                                  <label>
+                                    Blocker reason
+                                    <textarea value={draft.blockerReason} onChange={event => updateBuildMissionProductionReadinessItemDraftField(item.id, "blockerReason", event.target.value)} disabled={buildMissionProductionReadinessSaving || selectedBuildMissionProductionReadinessChecklistTerminal} placeholder="Required when an item is blocked or failing." />
+                                  </label>
+                                </div>
+                                <div className="qa-checklist-meta">
+                                  <div><span>Checked by</span><strong>{displayAssignableUser(item.checkedByUserId)}</strong></div>
+                                  <div><span>Checked at</span><strong>{item.checkedAt ?? "Not checked"}</strong></div>
+                                </div>
+                                <div className="qa-checklist-row-action">
+                                  <button type="button" onClick={() => void handleUpdateBuildMissionProductionReadinessChecklistItem(item.id)} disabled={buildMissionProductionReadinessSaving || !selectedBuildMissionProductionReadinessChecklistSummary}>Save Item</button>
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      ) : <p>Production readiness checklist not created yet.</p>}
                     </section>
                   </article>
                 ) : null}

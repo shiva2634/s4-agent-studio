@@ -1632,4 +1632,286 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("creates and governs Build Mission production readiness checklists without mock data", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        createOrUpdateBuildMissionTeamAssignment,
+        requestBuildMissionDevelopmentStart,
+        approveBuildMissionDevelopmentStart,
+        createBuildMissionExecutionStatus,
+        updateBuildMissionExecutionStatus,
+        createBuildMissionQaChecklist,
+        updateBuildMissionQaChecklistItem,
+        updateBuildMissionQaChecklistStatus,
+        approveBuildMissionQaChecklist,
+        createBuildMissionProductionReadinessChecklist,
+        updateBuildMissionProductionReadinessItem,
+        updateBuildMissionProductionReadinessStatus,
+        approveBuildMissionProductionReadiness,
+        rejectBuildMissionProductionReadiness,
+        archiveBuildMissionProductionReadiness,
+        getBuildMissionProductionReadinessChecklist,
+        getBuildMissionExecutionDashboardItem,
+        listBuildMissionProductionReadinessDashboardItems
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .run("project-production-readiness-flow", "Production Readiness Project", "/tmp/project-production-readiness-flow", "ACTIVE", "2026-01-08T00:00:00.000Z", "2026-01-08T00:00:00.000Z");
+      db.prepare(`INSERT INTO build_missions
+        (id,project_id,task_id,readiness_run_id,target_module,scope,dependencies_json,risk_level,required_specialists_json,
+          scaffold_needs_json,git_mode,acceptance_criteria_json,rollback_plan,status,approval_id,plan_json,created_at,updated_at,approved_at,converted_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "build-mission-production-readiness-flow",
+        "project-production-readiness-flow",
+        null,
+        null,
+        "Production Readiness Module",
+        "Production readiness scope",
+        "[]",
+        "high",
+        "[]",
+        "{}",
+        "WORKTREE",
+        "[]",
+        "Rollback readiness changes",
+        "DRAFT",
+        null,
+        "{}",
+        "2026-01-08T00:00:00.000Z",
+        "2026-01-08T00:00:00.000Z",
+        null,
+        null
+      );
+      const intake = createBusinessProjectIntake(db, {
+        projectName: "Production Readiness Intake",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "Internal Tool",
+        priority: "High",
+        projectSource: "Admin instruction",
+        prdStatus: "Approved",
+        shortSummary: "Production readiness intake for governed release checks.",
+        problemStatement: "Need a governed production readiness checklist after QA approval.",
+        targetUsers: "Internal release reviewers",
+        coreModulesRequired: "Auth, execution, QA, readiness",
+        keyFeatures: "Checklist, approvals, archive",
+        integrationsNeeded: "None",
+        designReferences: "Business Control Centre",
+        deliveryDeadline: "2026-07-18",
+        estimatedBudgetRange: "Placeholder",
+        risksAssumptions: "Governed approval required",
+        finalApprovalOwner: "Manager",
+        workflowStatus: "READY_FOR_APP_STUDIO",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-08T00:01:00.000Z"
+      }) as { id: string };
+      markBusinessProjectIntakeBuildMissionHandoff(db, {
+        intakeId: intake.id,
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-08T00:02:00.000Z"
+      });
+      db.prepare("UPDATE build_missions SET status='APPROVED',approval_id='approval-production-readiness-flow',approved_at=?,updated_at=? WHERE id=?")
+        .run("2026-01-08T00:02:30.000Z", "2026-01-08T00:02:30.000Z", "build-mission-production-readiness-flow");
+      createOrUpdateBuildMissionTeamAssignment(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "business-user-shrinika",
+        teamLeaderUserId: "business-user-shiva",
+        frontendDeveloperUserId: "business-user-shiva",
+        backendDeveloperUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-08T00:03:00.000Z"
+      });
+      requestBuildMissionDevelopmentStart(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        note: "Ready for development planning before readiness checks.",
+        now: "2026-01-08T00:04:00.000Z"
+      });
+      approveBuildMissionDevelopmentStart(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        note: "Approve governed development start.",
+        now: "2026-01-08T00:05:00.000Z"
+      });
+      createBuildMissionExecutionStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-08T00:06:00.000Z"
+      });
+      updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        executionStatus: "QA_REVIEW",
+        currentStage: "TESTING_QA",
+        progressPercent: 84,
+        qaStatus: "QA_REVIEW",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-08T00:07:00.000Z"
+      });
+
+      assert.throws(() => createBuildMissionProductionReadinessChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessOwnerUserId: "business-user-shiva",
+        now: "2026-01-08T00:07:30.000Z"
+      }), /Execution must be in production-readiness-ready stage/i);
+
+      const qaChecklist = createBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        qaOwnerUserId: "business-user-shiva",
+        now: "2026-01-08T00:07:45.000Z"
+      });
+      assert.ok(qaChecklist);
+      for (const item of qaChecklist!.items) {
+        updateBuildMissionQaChecklistItem(db, {
+          buildMissionId: "build-mission-production-readiness-flow",
+          itemId: item.id,
+          actorUserId: "business-user-shiva",
+          itemStatus: "PASS",
+          severity: item.severity,
+          evidenceNote: `Checked ${item.itemKey}`,
+          now: "2026-01-08T00:08:00.000Z"
+        });
+      }
+      updateBuildMissionQaChecklistStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        qaStatus: "READY_FOR_APPROVAL",
+        note: "QA complete before readiness review",
+        now: "2026-01-08T00:08:30.000Z"
+      });
+      approveBuildMissionQaChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        note: "QA approved for readiness",
+        now: "2026-01-08T00:09:00.000Z"
+      });
+
+      updateBuildMissionExecutionStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        executionStatus: "PRODUCTION_READINESS_REVIEW",
+        currentStage: "PRODUCTION_READINESS",
+        progressPercent: 93,
+        productionReadinessStatus: "READY_FOR_PRODUCTION_READINESS",
+        ownerUserId: "business-user-shiva",
+        now: "2026-01-08T00:10:00.000Z"
+      });
+
+      assert.throws(() => createBuildMissionProductionReadinessChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessOwnerUserId: "missing-user",
+        now: "2026-01-08T00:10:10.000Z"
+      }), /active internal assignable user/);
+
+      db.prepare("INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+        .run("business-user-production-readiness-suspended", "pr-suspended@example.local", "Production Readiness Suspended", "INTERNAL", "SUSPENDED", "2026-01-08T00:10:20.000Z", "2026-01-08T00:10:20.000Z");
+      assert.throws(() => createBuildMissionProductionReadinessChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessOwnerUserId: "business-user-production-readiness-suspended",
+        now: "2026-01-08T00:10:30.000Z"
+      }), /active internal assignable user/);
+
+      const readinessChecklist = createBuildMissionProductionReadinessChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessOwnerUserId: "business-user-shiva",
+        now: "2026-01-08T00:10:40.000Z"
+      });
+      assert.ok(readinessChecklist);
+      assert.equal(readinessChecklist?.readinessStatus, "DRAFT");
+      assert.equal(readinessChecklist?.items.length, 14);
+      assert.ok(readinessChecklist?.items.some((item) => item.itemKey === "deployment_approval_not_triggered"));
+      assert.throws(() => createBuildMissionProductionReadinessChecklist(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessOwnerUserId: "business-user-shiva",
+        now: "2026-01-08T00:10:45.000Z"
+      }), /Active production readiness checklist already exists/i);
+
+      assert.throws(() => updateBuildMissionProductionReadinessItem(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        itemId: readinessChecklist!.items[0]!.id,
+        actorUserId: "business-user-shrinika",
+        itemStatus: "FAIL",
+        severity: "HIGH",
+        now: "2026-01-08T00:10:50.000Z"
+      }), /evidenceNote or blockerReason is required/);
+      assert.throws(() => updateBuildMissionProductionReadinessStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        readinessStatus: "READY_FOR_APPROVAL",
+        now: "2026-01-08T00:10:55.000Z"
+      }), /ready for approval/);
+      assert.throws(() => rejectBuildMissionProductionReadiness(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        reason: "",
+        now: "2026-01-08T00:11:00.000Z"
+      }), /reason is required/);
+
+      for (const item of readinessChecklist!.items) {
+        updateBuildMissionProductionReadinessItem(db, {
+          buildMissionId: "build-mission-production-readiness-flow",
+          itemId: item.id,
+          actorUserId: "business-user-shiva",
+          itemStatus: "PASS",
+          severity: item.severity,
+          evidenceNote: `Validated ${item.itemKey}`,
+          now: "2026-01-08T00:11:05.000Z"
+        });
+      }
+
+      const readyChecklist = updateBuildMissionProductionReadinessStatus(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        readinessStatus: "READY_FOR_APPROVAL",
+        note: "Production readiness items complete",
+        now: "2026-01-08T00:11:20.000Z"
+      });
+      assert.equal(readyChecklist?.readinessStatus, "READY_FOR_APPROVAL");
+
+      const approvalCountBefore = (db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count;
+      const approved = approveBuildMissionProductionReadiness(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        note: "Ready for deployment approval, no deploy started",
+        now: "2026-01-08T00:11:40.000Z"
+      });
+      assert.equal(approved?.readinessStatus, "APPROVED");
+      const execution = getBuildMissionExecutionDashboardItem(db, "build-mission-production-readiness-flow") as { executionStatus: { productionReadinessStatus: string } | null } | undefined;
+      assert.equal(execution?.executionStatus?.productionReadinessStatus, "PRODUCTION_READINESS_APPROVED");
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count, approvalCountBefore);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals").get() as { count: number }).count, 0);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments").get() as { count: number }).count, 0);
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='BUILD_MISSION_PRODUCTION_READINESS_CHECKLIST_APPROVED'").get("build-mission-production-readiness-flow"));
+
+      const dashboard = listBuildMissionProductionReadinessDashboardItems(db) as Array<{ buildMissionId: string; productionReadinessChecklist: { readinessStatus: string; itemCount: number; readyForApproval: boolean } | null }>;
+      assert.ok(dashboard.some((item) => item.buildMissionId === "build-mission-production-readiness-flow" && item.productionReadinessChecklist?.readinessStatus === "APPROVED"));
+
+      const archived = archiveBuildMissionProductionReadiness(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-08T00:12:10.000Z"
+      });
+      assert.equal(archived?.readinessStatus, "ARCHIVED");
+      const archivedChecklist = getBuildMissionProductionReadinessChecklist(db, "build-mission-production-readiness-flow", { includeArchived: true });
+      assert.equal(archivedChecklist?.archivedAt, "2026-01-08T00:12:10.000Z");
+      assert.equal(archivedChecklist?.items.every((item) => item.archivedAt), true);
+    } finally {
+      db.close();
+    }
+  });
 });
