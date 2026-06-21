@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "@s4/db";
 import { withBusinessPermission } from "./business-auth-middleware.js";
+import { buildDeploymentHardeningStatus } from "./deployment-hardening.js";
 
 export function registerBusinessControlCentreRoutes(app: FastifyInstance) {
   app.get("/api/business-control-centre/overview", withBusinessPermission("company.view", async (_request, _reply, context) => ({
@@ -43,6 +44,11 @@ export function registerBusinessControlCentreRoutes(app: FastifyInstance) {
       rbac: "ready",
       protectedInternalRoutes: "enabled"
     }
+  })));
+
+  app.get("/api/business-control-centre/deployment-hardening-status", withBusinessPermission("system.view", async () => ({
+    module: "deployment-hardening",
+    ...buildDeploymentHardeningStatus(process.env)
   })));
 }
 

@@ -68,6 +68,7 @@ import {
 } from "./build-mission-deployment-approval";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
+import { getDeploymentHardeningStatus, type DeploymentHardeningStatus } from "./deployment-hardening";
 
 type AppTheme = "dark" | "midnight" | "purple" | "emerald" | "sunset" | "light" | "contrast";
 
@@ -2430,6 +2431,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionDeploymentApprovalMessage, setBuildMissionDeploymentApprovalMessage] = useState("");
   const [buildMissionDeploymentApprovalError, setBuildMissionDeploymentApprovalError] = useState("");
   const [buildMissionDeploymentApprovalNote, setBuildMissionDeploymentApprovalNote] = useState("");
+  const [deploymentHardeningStatus, setDeploymentHardeningStatus] = useState<DeploymentHardeningStatus | null>(null);
+  const [deploymentHardeningLoading, setDeploymentHardeningLoading] = useState(false);
+  const [deploymentHardeningError, setDeploymentHardeningError] = useState("");
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2670,6 +2674,26 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       cancelled = true;
     };
   }, [activeSection.id, selectedBuildMissionDeploymentApprovalId]);
+
+  useEffect(() => {
+    if (activeSection.id !== "deployment-cloud") return;
+    let cancelled = false;
+    setDeploymentHardeningLoading(true);
+    setDeploymentHardeningError("");
+    getDeploymentHardeningStatus()
+      .then(status => {
+        if (!cancelled) setDeploymentHardeningStatus(status);
+      })
+      .catch(error => {
+        if (!cancelled) setDeploymentHardeningError(error instanceof Error ? error.message : "Unable to load deployment hardening status");
+      })
+      .finally(() => {
+        if (!cancelled) setDeploymentHardeningLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
 
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
@@ -5175,6 +5199,37 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
             <div className="business-boundary-notice system-boundary-notice">
               <strong>Deployment Approval Boundary</strong>
               <p>Deployment and cloud operations are approval-gated. No production deployment, rollback, domain change, provider change, secret change, or infrastructure change should bypass human approval, audit logging, Git checkpoints, tests, and security review.</p>
+            </div>
+            <div className="deployment-hardening-panel">
+              <div className="business-section-heading">
+                <span>Real internal API hardening status. Config values are never returned.</span>
+                <h2>Cloud Deployment Config + Environment Hardening</h2>
+              </div>
+              {deploymentHardeningLoading ? <p>Loading deployment hardening status...</p> : null}
+              {deploymentHardeningError ? <p className="error">{deploymentHardeningError}</p> : null}
+              {!deploymentHardeningLoading && !deploymentHardeningError && !deploymentHardeningStatus ? <p>Backend not connected yet.</p> : null}
+              {deploymentHardeningStatus ? (
+                <>
+                  <div className="recent-intake-meta">
+                    <div><span>Environment</span><strong>{deploymentHardeningStatus.environment}</strong></div>
+                    <div><span>Missing production config names</span><strong>{deploymentHardeningStatus.missingConfigNames.length ? deploymentHardeningStatus.missingConfigNames.join(", ") : "None reported"}</strong></div>
+                  </div>
+                  <div className="deployment-hardening-grid">
+                    {deploymentHardeningStatus.checks.map(check => (
+                      <article className="system-ops-card" key={check.key}>
+                        <div className="system-ops-card-header">
+                          <div>
+                            <span>{check.key}</span>
+                            <h3>{check.label}</h3>
+                          </div>
+                          <span className={`system-ops-status-badge ${check.status.toLowerCase()}`}>{check.status}</span>
+                        </div>
+                        <p>{check.message}</p>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : null}
             </div>
             <div className="business-card-grid deployment-overview-grid" aria-label="Deployment overview cards">
               {deploymentOverviewCards.map(card => (

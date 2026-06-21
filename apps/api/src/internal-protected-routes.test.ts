@@ -78,6 +78,8 @@ describe("protected internal Business Control Centre and App Studio routes", () 
   it("keeps public/system routes open for now", async () => {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
+    assert.equal(health.headers["x-content-type-options"], "nosniff");
+    assert.equal(health.headers["x-frame-options"], "DENY");
 
     const bootstrap = await app.inject({ method: "GET", url: "/api/bootstrap" });
     assert.equal(bootstrap.statusCode, 200);
@@ -112,7 +114,8 @@ describe("protected internal Business Control Centre and App Studio routes", () 
     for (const url of [
       "/api/business-control-centre/audit",
       "/api/business-control-centre/approvals",
-      "/api/business-control-centre/system-health"
+      "/api/business-control-centre/system-health",
+      "/api/business-control-centre/deployment-hardening-status"
     ]) {
       const response = await app.inject({
         method: "GET",
@@ -122,6 +125,18 @@ describe("protected internal Business Control Centre and App Studio routes", () 
       assert.equal(response.statusCode, 200, url);
       assertNoAuthSecrets(response.body, ownerToken);
     }
+
+    const hardening = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/deployment-hardening-status",
+      headers: { cookie: cookie(ownerToken) }
+    });
+    assert.equal(hardening.statusCode, 200);
+    const hardeningBody = hardening.json() as { checks: Array<{ key: string; status: string }>; missingConfigNames: string[] };
+    assert.ok(hardeningBody.checks.some((check) => check.key === "internal_api_protection" && check.status === "PASS"));
+    assert.ok(Array.isArray(hardeningBody.missingConfigNames));
+    assert.ok(!hardening.body.includes("AI_API_KEY"));
+    assert.ok(!hardening.body.includes("SESSION_SECRET"));
   });
 
   it("protects App Studio internal overview and allows seeded guardian access", async () => {

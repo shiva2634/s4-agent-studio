@@ -41,6 +41,7 @@ import { registerBuildMissionQaRoutes } from "./build-mission-qa-routes.js";
 import { registerBuildMissionProductionReadinessRoutes } from "./build-mission-production-readiness-routes.js";
 import { registerBuildMissionDeploymentApprovalRoutes } from "./build-mission-deployment-approval-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
+import { applySecurityHeaders } from "./deployment-hardening.js";
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -53,6 +54,9 @@ await app.register(cors, {
 });
 await app.register(multipart, {
   limits: { fileSize: mediaAssetMaxBytes, files: 1 }
+});
+app.addHook("onRequest", async (_request, reply) => {
+  applySecurityHeaders(reply);
 });
 const now = () => new Date().toISOString();
 const mediaProviderTasks = ["T2V", "I2V", "PRESENTER", "AUDIO_VIDEO"] as const;
