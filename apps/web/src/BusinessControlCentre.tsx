@@ -352,6 +352,17 @@ type IncidentRecord = {
   lastUpdate: string;
 };
 
+type RoleDelegationRecord = {
+  role: string;
+  primaryAssignee: string;
+  backupAssignee: string;
+  temporaryDelegate: string;
+  canHoldMultipleRoles: "Yes" | "No";
+  approvalRequired: "Yes" | "No";
+  maxWorkloadLevel: "Low" | "Medium" | "High";
+  notes: string;
+};
+
 const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "dark", label: "Dark / Default" },
   { id: "midnight", label: "Midnight Blue" },
@@ -362,7 +373,7 @@ const appThemeOptions: Array<{ id: AppTheme; label: string }> = [
   { id: "contrast", label: "High Contrast" }
 ];
 
-const sidebarSectionGroups = ["Company", "Operations", "People", "Governance", "System"] as const;
+const sidebarSectionGroups = ["Company", "Organization", "Operations", "People", "Governance", "System"] as const;
 type SidebarSectionGroup = (typeof sidebarSectionGroups)[number];
 
 type SidebarSection = {
@@ -376,8 +387,10 @@ const sidebarSections: SidebarSection[] = [
   { id: "company-workspaces", label: "Company / Workspaces", group: "Company" },
   { id: "department-structure", label: "Department Structure", group: "Company" },
   { id: "role-hierarchy", label: "Role Hierarchy", group: "Company" },
+  { id: "role-hierarchy-editor", label: "Role Hierarchy Editor", group: "Organization" },
   { id: "access-boundary", label: "Access Boundary", group: "Company" },
   { id: "project-operations", label: "Project Operations", group: "Operations" },
+  { id: "create-project-prd", label: "Create Project / PRD", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -511,6 +524,85 @@ const workflowSteps = [
   "Developer 4 Final Production Readiness",
   "Manager final approval",
   "Deployment approval"
+];
+
+const projectTypeOptions = ["Website", "SaaS", "Mobile App", "Automation", "CRM", "Media System", "Trading System", "Internal Tool", "Other"];
+const projectPriorityOptions = ["Low", "Medium", "High", "Urgent"];
+const projectSourceOptions = ["Client request", "Internal product idea", "Admin instruction", "Existing business workflow", "Product Discovery Agent"];
+const prdStatusOptions = ["Not started", "Drafting", "Under review", "Approved", "Changes requested"];
+const finalApprovalOwners = ["Admin", "Manager", "Shiva", "Shrinika"];
+
+const prdWorkspaceItems = [
+  "PRD upload placeholder",
+  "PRD text draft placeholder",
+  "AI-assisted PRD generation placeholder",
+  "Human approval required",
+  "App Studio build mission readiness checklist"
+];
+
+const appStudioReadinessChecklist = [
+  "PRD approved",
+  "Scope approved",
+  "Core modules listed",
+  "Risk assumptions reviewed",
+  "Final approval owner selected",
+  "Customer communication boundary confirmed"
+];
+
+const projectCreationWorkflowSteps = [
+  "Project Created",
+  "PRD Drafted",
+  "PRD Reviewed",
+  "Scope Approved",
+  "App Studio Build Mission",
+  "Team Assignment",
+  "Development",
+  "QA",
+  "Manager Approval",
+  "Deployment Approval"
+];
+
+const roleDelegationCards: RoleDelegationRecord[] = [
+  { role: "Admin / Main Admin", primaryAssignee: "Shrinika", backupAssignee: "Shiva", temporaryDelegate: "Company Admin placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "High", notes: "Owner authority remains active for sensitive actions." },
+  { role: "Manager", primaryAssignee: "Manager placeholder", backupAssignee: "Shrinika", temporaryDelegate: "Team Leader placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "High", notes: "Can temporarily cover team leadership but cannot skip final gates." },
+  { role: "Team Leader", primaryAssignee: "Team Leader placeholder", backupAssignee: "Manager placeholder", temporaryDelegate: "Senior developer placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "Can coordinate delivery and request reassignment." },
+  { role: "Frontend Developer", primaryAssignee: "Developer 1", backupAssignee: "Developer 2", temporaryDelegate: "Full-stack delegate placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "May combine with backend only after manager approval." },
+  { role: "Backend Developer", primaryAssignee: "Developer 2", backupAssignee: "Developer 1", temporaryDelegate: "Full-stack delegate placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "API/database-sensitive work remains approval-gated." },
+  { role: "QA / Testing Developer", primaryAssignee: "Developer 3", backupAssignee: "Team Leader placeholder", temporaryDelegate: "QA reviewer placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "QA cannot be skipped, only reassigned." },
+  { role: "Production Readiness Developer", primaryAssignee: "Developer 4", backupAssignee: "Manager placeholder", temporaryDelegate: "Release reviewer placeholder", canHoldMultipleRoles: "No", approvalRequired: "Yes", maxWorkloadLevel: "High", notes: "Cannot approve own final production release." },
+  { role: "Support Operator", primaryAssignee: "Support operator placeholder", backupAssignee: "Support Manager", temporaryDelegate: "Team Leader placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Low", notes: "Customer updates stay outside Business Control Centre." },
+  { role: "Finance Operator", primaryAssignee: "Finance operator placeholder", backupAssignee: "Finance Admin", temporaryDelegate: "Admin placeholder", canHoldMultipleRoles: "No", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "Finance approvals require finance/admin authority." },
+  { role: "HR Operator", primaryAssignee: "HR operator placeholder", backupAssignee: "HR Manager", temporaryDelegate: "Admin placeholder", canHoldMultipleRoles: "No", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "HR approvals require HR/admin authority." },
+  { role: "Agent Supervisor", primaryAssignee: "Agent supervisor placeholder", backupAssignee: "Shiva", temporaryDelegate: "Auditor placeholder", canHoldMultipleRoles: "Yes", approvalRequired: "Yes", maxWorkloadLevel: "Medium", notes: "Agent production action remains approval-gated." }
+];
+
+const shortOfEmployeesRules = [
+  "Allow Manager to temporarily combine responsibilities.",
+  "One developer can handle frontend + backend if approved.",
+  "Team Leader can cover QA review only if Manager approves.",
+  "Manager can cover Team Leader temporarily.",
+  "Admin/Shiva final authority remains active.",
+  "Deployment approval cannot be skipped.",
+  "Sensitive actions still require approval."
+];
+
+const roleDelegationRules = [
+  "No one can approve their own final production release.",
+  "Final deployment approval must remain with Manager/Admin.",
+  "QA cannot be skipped, only reassigned.",
+  "Finance/billing approvals cannot be given to development roles without admin approval.",
+  "HR approvals cannot be given to project developers without admin approval.",
+  "All temporary role changes require audit log later when backend is connected."
+];
+
+const roleDelegationWorkflowSteps = [
+  "Role Need Detected",
+  "Backup Assigned",
+  "Temporary Delegation Requested",
+  "Manager/Admin Approval",
+  "Active Delegation",
+  "Review",
+  "Revert or Extend"
 ];
 
 const assignmentWorkflowSteps = [
@@ -2291,6 +2383,71 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
           </section>
           ) : null}
 
+          {activeSection.id === "role-hierarchy-editor" ? (
+          <section className="business-section role-delegation-section" id="role-hierarchy-editor">
+            <div className="business-section-heading">
+              <span>Editable planning UI for role coverage, backup owners, and temporary delegation. No persistence or audit enforcement is connected yet.</span>
+              <h2>Role Hierarchy Editor / Delegation Planner</h2>
+            </div>
+            <div className="business-boundary-notice role-delegation-boundary">
+              <strong>Planning-only delegation boundary</strong>
+              <p>This is a planning UI only. Backend persistence and audit enforcement will be added later. Role flexibility helps when employee count is low, but approval gates remain active.</p>
+            </div>
+            <div className="role-delegation-grid">
+              {roleDelegationCards.map(role => (
+                <article className="role-delegation-card" key={role.role}>
+                  <div className="role-delegation-card-header">
+                    <div>
+                      <span>Internal role</span>
+                      <h3>{role.role}</h3>
+                    </div>
+                    <strong className={`workload-badge ${role.maxWorkloadLevel.toLowerCase()}`}>{role.maxWorkloadLevel} workload</strong>
+                  </div>
+                  <div className="role-delegation-controls">
+                    <label>Primary assignee<input defaultValue={role.primaryAssignee} aria-label={`${role.role} primary assignee`} /></label>
+                    <label>Backup assignee<input defaultValue={role.backupAssignee} aria-label={`${role.role} backup assignee`} /></label>
+                    <label>Temporary delegate<input defaultValue={role.temporaryDelegate} aria-label={`${role.role} temporary delegate`} /></label>
+                    <label>Can hold multiple roles<select defaultValue={role.canHoldMultipleRoles} aria-label={`${role.role} multiple roles`}><option>Yes</option><option>No</option></select></label>
+                    <label>Approval required<select defaultValue={role.approvalRequired} aria-label={`${role.role} approval required`}><option>Yes</option><option>No</option></select></label>
+                    <label>Max workload level<select defaultValue={role.maxWorkloadLevel} aria-label={`${role.role} max workload`}><option>Low</option><option>Medium</option><option>High</option></select></label>
+                    <label className="wide">Notes<textarea defaultValue={role.notes} aria-label={`${role.role} notes`} /></label>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="delegation-panel-grid">
+              <article className="short-staffing-panel">
+                <div className="business-section-heading">
+                  <span>Short of employees mode</span>
+                  <h2>Temporary Coverage Rules</h2>
+                </div>
+                <div>{shortOfEmployeesRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
+              </article>
+              <article className="delegation-rules-panel">
+                <div className="business-section-heading">
+                  <span>Role delegation rules</span>
+                  <h2>Approval Gates Stay Active</h2>
+                </div>
+                <div>{roleDelegationRules.map(rule => <strong key={rule}>{rule}</strong>)}</div>
+              </article>
+            </div>
+            <div className="role-workflow-panel">
+              <div className="business-section-heading">
+                <span>Role hierarchy workflow preview</span>
+                <h2>Delegation Lifecycle</h2>
+              </div>
+              <div className="role-workflow-chain" aria-label="Role delegation workflow">
+                {roleDelegationWorkflowSteps.map((step, index) => (
+                  <div className="role-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+          ) : null}
+
           {activeSection.id === "access-boundary" ? (
           <section className="business-section access-boundary-section" id="access-boundary">
             <div className="business-section-heading">
@@ -2415,6 +2572,73 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
           ) : null}
 
           {activeSection.id === "project-operations" ? <BusinessTableSection section={tableSections[0]} /> : null}
+
+          {activeSection.id === "create-project-prd" ? (
+          <section className="business-section project-prd-section" id="create-project-prd">
+            <div className="business-section-heading">
+              <span>Internal-only project creation and PRD intake planning UI. No backend project creation, file upload, or AI generation is connected.</span>
+              <h2>Create Project & PRD Intake</h2>
+            </div>
+            <div className="business-boundary-notice project-prd-boundary">
+              <strong>Project intake boundary</strong>
+              <p>No project is sent to App Studio until PRD and scope are approved. Customer-facing communication remains outside Business Control Centre. This section is UI-only until backend project creation is connected.</p>
+            </div>
+            <div className="project-prd-layout">
+              <form className="project-prd-form" aria-label="Create internal project and PRD intake form">
+                <div className="project-prd-form-grid">
+                  <label>Project name<input placeholder="Example: Client Portal Foundation" /></label>
+                  <label>Client / internal company name<input placeholder="Example: Shrinika Technologies or client company" /></label>
+                  <label>Project type<select defaultValue="SaaS">{projectTypeOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Priority<select defaultValue="Medium">{projectPriorityOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Project source<select defaultValue="Admin instruction">{projectSourceOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>PRD status<select defaultValue="Not started">{prdStatusOptions.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label>Delivery deadline<input type="date" /></label>
+                  <label>Estimated budget range<input placeholder="Placeholder range only" /></label>
+                  <label>Final approval owner<select defaultValue="Manager">{finalApprovalOwners.map(option => <option key={option}>{option}</option>)}</select></label>
+                  <label className="wide">Short project summary<textarea placeholder="Summarize the project objective and expected business outcome." /></label>
+                  <label className="wide">Problem statement<textarea placeholder="Describe the problem this project should solve." /></label>
+                  <label>Target users<textarea placeholder="Internal operators, customers, managers, support, etc." /></label>
+                  <label>Core modules required<textarea placeholder="Dashboard, auth, billing, support, reporting, etc." /></label>
+                  <label>Key features<textarea placeholder="List the primary features required for MVP scope." /></label>
+                  <label>Integrations needed<textarea placeholder="Email, payment, provider, CRM, analytics, etc." /></label>
+                  <label>Design references / notes<textarea placeholder="Brand, layout, UI references, accessibility notes." /></label>
+                  <label>Risks / assumptions<textarea placeholder="Delivery, data, integrations, staffing, approval, or compliance assumptions." /></label>
+                </div>
+                <div className="project-prd-actions">
+                  <button type="button" disabled>Create project placeholder</button>
+                  <button type="button" disabled>Send to App Studio placeholder</button>
+                </div>
+              </form>
+              <aside className="prd-workspace-panel">
+                <div className="business-section-heading">
+                  <span>PRD workspace panel</span>
+                  <h2>PRD Controls</h2>
+                </div>
+                <div className="prd-workspace-items">
+                  {prdWorkspaceItems.map(item => <strong className={item === "Human approval required" ? "approval-required" : ""} key={item}>{item}</strong>)}
+                </div>
+                <div className="prd-checklist">
+                  <span>App Studio build mission readiness checklist</span>
+                  {appStudioReadinessChecklist.map(item => <label key={item}><input type="checkbox" disabled />{item}</label>)}
+                </div>
+              </aside>
+            </div>
+            <div className="project-prd-workflow-panel">
+              <div className="business-section-heading">
+                <span>Workflow preview</span>
+                <h2>PRD to Delivery Flow</h2>
+              </div>
+              <div className="project-prd-workflow-chain" aria-label="Project and PRD workflow">
+                {projectCreationWorkflowSteps.map((step, index) => (
+                  <div className="project-prd-workflow-step" key={step}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{step}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+          ) : null}
 
           {activeSection.id === "client-management" ? (
           <section className="business-section client-management-section" id="client-management">
