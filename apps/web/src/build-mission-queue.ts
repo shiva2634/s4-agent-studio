@@ -61,6 +61,20 @@ export type BuildMissionQueueItem = {
   } | null;
 };
 
+export type AssignableUser = {
+  id: string;
+  displayName: string;
+  email: string;
+  userType: "INTERNAL";
+  status: "ACTIVE";
+  title: string | null;
+  departmentKey: string | null;
+  jobRoleKey: string | null;
+  roleKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type BuildMissionTeamAssignmentPayload = {
   assignmentStatus: string;
   managerUserId?: string | null;
@@ -82,7 +96,13 @@ type QueueListResponse = {
 type QueueItemResponse = {
   item?: BuildMissionQueueItem;
   assignment?: BuildMissionQueueAssignment;
+  assignmentWarnings?: string[];
+  roleFitWarnings?: string[];
   error?: string;
+};
+
+type AssignableUsersResponse = {
+  users?: AssignableUser[];
 };
 
 function queueUrl(path: string) {
@@ -108,6 +128,15 @@ export async function listBuildMissionQueue(): Promise<BuildMissionQueueItem[]> 
   return Array.isArray(body.queue) ? body.queue : [];
 }
 
+export async function listAssignableUsers(): Promise<AssignableUser[]> {
+  const response = await fetch(queueUrl("/api/business-control-centre/assignable-users"), {
+    credentials: "include"
+  });
+  if (!response.ok) throw new Error("Unable to load assignable internal users");
+  const body = await readJson(response) as AssignableUsersResponse;
+  return Array.isArray(body.users) ? body.users : [];
+}
+
 export async function approveBuildMissionQueueItem(id: string, note: string): Promise<BuildMissionQueueItem> {
   return postQueueAction(`${id}/approve`, { note }, "Unable to approve Build Mission draft");
 }
@@ -116,8 +145,13 @@ export async function requestBuildMissionQueueChanges(id: string, reason: string
   return postQueueAction(`${id}/request-changes`, { reason }, "Unable to request Build Mission changes");
 }
 
-export async function saveBuildMissionTeamAssignment(id: string, payload: BuildMissionTeamAssignmentPayload): Promise<BuildMissionQueueItem> {
-  return postQueueAction(`${id}/assign-team`, payload, "Unable to save Build Mission team assignment");
+export async function saveBuildMissionTeamAssignment(id: string, payload: BuildMissionTeamAssignmentPayload): Promise<{ item: BuildMissionQueueItem; assignmentWarnings: string[]; roleFitWarnings: string[] }> {
+  const response = await postQueueActionResponse(`${id}/assign-team`, payload, "Unable to save Build Mission team assignment");
+  return {
+    item: response.item,
+    assignmentWarnings: Array.isArray(response.assignmentWarnings) ? response.assignmentWarnings : [],
+    roleFitWarnings: Array.isArray(response.roleFitWarnings) ? response.roleFitWarnings : []
+  };
 }
 
 export async function requestDevelopmentStart(id: string, note: string): Promise<BuildMissionQueueItem> {
@@ -133,6 +167,11 @@ export async function blockDevelopmentStart(id: string, reason: string): Promise
 }
 
 async function postQueueAction(path: string, payload: unknown, fallback: string): Promise<BuildMissionQueueItem> {
+  const body = await postQueueActionResponse(path, payload, fallback);
+  return body.item;
+}
+
+async function postQueueActionResponse(path: string, payload: unknown, fallback: string): Promise<QueueItemResponse & { item: BuildMissionQueueItem }> {
   const response = await fetch(queueUrl(`/api/business-control-centre/build-mission-queue/${encodeURIComponent(path.split("/")[0])}/${path.split("/").slice(1).join("/")}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -141,5 +180,5 @@ async function postQueueAction(path: string, payload: unknown, fallback: string)
   });
   const body = await readJson(response) as QueueItemResponse;
   if (!response.ok || !body.item) throw new Error(typeof body.error === "string" ? body.error : fallback);
-  return body.item;
+  return body as QueueItemResponse & { item: BuildMissionQueueItem };
 }

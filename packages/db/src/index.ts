@@ -96,6 +96,20 @@ type BusinessPasswordResetTokenPlaceholderInput = {
   now?: string;
 };
 
+export type AssignableInternalUser = {
+  id: string;
+  displayName: string;
+  email: string;
+  userType: "INTERNAL";
+  status: "ACTIVE";
+  title: string | null;
+  departmentKey: string | null;
+  jobRoleKey: string | null;
+  roleKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export const businessProjectTypes = ["Website", "SaaS", "Mobile App", "Automation", "CRM", "Media System", "Trading System", "Internal Tool", "Other"] as const;
 export const businessProjectPriorities = ["Low", "Medium", "High", "Urgent"] as const;
 export const businessProjectSources = ["Client request", "Internal product idea", "Admin instruction", "Existing business workflow", "Product Discovery Agent"] as const;
@@ -2002,6 +2016,70 @@ export function recordDeniedAccessEvent(database: Database.Database, input: Deni
     FROM denied_access_events WHERE id=?`).get(id);
 }
 
+export function listInternalAssignableUsers(database: Database.Database) {
+  const users = database.prepare(`SELECT
+      u.id,u.display_name AS displayName,u.email,u.user_type AS userType,u.status,u.created_at AS createdAt,u.updated_at AS updatedAt,
+      p.title,p.department_key AS departmentKey,p.job_role_key AS jobRoleKey
+    FROM business_users u
+    LEFT JOIN internal_user_profiles p ON p.user_id=u.id
+    WHERE u.user_type='INTERNAL' AND u.status='ACTIVE' AND u.archived_at IS NULL
+    ORDER BY u.display_name COLLATE NOCASE ASC, u.email COLLATE NOCASE ASC`).all() as Array<Omit<AssignableInternalUser, "roleKeys">>;
+  return users.map((user) => ({ ...user, roleKeys: getActiveBusinessRoleKeys(database, user.id) }));
+}
+
+export function getInternalAssignableUser(database: Database.Database, userId: string) {
+  const row = database.prepare(`SELECT
+      u.id,u.display_name AS displayName,u.email,u.user_type AS userType,u.status,u.created_at AS createdAt,u.updated_at AS updatedAt,
+      p.title,p.department_key AS departmentKey,p.job_role_key AS jobRoleKey
+    FROM business_users u
+    LEFT JOIN internal_user_profiles p ON p.user_id=u.id
+    WHERE u.id=? AND u.user_type='INTERNAL' AND u.status='ACTIVE' AND u.archived_at IS NULL
+    LIMIT 1`).get(userId) as Omit<AssignableInternalUser, "roleKeys"> | undefined;
+  return row ? { ...row, roleKeys: getActiveBusinessRoleKeys(database, row.id) } : undefined;
+}
+
+export function validateBuildMissionAssignmentUsers(database: Database.Database, input: BusinessBuildMissionTeamAssignmentInput | Omit<BusinessBuildMissionTeamAssignmentInput, "buildMissionId" | "projectIntakeId" | "actorUserId" | "now">) {
+  const status = validateEnum("assignmentStatus", input.assignmentStatus, businessBuildMissionAssignmentStatuses);
+  const assignmentFields = getBuildMissionAssignmentUserFields(input);
+  const managerUserId = assignmentFields.find((field) => field.key === "managerUserId")?.userId ?? null;
+  if (status === "ASSIGNED" && !managerUserId) throw new Error("managerUserId is required to finalize assignment");
+
+  const warnings: string[] = [];
+  const assignedByUser = new Map<string, string[]>();
+  for (const field of assignmentFields) {
+    if (!field.userId) continue;
+    assertAssignableInternalUser(database, field.userId, field.label);
+    const labels = assignedByUser.get(field.userId) ?? [];
+    labels.push(field.label);
+    assignedByUser.set(field.userId, labels);
+  }
+
+  for (const [userId, labels] of assignedByUser.entries()) {
+    if (labels.length > 1) {
+      const user = getInternalAssignableUser(database, userId);
+      warnings.push(`Short-staffing warning: ${user?.displayName ?? userId} is assigned to multiple responsibilities (${labels.join(", ")}). Document manager/admin approval in notes.`);
+    }
+  }
+
+  return { assignmentWarnings: warnings };
+}
+
+export function validateBuildMissionAssignmentRoleFit(database: Database.Database, input: BusinessBuildMissionTeamAssignmentInput | Omit<BusinessBuildMissionTeamAssignmentInput, "buildMissionId" | "projectIntakeId" | "actorUserId" | "now">) {
+  const warnings: string[] = [];
+  for (const field of getBuildMissionAssignmentUserFields(input)) {
+    if (!field.userId) continue;
+    const user = getInternalAssignableUser(database, field.userId);
+    if (!user) continue;
+    const expectedRoles = assignmentRoleFit[field.key] ?? [];
+    if (!expectedRoles.length) continue;
+    if (!user.roleKeys.some((roleKey) => expectedRoles.includes(roleKey))) {
+      const expected = expectedRoles.filter((roleKey) => !["main_admin_owner", "system_guardian", "company_admin"].includes(roleKey)).join(", ");
+      warnings.push(`Role-fit warning: ${user.displayName} is assigned as ${field.label} but active roles are ${user.roleKeys.join(", ") || "none"}${expected ? `; expected ${expected} or admin override` : ""}.`);
+    }
+  }
+  return { roleFitWarnings: warnings };
+}
+
 export function createBusinessAuthSession(database: Database.Database, input: BusinessAuthSessionInput) {
   const timestamp = input.now ?? new Date().toISOString();
   const user = database.prepare("SELECT id,user_type AS userType,status FROM business_users WHERE id=?").get(input.userId) as { id: string; userType: BusinessUserType; status: BusinessUserStatus } | undefined;
@@ -2346,9 +2424,10 @@ export function createOrUpdateBuildMissionTeamAssignment(database: Database.Data
   if (!mission) throw new Error("Build mission not found");
   const status = validateEnum("assignmentStatus", input.assignmentStatus, businessBuildMissionAssignmentStatuses);
   const managerUserId = normalizeOptionalText(input.managerUserId);
-  if (status === "ASSIGNED" && !managerUserId) throw new Error("managerUserId is required to finalize assignment");
   const linkedIntake = input.projectIntakeId ? getBusinessProjectIntakeById(database, input.projectIntakeId) : getBusinessProjectIntakeByBuildMissionId(database, input.buildMissionId);
   if (input.projectIntakeId && !linkedIntake) throw new Error("Linked project intake not found");
+  const userValidation = validateBuildMissionAssignmentUsers(database, { ...input, assignmentStatus: status });
+  const roleFitValidation = validateBuildMissionAssignmentRoleFit(database, { ...input, assignmentStatus: status });
   const normalized = {
     projectIntakeId: linkedIntake?.id ?? null,
     managerUserId,
@@ -2361,7 +2440,7 @@ export function createOrUpdateBuildMissionTeamAssignment(database: Database.Data
     financeOwnerUserId: normalizeOptionalText(input.financeOwnerUserId),
     hrOwnerUserId: normalizeOptionalText(input.hrOwnerUserId),
     assignmentStatus: status,
-    notes: assignmentNotesWithWarnings(input.notes, input.qaUserId, input.productionReadinessUserId)
+    notes: assignmentNotesWithWarnings(input.notes, [...userValidation.assignmentWarnings, ...roleFitValidation.roleFitWarnings])
   };
   const existing = getBuildMissionTeamAssignment(database, input.buildMissionId) as { id: string } | undefined;
   if (existing) {
@@ -2738,12 +2817,57 @@ function getBuildMissionRow(database: Database.Database, buildMissionId: string)
   return database.prepare("SELECT id,project_id AS projectId,task_id AS taskId,target_module AS targetModule,status,approval_id AS approvalId FROM build_missions WHERE id=?").get(buildMissionId) as { id: string; projectId: string; taskId: string | null; targetModule: string; status: string; approvalId: string | null } | undefined;
 }
 
-function assignmentNotesWithWarnings(notes: unknown, qaUserId: unknown, productionReadinessUserId: unknown) {
+const buildMissionAssignmentUserFieldLabels = {
+  managerUserId: "Manager",
+  teamLeaderUserId: "Team Leader",
+  frontendDeveloperUserId: "Frontend Developer",
+  backendDeveloperUserId: "Backend Developer",
+  qaUserId: "QA / Testing",
+  productionReadinessUserId: "Production Readiness",
+  supportOwnerUserId: "Support Owner",
+  financeOwnerUserId: "Finance Owner",
+  hrOwnerUserId: "HR Owner"
+} as const;
+
+const assignmentRoleFit: Record<keyof typeof buildMissionAssignmentUserFieldLabels, string[]> = {
+  managerUserId: ["manager", "company_admin", "main_admin_owner", "system_guardian"],
+  teamLeaderUserId: ["team_leader", "manager", "company_admin", "main_admin_owner", "system_guardian"],
+  frontendDeveloperUserId: ["frontend_developer", "team_leader", "manager", "company_admin", "main_admin_owner", "system_guardian"],
+  backendDeveloperUserId: ["backend_developer", "team_leader", "manager", "company_admin", "main_admin_owner", "system_guardian"],
+  qaUserId: ["testing_qa_developer", "team_leader", "manager", "company_admin", "main_admin_owner", "system_guardian"],
+  productionReadinessUserId: ["final_production_readiness_developer", "cloud_deployment_operator", "manager", "company_admin", "main_admin_owner", "system_guardian"],
+  supportOwnerUserId: ["support_manager", "company_admin", "main_admin_owner", "system_guardian"],
+  financeOwnerUserId: ["finance_admin", "company_admin", "main_admin_owner", "system_guardian"],
+  hrOwnerUserId: ["hr_manager", "company_admin", "main_admin_owner", "system_guardian"]
+};
+
+function getBuildMissionAssignmentUserFields(input: BusinessBuildMissionTeamAssignmentInput | Omit<BusinessBuildMissionTeamAssignmentInput, "buildMissionId" | "projectIntakeId" | "actorUserId" | "now">) {
+  return (Object.keys(buildMissionAssignmentUserFieldLabels) as Array<keyof typeof buildMissionAssignmentUserFieldLabels>).map((key) => ({
+    key,
+    label: buildMissionAssignmentUserFieldLabels[key],
+    userId: normalizeOptionalText(input[key])
+  }));
+}
+
+function getActiveBusinessRoleKeys(database: Database.Database, userId: string) {
+  const rows = database.prepare(`SELECT r.role_key AS roleKey
+    FROM business_user_roles ur
+    JOIN business_roles r ON r.id=ur.role_id
+    WHERE ur.user_id=? AND ur.revoked_at IS NULL
+    ORDER BY r.role_key`).all(userId) as Array<{ roleKey: string }>;
+  return rows.map((row) => row.roleKey);
+}
+
+function assertAssignableInternalUser(database: Database.Database, userId: string, fieldLabel: string) {
+  const user = database.prepare("SELECT id,user_type AS userType,status,archived_at AS archivedAt FROM business_users WHERE id=?").get(userId) as { id: string; userType: BusinessUserType; status: BusinessUserStatus; archivedAt: string | null } | undefined;
+  if (!user) throw new Error(`${fieldLabel} user not found`);
+  if (user.userType !== "INTERNAL") throw new Error(`${fieldLabel} must be an internal user`);
+  if (user.status !== "ACTIVE" || user.archivedAt) throw new Error(`${fieldLabel} must be an active internal user`);
+}
+
+function assignmentNotesWithWarnings(notes: unknown, warnings: string[] = []) {
   const cleanNotes = normalizeOptionalText(notes);
-  const qa = normalizeOptionalText(qaUserId);
-  const production = normalizeOptionalText(productionReadinessUserId);
-  const warning = qa && production && qa === production ? "Warning: QA and production readiness are assigned to the same person; manager approval should confirm short-staffing coverage." : "";
-  return [cleanNotes, warning].filter(Boolean).join("\n") || null;
+  return [cleanNotes, ...warnings].filter(Boolean).join("\n") || null;
 }
 
 function sanitizeEventText(value: unknown) {

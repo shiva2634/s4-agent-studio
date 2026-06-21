@@ -3,10 +3,12 @@ import {
   approveBuildMissionQueueItem,
   approveDevelopmentStart,
   blockDevelopmentStart,
+  listAssignableUsers,
   listBuildMissionQueue,
   requestBuildMissionQueueChanges,
   requestDevelopmentStart,
   saveBuildMissionTeamAssignment,
+  type AssignableUser,
   type BuildMissionQueueItem,
   type BuildMissionTeamAssignmentPayload
 } from "./build-mission-queue";
@@ -2294,6 +2296,10 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [developmentStartApprovalNote, setDevelopmentStartApprovalNote] = useState("");
   const [developmentStartBlockReason, setDevelopmentStartBlockReason] = useState("");
   const [buildMissionAssignmentForm, setBuildMissionAssignmentForm] = useState<BuildMissionTeamAssignmentPayload>(emptyBuildMissionAssignmentForm);
+  const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
+  const [assignableUsersLoading, setAssignableUsersLoading] = useState(false);
+  const [assignableUsersError, setAssignableUsersError] = useState("");
+  const [assignmentWarnings, setAssignmentWarnings] = useState<string[]>([]);
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2321,18 +2327,30 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     if (activeSection.id !== "build-mission-queue") return;
     let cancelled = false;
     setBuildMissionQueueLoading(true);
+    setAssignableUsersLoading(true);
     setBuildMissionQueueError("");
-    listBuildMissionQueue()
-      .then(queue => {
+    setAssignableUsersError("");
+    Promise.allSettled([listBuildMissionQueue(), listAssignableUsers()])
+      .then(results => {
         if (cancelled) return;
-        setBuildMissionQueue(queue);
-        setSelectedBuildMissionId(current => current || queue[0]?.buildMissionId || "");
-      })
-      .catch(error => {
-        if (!cancelled) setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to load Build Mission queue");
+        const [queueResult, usersResult] = results;
+        if (queueResult.status === "fulfilled") {
+          setBuildMissionQueue(queueResult.value);
+          setSelectedBuildMissionId(current => current || queueResult.value[0]?.buildMissionId || "");
+        } else {
+          setBuildMissionQueueError(queueResult.reason instanceof Error ? queueResult.reason.message : "Unable to load Build Mission queue");
+        }
+        if (usersResult.status === "fulfilled") {
+          setAssignableUsers(usersResult.value);
+        } else {
+          setAssignableUsersError(usersResult.reason instanceof Error ? usersResult.reason.message : "Unable to load assignable internal users");
+        }
       })
       .finally(() => {
-        if (!cancelled) setBuildMissionQueueLoading(false);
+        if (!cancelled) {
+          setBuildMissionQueueLoading(false);
+          setAssignableUsersLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -2347,6 +2365,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   useEffect(() => {
     if (!selectedBuildMission) {
       setBuildMissionAssignmentForm(emptyBuildMissionAssignmentForm);
+      setAssignmentWarnings([]);
       return;
     }
     setBuildMissionAssignmentForm({
@@ -2362,6 +2381,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       hrOwnerUserId: selectedBuildMission.assignment?.hrOwnerUserId ?? "",
       notes: selectedBuildMission.assignment?.notes ?? ""
     });
+    setAssignmentWarnings([]);
   }, [selectedBuildMission?.buildMissionId, selectedBuildMission?.assignment?.updatedAt]);
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
@@ -2446,12 +2466,14 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     setBuildMissionQueueSaving(true);
     setBuildMissionQueueMessage("");
     setBuildMissionQueueError("");
+    setAssignmentWarnings([]);
     try {
-      const item = await saveBuildMissionTeamAssignment(selectedBuildMission.buildMissionId, { ...buildMissionAssignmentForm, assignmentStatus });
-      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
-      setSelectedBuildMissionId(item.buildMissionId);
+      const result = await saveBuildMissionTeamAssignment(selectedBuildMission.buildMissionId, { ...buildMissionAssignmentForm, assignmentStatus });
+      setBuildMissionQueue(current => current.map(entry => entry.buildMissionId === result.item.buildMissionId ? result.item : entry));
+      setSelectedBuildMissionId(result.item.buildMissionId);
+      setAssignmentWarnings([...result.assignmentWarnings, ...result.roleFitWarnings]);
       setBuildMissionQueueMessage(assignmentStatus === "ASSIGNED" ? "Team assignment finalized. Implementation still starts only through App Studio governance." : "Team assignment draft saved.");
-      await refreshBuildMissionQueue(item.buildMissionId);
+      await refreshBuildMissionQueue(result.item.buildMissionId);
     } catch (error) {
       setBuildMissionQueueError(error instanceof Error ? error.message : "Unable to save team assignment");
     } finally {
@@ -2509,6 +2531,19 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setBuildMissionQueueSaving(false);
     }
   };
+  const assignableUserLabel = (user: AssignableUser) => {
+    const roleSummary = user.roleKeys.length ? user.roleKeys.join(", ") : user.title || "internal user";
+    return `${user.displayName} (${user.email}) - ${roleSummary}`;
+  };
+  const renderAssignableUserSelect = (label: string, field: keyof BuildMissionTeamAssignmentPayload, placeholder: string) => (
+    <label>
+      {label}
+      <select value={String(buildMissionAssignmentForm[field] ?? "")} onChange={event => updateBuildMissionAssignmentField(field, event.target.value)} disabled={assignableUsersLoading}>
+        <option value="">{placeholder}</option>
+        {assignableUsers.map(user => <option key={`${field}-${user.id}`} value={user.id}>{assignableUserLabel(user)}</option>)}
+      </select>
+    </label>
+  );
 
   return (
     <main className="app-shell app-studio-shell business-control-shell" data-theme={theme}>
@@ -3061,17 +3096,25 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         <span>Team assignment form</span>
                         <h2>Internal Work Chain</h2>
                       </div>
+                      {assignableUsersError ? <p className="error">{assignableUsersError}</p> : null}
+                      {assignableUsersLoading ? <p>Loading assignable internal users...</p> : null}
+                      {assignmentWarnings.length ? (
+                        <div className="assignment-warning-panel">
+                          <strong>Assignment guidance</strong>
+                          {assignmentWarnings.map(warning => <span key={warning}>{warning}</span>)}
+                        </div>
+                      ) : null}
                       <div className="queue-assignment-grid">
                         <label>Assignment status<select value={buildMissionAssignmentForm.assignmentStatus ?? "DRAFT"} onChange={event => updateBuildMissionAssignmentField("assignmentStatus", event.target.value)}>{buildMissionAssignmentStatuses.map(status => <option key={status}>{status}</option>)}</select></label>
-                        <label>Manager<input value={buildMissionAssignmentForm.managerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("managerUserId", event.target.value)} placeholder="Manager user/name" /></label>
-                        <label>Team Leader<input value={buildMissionAssignmentForm.teamLeaderUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("teamLeaderUserId", event.target.value)} placeholder="Optional if short-staffed" /></label>
-                        <label>Frontend Developer<input value={buildMissionAssignmentForm.frontendDeveloperUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("frontendDeveloperUserId", event.target.value)} placeholder="Developer 1" /></label>
-                        <label>Backend Developer<input value={buildMissionAssignmentForm.backendDeveloperUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("backendDeveloperUserId", event.target.value)} placeholder="Developer 2" /></label>
-                        <label>QA / Testing<input value={buildMissionAssignmentForm.qaUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("qaUserId", event.target.value)} placeholder="Developer 3" /></label>
-                        <label>Production Readiness<input value={buildMissionAssignmentForm.productionReadinessUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("productionReadinessUserId", event.target.value)} placeholder="Developer 4" /></label>
-                        <label>Support Owner<input value={buildMissionAssignmentForm.supportOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("supportOwnerUserId", event.target.value)} placeholder="Support owner" /></label>
-                        <label>Finance Owner<input value={buildMissionAssignmentForm.financeOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("financeOwnerUserId", event.target.value)} placeholder="Finance owner" /></label>
-                        <label>HR Owner<input value={buildMissionAssignmentForm.hrOwnerUserId ?? ""} onChange={event => updateBuildMissionAssignmentField("hrOwnerUserId", event.target.value)} placeholder="HR owner" /></label>
+                        {renderAssignableUserSelect("Manager", "managerUserId", "Select manager")}
+                        {renderAssignableUserSelect("Team Leader", "teamLeaderUserId", "Optional if short-staffed")}
+                        {renderAssignableUserSelect("Frontend Developer", "frontendDeveloperUserId", "Optional frontend owner")}
+                        {renderAssignableUserSelect("Backend Developer", "backendDeveloperUserId", "Optional backend owner")}
+                        {renderAssignableUserSelect("QA / Testing", "qaUserId", "Optional QA owner")}
+                        {renderAssignableUserSelect("Production Readiness", "productionReadinessUserId", "Optional production readiness owner")}
+                        {renderAssignableUserSelect("Support Owner", "supportOwnerUserId", "Optional support owner")}
+                        {renderAssignableUserSelect("Finance Owner", "financeOwnerUserId", "Optional finance owner")}
+                        {renderAssignableUserSelect("HR Owner", "hrOwnerUserId", "Optional HR owner")}
                         <label className="wide">Notes / short-staffing coverage<textarea value={buildMissionAssignmentForm.notes ?? ""} onChange={event => updateBuildMissionAssignmentField("notes", event.target.value)} placeholder="Document temporary role coverage, backup responsibility, and approval assumptions." /></label>
                       </div>
                       <div className="project-prd-actions">

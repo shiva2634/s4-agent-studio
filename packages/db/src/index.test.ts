@@ -897,16 +897,16 @@ describe("database initialization", () => {
       const draft = createOrUpdateBuildMissionTeamAssignment(db, {
         buildMissionId: "mission-queue-1",
         assignmentStatus: "DRAFT",
-        teamLeaderUserId: "Team Leader Placeholder",
-        qaUserId: "Developer 3",
-        productionReadinessUserId: "Developer 3",
+        teamLeaderUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
         notes: "Short-staffing draft",
         actorUserId: "business-user-shrinika",
         now: "2026-01-03T00:02:00.000Z"
       }) as { id: string; assignmentStatus: string; notes: string | null };
       assert.equal(draft.assignmentStatus, "DRAFT");
       assert.ok(draft.notes?.includes("Short-staffing draft"));
-      assert.ok(draft.notes?.includes("Warning: QA and production readiness"));
+      assert.ok(draft.notes?.includes("Short-staffing warning"));
 
       assert.throws(() => createOrUpdateBuildMissionTeamAssignment(db, {
         buildMissionId: "mission-queue-1",
@@ -924,18 +924,18 @@ describe("database initialization", () => {
       const assigned = createOrUpdateBuildMissionTeamAssignment(db, {
         buildMissionId: "mission-queue-1",
         assignmentStatus: "ASSIGNED",
-        managerUserId: "Manager Placeholder",
-        teamLeaderUserId: "Team Leader Placeholder",
-        frontendDeveloperUserId: "Developer 1",
-        backendDeveloperUserId: "Developer 2",
-        qaUserId: "Developer 3",
-        productionReadinessUserId: "Developer 4",
+        managerUserId: "business-user-shrinika",
+        teamLeaderUserId: "business-user-shiva",
+        frontendDeveloperUserId: "business-user-shiva",
+        backendDeveloperUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
         actorUserId: "business-user-shiva",
         now: "2026-01-03T00:04:00.000Z"
       }) as { id: string; assignmentStatus: string; managerUserId: string; updatedByUserId: string };
       assert.equal(assigned.id, draft.id);
       assert.equal(assigned.assignmentStatus, "ASSIGNED");
-      assert.equal(assigned.managerUserId, "Manager Placeholder");
+      assert.equal(assigned.managerUserId, "business-user-shrinika");
       assert.equal(assigned.updatedByUserId, "business-user-shiva");
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_build_mission_team_assignments WHERE build_mission_id='mission-queue-1'").get() as { count: number }).count, 1);
 
@@ -997,6 +997,68 @@ describe("database initialization", () => {
       initializeDatabaseOn(db);
       assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='business_build_mission_team_assignments'").get());
       assert.equal((db.prepare("SELECT COUNT(*) AS count FROM build_missions WHERE id='legacy-mission'").get() as { count: number }).count, 1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("lists assignable internal users and validates Build Mission assignment user fit", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        assignBusinessRoleToUser,
+        listInternalAssignableUsers,
+        getInternalAssignableUser,
+        validateBuildMissionAssignmentUsers,
+        validateBuildMissionAssignmentRoleFit
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at,archived_at)
+        VALUES (?,?,?,?,?,?,?,NULL)`).run("business-user-support-fit", "support-fit@example.local", "Support Fit", "INTERNAL", "ACTIVE", "created", "created");
+      assignBusinessRoleToUser(db, { userId: "business-user-support-fit", roleKey: "support_manager", now: "2026-01-05T00:00:00.000Z" });
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at,archived_at)
+        VALUES (?,?,?,?,?,?,?,NULL)`).run("business-user-external-assignment", "external-assignment@example.local", "External Assignment", "EXTERNAL_CLIENT", "ACTIVE", "created", "created");
+      db.prepare(`INSERT INTO business_users (id,email,display_name,user_type,status,created_at,updated_at,archived_at)
+        VALUES (?,?,?,?,?,?,?,NULL)`).run("business-user-suspended-assignment", "suspended-assignment@example.local", "Suspended Assignment", "INTERNAL", "SUSPENDED", "created", "created");
+
+      const users = listInternalAssignableUsers(db) as Array<{ id: string; email: string; roleKeys: string[] }>;
+      assert.ok(users.some(user => user.id === "business-user-shrinika" && user.roleKeys.includes("main_admin_owner")));
+      assert.ok(users.some(user => user.id === "business-user-shiva" && user.roleKeys.includes("system_guardian")));
+      assert.ok(users.some(user => user.id === "business-user-support-fit" && user.email === "support-fit@example.local"));
+      assert.ok(!users.some(user => user.id === "business-user-external-assignment"));
+      assert.ok(!users.some(user => user.id === "business-user-suspended-assignment"));
+      assert.equal((getInternalAssignableUser(db, "business-user-shrinika") as { displayName: string }).displayName, "Shrinika");
+      assert.equal(getInternalAssignableUser(db, "business-user-external-assignment"), undefined);
+
+      assert.throws(() => validateBuildMissionAssignmentUsers(db, {
+        assignmentStatus: "DRAFT",
+        frontendDeveloperUserId: "missing-user"
+      } as any), /Frontend Developer user not found/);
+      assert.throws(() => validateBuildMissionAssignmentUsers(db, {
+        assignmentStatus: "DRAFT",
+        frontendDeveloperUserId: "business-user-external-assignment"
+      } as any), /Frontend Developer must be an internal user/);
+      assert.throws(() => validateBuildMissionAssignmentUsers(db, {
+        assignmentStatus: "DRAFT",
+        frontendDeveloperUserId: "business-user-suspended-assignment"
+      } as any), /Frontend Developer must be an active internal user/);
+      assert.throws(() => validateBuildMissionAssignmentUsers(db, {
+        assignmentStatus: "ASSIGNED"
+      } as any), /managerUserId is required/);
+
+      const duplicateWarnings = validateBuildMissionAssignmentUsers(db, {
+        assignmentStatus: "DRAFT",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva"
+      } as any) as { assignmentWarnings: string[] };
+      assert.ok(duplicateWarnings.assignmentWarnings.some(warning => warning.includes("Short-staffing warning")));
+
+      const roleFit = validateBuildMissionAssignmentRoleFit(db, {
+        assignmentStatus: "DRAFT",
+        frontendDeveloperUserId: "business-user-support-fit"
+      } as any) as { roleFitWarnings: string[] };
+      assert.ok(roleFit.roleFitWarnings.some(warning => warning.includes("Role-fit warning")));
     } finally {
       db.close();
     }
@@ -1088,9 +1150,9 @@ describe("database initialization", () => {
       createOrUpdateBuildMissionTeamAssignment(db, {
         buildMissionId: "mission-dev-gate-1",
         assignmentStatus: "ASSIGNED",
-        managerUserId: "Manager Placeholder",
-        qaUserId: "Developer 3",
-        productionReadinessUserId: "Developer 4",
+        managerUserId: "business-user-shrinika",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
         actorUserId: "business-user-shrinika",
         now: "2026-01-04T00:04:00.000Z"
       });
@@ -1126,7 +1188,7 @@ describe("database initialization", () => {
       createOrUpdateBuildMissionTeamAssignment(db, {
         buildMissionId: "mission-dev-gate-2",
         assignmentStatus: "ASSIGNED",
-        managerUserId: "Manager Placeholder",
+        managerUserId: "business-user-shrinika",
         actorUserId: "business-user-shrinika",
         now: "2026-01-04T00:08:00.000Z"
       });

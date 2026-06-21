@@ -6,10 +6,13 @@ import {
   blockBuildMissionDevelopmentStart,
   db,
   getBuildMissionQueueItem,
+  listInternalAssignableUsers,
   listBuildMissionQueueItems,
   recordBuildMissionQueueEvent,
   requestBuildMissionDevelopmentStart,
   updateBusinessProjectIntake,
+  validateBuildMissionAssignmentRoleFit,
+  validateBuildMissionAssignmentUsers,
   type BusinessBuildMissionTeamAssignmentInput
 } from "@s4/db";
 import { withBusinessPermission } from "./business-auth-middleware.js";
@@ -19,6 +22,10 @@ import { sanitizeForPolicy } from "./security-policy.js";
 type RequestBody = Record<string, unknown>;
 
 export function registerBuildMissionQueueRoutes(app: FastifyInstance) {
+  app.get("/api/business-control-centre/assignable-users", withBusinessPermission("hrms.view", async () => ({
+    users: listInternalAssignableUsers(db)
+  })));
+
   app.get("/api/business-control-centre/build-mission-queue", withBusinessPermission("app_studio.view", async () => ({
     queue: listBuildMissionQueueItems(db)
   })));
@@ -108,8 +115,11 @@ export function registerBuildMissionQueueRoutes(app: FastifyInstance) {
     if (!item) return reply.status(404).send({ error: "Build Mission queue item not found" });
     try {
       const timestamp = new Date().toISOString();
+      const assignmentBody = readAssignmentBody(request.body);
+      const assignmentWarnings = validateBuildMissionAssignmentUsers(db, assignmentBody).assignmentWarnings;
+      const roleFitWarnings = validateBuildMissionAssignmentRoleFit(db, assignmentBody).roleFitWarnings;
       const assignment = createOrUpdateBuildMissionTeamAssignment(db, {
-        ...readAssignmentBody(request.body),
+        ...assignmentBody,
         buildMissionId,
         projectIntakeId: item.intake?.id as string | undefined,
         actorUserId: context.user.id,
@@ -120,10 +130,10 @@ export function registerBuildMissionQueueRoutes(app: FastifyInstance) {
         eventType: "BUILD_MISSION_TEAM_ASSIGNMENT_UPDATED",
         actorUserId: context.user.id,
         summary: "Build Mission team assignment updated",
-        payload: { assignmentStatus: readAssignmentBody(request.body).assignmentStatus },
+        payload: { assignmentStatus: assignmentBody.assignmentStatus, assignmentWarnings, roleFitWarnings },
         now: timestamp
       });
-      return { assignment, item: getBuildMissionQueueItem(db, buildMissionId) };
+      return { assignment, assignmentWarnings, roleFitWarnings, item: getBuildMissionQueueItem(db, buildMissionId) };
     } catch (error) {
       return reply.status(400).send({ error: error instanceof Error ? error.message : "Unable to save Build Mission team assignment" });
     }

@@ -138,6 +138,39 @@ describe("Business Control Centre Build Mission queue API", () => {
     assert.ok(!get.body.includes("scrypt$"));
   });
 
+  it("lists safe assignable internal users only", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-assignable-token");
+    insertBusinessUser({ id: "business-user-assignable-external", email: "assignable-external@example.local", userType: "EXTERNAL_CLIENT" });
+    insertBusinessUser({ id: "business-user-assignable-suspended", email: "assignable-suspended@example.local", status: "SUSPENDED" });
+
+    const unauthenticated = await app.inject({ method: "GET", url: "/api/business-control-centre/assignable-users" });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/assignable-users",
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(response.statusCode, 200);
+    const users = (response.json() as { users: Array<{ id: string; email: string; roleKeys: string[]; passwordHash?: string; sessionTokenHash?: string }> }).users;
+    assert.ok(users.some(user => user.id === "business-user-shrinika" && user.roleKeys.includes("main_admin_owner")));
+    assert.ok(users.some(user => user.id === "business-user-shiva" && user.roleKeys.includes("system_guardian")));
+    assert.ok(!users.some(user => user.id === "business-user-assignable-external"));
+    assert.ok(!users.some(user => user.id === "business-user-assignable-suspended"));
+    assert.ok(!response.body.includes("scrypt$"));
+    assert.ok(!response.body.includes("session_token_hash"));
+    assert.ok(!response.body.includes("passwordHash"));
+
+    insertBusinessUser({ id: "business-user-external-assignable-route", email: "external-assignable-route@example.local", userType: "EXTERNAL_CLIENT" });
+    insertForcedSession({ id: "forced-external-assignable-route-session", userId: "business-user-external-assignable-route", rawToken: "external-assignable-route-token" });
+    const external = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/assignable-users",
+      headers: { cookie: cookie("external-assignable-route-token") }
+    });
+    assert.equal(external.statusCode, 403);
+  });
+
   it("approves a draft without running agents or creating proposals", async () => {
     const sessionCookie = createInternalSession("business-user-shrinika", "queue-approve-token");
     const handoff = await createQueueMission(sessionCookie, "Queue Approval Mission");
@@ -195,16 +228,17 @@ describe("Business Control Centre Build Mission queue API", () => {
       headers: { cookie: sessionCookie },
       payload: {
         assignmentStatus: "DRAFT",
-        teamLeaderUserId: "Team Leader Placeholder",
-        qaUserId: "Developer 3",
-        productionReadinessUserId: "Developer 3",
+        teamLeaderUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
         notes: "Short-staffed coverage draft"
       }
     });
     assert.equal(draft.statusCode, 200);
-    const draftBody = draft.json() as { assignment: { id: string; assignmentStatus: string; notes: string } };
+    const draftBody = draft.json() as { assignment: { id: string; assignmentStatus: string; notes: string }; assignmentWarnings: string[] };
     assert.equal(draftBody.assignment.assignmentStatus, "DRAFT");
-    assert.ok(draftBody.assignment.notes.includes("Warning: QA and production readiness"));
+    assert.ok(draftBody.assignment.notes.includes("Short-staffing warning"));
+    assert.ok(draftBody.assignmentWarnings.some(warning => warning.includes("Short-staffing warning")));
 
     const invalidFinalize = await app.inject({
       method: "POST",
@@ -214,17 +248,46 @@ describe("Business Control Centre Build Mission queue API", () => {
     });
     assert.equal(invalidFinalize.statusCode, 400);
 
+    const unknownUser = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "DRAFT", frontendDeveloperUserId: "missing-user" }
+    });
+    assert.equal(unknownUser.statusCode, 400);
+    assert.match((unknownUser.json() as { error: string }).error, /Frontend Developer user not found/);
+
+    insertBusinessUser({ id: "business-user-external-assignment-api", email: "external-assignment-api@example.local", userType: "EXTERNAL_CLIENT" });
+    const externalAssignment = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "DRAFT", frontendDeveloperUserId: "business-user-external-assignment-api" }
+    });
+    assert.equal(externalAssignment.statusCode, 400);
+    assert.match((externalAssignment.json() as { error: string }).error, /Frontend Developer must be an internal user/);
+
+    insertBusinessUser({ id: "business-user-inactive-assignment-api", email: "inactive-assignment-api@example.local", status: "SUSPENDED" });
+    const inactiveAssignment = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: { assignmentStatus: "DRAFT", frontendDeveloperUserId: "business-user-inactive-assignment-api" }
+    });
+    assert.equal(inactiveAssignment.statusCode, 400);
+    assert.match((inactiveAssignment.json() as { error: string }).error, /Frontend Developer must be an active internal user/);
+
     const assigned = await app.inject({
       method: "POST",
       url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
       headers: { cookie: sessionCookie },
       payload: {
         assignmentStatus: "ASSIGNED",
-        managerUserId: "Manager Placeholder",
-        frontendDeveloperUserId: "Developer 1",
-        backendDeveloperUserId: "Developer 2",
-        qaUserId: "Developer 3",
-        productionReadinessUserId: "Developer 4",
+        managerUserId: "business-user-shrinika",
+        frontendDeveloperUserId: "business-user-shiva",
+        backendDeveloperUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
         notes: "Finalized internal assignment."
       }
     });
@@ -232,7 +295,7 @@ describe("Business Control Centre Build Mission queue API", () => {
     const assignedBody = assigned.json() as { assignment: { id: string; assignmentStatus: string; managerUserId: string } };
     assert.equal(assignedBody.assignment.id, draftBody.assignment.id);
     assert.equal(assignedBody.assignment.assignmentStatus, "ASSIGNED");
-    assert.equal(assignedBody.assignment.managerUserId, "Manager Placeholder");
+    assert.equal(assignedBody.assignment.managerUserId, "business-user-shrinika");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_build_mission_team_assignments WHERE build_mission_id=?").get(handoff.buildMission.id) as { count: number }).count, 1);
   });
 
@@ -289,7 +352,7 @@ describe("Business Control Centre Build Mission queue API", () => {
       method: "POST",
       url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
       headers: { cookie: sessionCookie },
-      payload: { assignmentStatus: "ASSIGNED", managerUserId: "Manager Placeholder", qaUserId: "Developer 3", productionReadinessUserId: "Developer 4" }
+      payload: { assignmentStatus: "ASSIGNED", managerUserId: "business-user-shrinika", qaUserId: "business-user-shiva", productionReadinessUserId: "business-user-shiva" }
     });
     assert.equal(assignment.statusCode, 200);
 
@@ -361,7 +424,7 @@ describe("Business Control Centre Build Mission queue API", () => {
       method: "POST",
       url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
       headers: { cookie: sessionCookie },
-      payload: { assignmentStatus: "ASSIGNED", managerUserId: "Manager Placeholder" }
+      payload: { assignmentStatus: "ASSIGNED", managerUserId: "business-user-shrinika" }
     });
     const requested = await app.inject({
       method: "POST",
