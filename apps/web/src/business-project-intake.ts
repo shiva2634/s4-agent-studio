@@ -20,13 +20,16 @@ export type BusinessProjectIntake = {
   risksAssumptions: string | null;
   finalApprovalOwner: string;
   workflowStatus: string;
+  appStudioBuildMissionId: string | null;
+  handedOffAt: string | null;
+  handedOffByUserId: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
 };
 
 export type BusinessProjectIntakePayload = Omit<BusinessProjectIntake,
-  "id" | "createdAt" | "updatedAt" | "archivedAt"
+  "id" | "appStudioBuildMissionId" | "handedOffAt" | "handedOffByUserId" | "createdAt" | "updatedAt" | "archivedAt"
 >;
 
 type IntakeListResponse = {
@@ -35,6 +38,20 @@ type IntakeListResponse = {
 
 type IntakeResponse = {
   intake?: BusinessProjectIntake;
+  error?: string;
+};
+
+type HandoffResponse = {
+  intake?: BusinessProjectIntake;
+  buildMission?: {
+    id: string;
+    status: string;
+    targetModule: string;
+    projectId: string;
+    approvalRequired: boolean;
+    nextAction: string;
+  };
+  buildMissionId?: string;
   error?: string;
 };
 
@@ -71,4 +88,16 @@ export async function createBusinessProjectIntake(payload: BusinessProjectIntake
   const body = await readJson(response) as IntakeResponse;
   if (!response.ok || !body.intake) throw new Error(typeof body.error === "string" ? body.error : "Unable to create project intake");
   return body.intake;
+}
+
+export async function createBuildMissionFromProjectIntake(id: string): Promise<{ intake: BusinessProjectIntake; buildMission: NonNullable<HandoffResponse["buildMission"]> }> {
+  const response = await fetch(projectIntakeUrl(`/api/business-control-centre/project-intakes/${encodeURIComponent(id)}/create-build-mission`), {
+    method: "POST",
+    credentials: "include"
+  });
+  const body = await readJson(response) as HandoffResponse;
+  if (!response.ok || !body.intake || !body.buildMission) {
+    throw new Error(typeof body.error === "string" ? body.error : "Unable to create App Studio Build Mission draft");
+  }
+  return { intake: body.intake, buildMission: body.buildMission };
 }

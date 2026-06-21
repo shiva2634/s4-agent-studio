@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useState } from "react";
-import { createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
+import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
 type AppTheme = "dark" | "midnight" | "purple" | "emerald" | "sunset" | "light" | "contrast";
@@ -2228,6 +2228,20 @@ function formatInternalRole(role: string | undefined): string {
   return role.split("_").map(part => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
 }
 
+function hasIntakeContent(value: string | null | undefined) {
+  return typeof value === "string" && value.trim().length >= 3;
+}
+
+function buildProjectIntakeHandoffChecklist(intake: BusinessProjectIntake | null) {
+  return [
+    { label: "PRD Approved", complete: intake?.prdStatus === "Approved" },
+    { label: "Workflow Ready for App Studio", complete: intake?.workflowStatus === "READY_FOR_APP_STUDIO" },
+    { label: "Core modules present", complete: hasIntakeContent(intake?.coreModulesRequired) },
+    { label: "Key features present", complete: hasIntakeContent(intake?.keyFeatures) },
+    { label: "Problem statement present", complete: hasIntakeContent(intake?.problemStatement) }
+  ];
+}
+
 export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: (path: string) => void; auth: InternalAuthState; onLogout: () => Promise<void> }) {
   const { theme, setTheme } = useStoredAppTheme();
   const [activeSectionId, setActiveSectionId] = useState("company-dashboard");
@@ -2237,6 +2251,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [selectedProjectIntakeId, setSelectedProjectIntakeId] = useState<string>("");
   const [projectIntakeLoading, setProjectIntakeLoading] = useState(false);
   const [projectIntakeSaving, setProjectIntakeSaving] = useState(false);
+  const [projectIntakeHandoffSaving, setProjectIntakeHandoffSaving] = useState(false);
   const [projectIntakeMessage, setProjectIntakeMessage] = useState("");
   const [projectIntakeError, setProjectIntakeError] = useState("");
 
@@ -2263,6 +2278,8 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   }, [activeSection.id]);
 
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
+  const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
+  const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
   const updateProjectIntakeField = (field: keyof BusinessProjectIntakePayload, value: string) => {
     setProjectIntakeForm(current => ({ ...current, [field]: value }));
   };
@@ -2281,6 +2298,22 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setProjectIntakeError(error instanceof Error ? error.message : "Unable to create project intake");
     } finally {
       setProjectIntakeSaving(false);
+    }
+  };
+  const handleProjectIntakeHandoff = async () => {
+    if (!selectedProjectIntake || !selectedProjectIntakeHandoffEligible) return;
+    setProjectIntakeHandoffSaving(true);
+    setProjectIntakeMessage("");
+    setProjectIntakeError("");
+    try {
+      const result = await createBuildMissionFromProjectIntake(selectedProjectIntake.id);
+      setProjectIntakes(current => current.map(intake => intake.id === result.intake.id ? result.intake : intake));
+      setSelectedProjectIntakeId(result.intake.id);
+      setProjectIntakeMessage(`Build Mission draft created. App Studio approval is still required. Mission: ${result.buildMission.id}`);
+    } catch (error) {
+      setProjectIntakeError(error instanceof Error ? error.message : "Unable to create App Studio Build Mission draft");
+    } finally {
+      setProjectIntakeHandoffSaving(false);
     }
   };
 
@@ -2649,12 +2682,12 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
           {activeSection.id === "create-project-prd" ? (
           <section className="business-section project-prd-section" id="create-project-prd">
             <div className="business-section-heading">
-              <span>Internal-only project creation and PRD intake planning UI. No backend project creation, file upload, or AI generation is connected.</span>
+              <span>Internal-only project creation and PRD intake. App Studio handoff creates a draft only after approval readiness.</span>
               <h2>Create Project & PRD Intake</h2>
             </div>
             <div className="business-boundary-notice project-prd-boundary">
               <strong>Project intake boundary</strong>
-              <p>No project is sent to App Studio until PRD and scope are approved. Customer-facing communication remains outside Business Control Centre. This section is UI-only until backend project creation is connected.</p>
+              <p>No project is sent to App Studio until PRD and scope are approved. Customer-facing communication remains outside Business Control Centre. Build Mission handoff creates a governed draft only; no agents start automatically.</p>
             </div>
             <div className="project-prd-layout">
               <form className="project-prd-form" aria-label="Create internal project and PRD intake form" onSubmit={event => void handleProjectIntakeSubmit(event)}>
@@ -2681,7 +2714,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                 {projectIntakeError ? <p className="error">{projectIntakeError}</p> : null}
                 <div className="project-prd-actions">
                   <button type="submit" disabled={projectIntakeSaving}>{projectIntakeSaving ? "Saving..." : "Create project intake"}</button>
-                  <button type="button" disabled>Send to App Studio placeholder</button>
+                  <button type="button" disabled>Create Build Mission Draft from a saved approved intake</button>
                 </div>
               </form>
               <aside className="prd-workspace-panel">
@@ -2725,6 +2758,28 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         <div><span>Source</span><strong>{selectedProjectIntake.projectSource}</strong></div>
                         <div><span>Final owner</span><strong>{selectedProjectIntake.finalApprovalOwner}</strong></div>
                         <div><span>Updated</span><strong>{selectedProjectIntake.updatedAt}</strong></div>
+                      </div>
+                      <div className="handoff-status-panel">
+                        <div className="handoff-status-header">
+                          <div>
+                            <span>App Studio handoff status</span>
+                            <strong>{selectedProjectIntake.appStudioBuildMissionId ? "Build Mission draft created" : "Not handed off"}</strong>
+                          </div>
+                          {selectedProjectIntake.appStudioBuildMissionId ? <small>Mission: {selectedProjectIntake.appStudioBuildMissionId}</small> : <small>Approval readiness required</small>}
+                        </div>
+                        <div className="handoff-checklist" aria-label="App Studio handoff eligibility checklist">
+                          {selectedProjectIntakeHandoffChecklist.map(item => (
+                            <span className={item.complete ? "complete" : "pending"} key={item.label}>{item.complete ? "Ready" : "Needed"}: {item.label}</span>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleProjectIntakeHandoff()}
+                          disabled={!selectedProjectIntakeHandoffEligible || projectIntakeHandoffSaving}
+                        >
+                          {projectIntakeHandoffSaving ? "Creating draft..." : selectedProjectIntake.appStudioBuildMissionId ? "Build Mission draft created" : "Create App Studio Build Mission Draft"}
+                        </button>
+                        <p>Build Mission draft creation still requires App Studio approval. No development agents start automatically.</p>
                       </div>
                     </article>
                   ) : null}

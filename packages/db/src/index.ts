@@ -162,6 +162,13 @@ export type BusinessProjectPrdEventInput = {
   now?: string;
 };
 
+export type BusinessProjectIntakeBuildMissionHandoffInput = {
+  intakeId: string;
+  buildMissionId: string;
+  actorUserId: string;
+  now?: string;
+};
+
 const businessRoleSeeds = [
   ["main_admin_owner", "Main Admin / Owner Admin", "Shrinika owner authority for all internal Business Control Centre operations.", "INTERNAL"],
   ["system_guardian", "Founder-builder / System Guardian", "Shiva internal system guardian role for technical governance and safety oversight.", "INTERNAL"],
@@ -711,9 +718,13 @@ export function initializeDatabaseOn(database: Database.Database) {
       updated_by_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      app_studio_build_mission_id TEXT,
+      handed_off_at TEXT,
+      handed_off_by_user_id TEXT,
       archived_at TEXT,
       FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
-      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(handed_off_by_user_id) REFERENCES business_users(id)
     );
     CREATE TABLE IF NOT EXISTS business_project_prd_events (
       id TEXT PRIMARY KEY,
@@ -1227,6 +1238,18 @@ export function initializeDatabaseOn(database: Database.Database) {
   if (!approvalColumns.some((column) => column.name === "task_round_id")) {
     database.exec("ALTER TABLE approvals ADD COLUMN task_round_id TEXT");
   }
+
+  const businessProjectIntakeColumns = database.prepare("PRAGMA table_info(business_project_intakes)").all() as Array<{ name: string }>;
+  if (!businessProjectIntakeColumns.some((column) => column.name === "app_studio_build_mission_id")) {
+    database.exec("ALTER TABLE business_project_intakes ADD COLUMN app_studio_build_mission_id TEXT");
+  }
+  if (!businessProjectIntakeColumns.some((column) => column.name === "handed_off_at")) {
+    database.exec("ALTER TABLE business_project_intakes ADD COLUMN handed_off_at TEXT");
+  }
+  if (!businessProjectIntakeColumns.some((column) => column.name === "handed_off_by_user_id")) {
+    database.exec("ALTER TABLE business_project_intakes ADD COLUMN handed_off_by_user_id TEXT");
+  }
+  database.exec("CREATE INDEX IF NOT EXISTS idx_business_project_intakes_build_mission ON business_project_intakes(app_studio_build_mission_id)");
 
   const mediaProjectColumns = database.prepare("PRAGMA table_info(media_projects)").all() as Array<{ name: string }>;
   if (!mediaProjectColumns.some((column) => column.name === "aspect_ratio")) {
@@ -2032,8 +2055,9 @@ export function createBusinessProjectIntake(database: Database.Database, input: 
     database.prepare(`INSERT INTO business_project_intakes
       (id,project_name,client_or_company_name,project_type,priority,project_source,prd_status,short_summary,problem_statement,
         target_users,core_modules_required,key_features,integrations_needed,design_references,delivery_deadline,estimated_budget_range,
-        risks_assumptions,final_approval_owner,workflow_status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+        risks_assumptions,final_approval_owner,workflow_status,created_by_user_id,updated_by_user_id,created_at,updated_at,
+        app_studio_build_mission_id,handed_off_at,handed_off_by_user_id,archived_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
       id,
       normalized.projectName,
       normalized.clientOrCompanyName,
@@ -2056,7 +2080,10 @@ export function createBusinessProjectIntake(database: Database.Database, input: 
       input.actorUserId,
       input.actorUserId,
       timestamp,
-      timestamp
+      timestamp,
+      null,
+      null,
+      null
     );
     recordBusinessProjectPrdEvent(database, {
       projectIntakeId: id,
@@ -2163,6 +2190,39 @@ export function archiveBusinessProjectIntake(database: Database.Database, id: st
   return getBusinessProjectIntakeById(database, id, { includeArchived: true });
 }
 
+export function markBusinessProjectIntakeBuildMissionHandoff(database: Database.Database, input: BusinessProjectIntakeBuildMissionHandoffInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const intake = getBusinessProjectIntakeById(database, input.intakeId);
+  if (!intake) throw new Error("Project intake not found");
+  const buildMissionId = normalizeRequiredText("buildMissionId", input.buildMissionId);
+  if (intake.appStudioBuildMissionId) throw new Error("Build mission handoff already exists");
+  const transaction = database.transaction(() => {
+    const result = database.prepare(`UPDATE business_project_intakes
+      SET app_studio_build_mission_id=?,handed_off_at=?,handed_off_by_user_id=?,workflow_status='TEAM_ASSIGNMENT_PENDING',
+        updated_by_user_id=?,updated_at=?
+      WHERE id=? AND archived_at IS NULL AND app_studio_build_mission_id IS NULL`).run(
+      buildMissionId,
+      timestamp,
+      input.actorUserId,
+      input.actorUserId,
+      timestamp,
+      input.intakeId
+    );
+    if (result.changes !== 1) throw new Error("Build mission handoff already exists");
+    recordBusinessProjectPrdEvent(database, {
+      projectIntakeId: input.intakeId,
+      eventType: "APP_STUDIO_BUILD_MISSION_DRAFT_CREATED",
+      actorUserId: input.actorUserId,
+      message: `App Studio Build Mission draft created for ${intake.projectName}`,
+      metadata: { buildMissionId, previousWorkflowStatus: intake.workflowStatus, workflowStatus: "TEAM_ASSIGNMENT_PENDING" },
+      now: timestamp
+    });
+  });
+  transaction();
+  return getBusinessProjectIntakeById(database, input.intakeId);
+}
+
 export function recordBusinessProjectPrdEvent(database: Database.Database, input: BusinessProjectPrdEventInput) {
   const timestamp = input.now ?? new Date().toISOString();
   assertActiveBusinessUser(database, input.actorUserId);
@@ -2225,6 +2285,9 @@ type BusinessProjectIntakeRow = {
   updatedByUserId: string;
   createdAt: string;
   updatedAt: string;
+  appStudioBuildMissionId: string | null;
+  handedOffAt: string | null;
+  handedOffByUserId: string | null;
   archivedAt: string | null;
 };
 
@@ -2234,7 +2297,9 @@ function businessProjectIntakeSelectSql() {
     target_users AS targetUsers,core_modules_required AS coreModulesRequired,key_features AS keyFeatures,integrations_needed AS integrationsNeeded,
     design_references AS designReferences,delivery_deadline AS deliveryDeadline,estimated_budget_range AS estimatedBudgetRange,
     risks_assumptions AS risksAssumptions,final_approval_owner AS finalApprovalOwner,workflow_status AS workflowStatus,
-    created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,
+    app_studio_build_mission_id AS appStudioBuildMissionId,handed_off_at AS handedOffAt,handed_off_by_user_id AS handedOffByUserId,
+    archived_at AS archivedAt
     FROM business_project_intakes`;
 }
 

@@ -44,6 +44,15 @@ const validPayload = {
   finalApprovalOwner: "Manager"
 };
 
+const readyForAppStudioPayload = {
+  ...validPayload,
+  projectName: "Client Portal Build Mission",
+  prdStatus: "Approved",
+  workflowStatus: "READY_FOR_APP_STUDIO",
+  coreModulesRequired: "Authentication, client dashboard, support ticket view",
+  keyFeatures: "Internal approval gate, customer-safe portal shell, support visibility"
+};
+
 function cookie(rawToken: string) {
   return `shrinika_internal_session=${encodeURIComponent(rawToken)}`;
 }
@@ -80,6 +89,11 @@ function insertForcedSession(input: { id: string; userId: string; rawToken: stri
     null,
     null
   );
+}
+
+function insertActiveAppStudioProject(id = "project-app-studio-handoff") {
+  db.prepare(`INSERT OR IGNORE INTO projects (id,name,root_path,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?)`).run(id, "S4 Agent Studio", `/tmp/${id}`, "ACTIVE", "created", "created");
 }
 
 describe("Business Control Centre project intake API", () => {
@@ -201,5 +215,169 @@ describe("Business Control Centre project intake API", () => {
     });
     assert.equal(suspended.statusCode, 403);
     db.prepare("UPDATE business_users SET status='ACTIVE' WHERE id='business-user-shiva'").run();
+  });
+
+  it("creates a governed App Studio Build Mission draft for approved ready intakes", async () => {
+    insertActiveAppStudioProject();
+    const sessionCookie = createInternalSession("business-user-shrinika", "project-intake-handoff-owner-token");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: readyForAppStudioPayload
+    });
+    assert.equal(created.statusCode, 201);
+    const intakeId = (created.json() as { intake: { id: string } }).intake.id;
+
+    const handoff = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(handoff.statusCode, 201);
+    const body = handoff.json() as { intake: { appStudioBuildMissionId: string; workflowStatus: string }; buildMission: { id: string; status: string; approvalRequired: boolean } };
+    assert.equal(body.buildMission.status, "DRAFT");
+    assert.equal(body.buildMission.approvalRequired, true);
+    assert.equal(body.intake.appStudioBuildMissionId, body.buildMission.id);
+    assert.equal(body.intake.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
+    assert.ok(!handoff.body.includes("project-intake-handoff-owner-token"));
+    assert.ok(!handoff.body.includes("scrypt$"));
+
+    const missionRow = db.prepare("SELECT status,approval_id AS approvalId FROM build_missions WHERE id=?").get(body.buildMission.id) as { status: string; approvalId: string | null };
+    assert.equal(missionRow.status, "DRAFT");
+    assert.equal(missionRow.approvalId, null);
+
+    const proposals = db.prepare(`SELECT COUNT(*) AS count FROM change_proposals cp
+      JOIN build_missions bm ON bm.task_id=cp.task_id
+      WHERE bm.id=?`).get(body.buildMission.id) as { count: number };
+    assert.equal(proposals.count, 0);
+
+    const events = await app.inject({
+      method: "GET",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/events`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(events.statusCode, 200);
+    assert.ok((events.json() as { events: Array<{ eventType: string; metadataJson: string | null }> }).events.some((event) =>
+      event.eventType === "APP_STUDIO_BUILD_MISSION_DRAFT_CREATED" && event.metadataJson?.includes(body.buildMission.id)
+    ));
+  });
+
+  it("rejects ineligible and duplicate handoffs safely", async () => {
+    insertActiveAppStudioProject("project-app-studio-handoff-2");
+    const sessionCookie = createInternalSession("business-user-shrinika", "project-intake-handoff-validation-token");
+    const draft = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: { ...readyForAppStudioPayload, projectName: "Draft PRD", prdStatus: "Drafting" }
+    });
+    const draftId = (draft.json() as { intake: { id: string } }).intake.id;
+    const draftHandoff = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${draftId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(draftHandoff.statusCode, 400);
+
+    const wrongWorkflow = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: { ...readyForAppStudioPayload, projectName: "Wrong Workflow", workflowStatus: "PRD_REVIEW" }
+    });
+    const wrongWorkflowId = (wrongWorkflow.json() as { intake: { id: string } }).intake.id;
+    const wrongWorkflowHandoff = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${wrongWorkflowId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(wrongWorkflowHandoff.statusCode, 400);
+
+    const missingContent = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: { ...readyForAppStudioPayload, projectName: "Missing Content", keyFeatures: "" }
+    });
+    const missingContentId = (missingContent.json() as { intake: { id: string } }).intake.id;
+    const missingContentHandoff = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${missingContentId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(missingContentHandoff.statusCode, 400);
+
+    const ready = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: { ...readyForAppStudioPayload, projectName: "Duplicate Handoff" }
+    });
+    const readyId = (ready.json() as { intake: { id: string } }).intake.id;
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${readyId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(first.statusCode, 201);
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${readyId}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(duplicate.statusCode, 409);
+    assert.ok((duplicate.json() as { buildMissionId?: string }).buildMissionId);
+  });
+
+  it("protects Build Mission handoff permission and session boundary", async () => {
+    insertActiveAppStudioProject("project-app-studio-handoff-3");
+    const ownerCookie = createInternalSession("business-user-shrinika", "project-intake-handoff-protect-owner-token");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: ownerCookie },
+      payload: { ...readyForAppStudioPayload, projectName: "Protected Handoff" }
+    });
+    const intakeId = (created.json() as { intake: { id: string } }).intake.id;
+
+    const unauthenticated = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    insertBusinessUser({ id: "business-user-support-handoff", email: "support-handoff@example.local" });
+    assignBusinessRoleToUser(db, { userId: "business-user-support-handoff", roleKey: "support_manager", now: "2026-01-01T00:00:00.000Z" });
+    const supportCookie = createInternalSession("business-user-support-handoff", "project-intake-handoff-support-token");
+    const forbidden = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`,
+      headers: { cookie: supportCookie }
+    });
+    assert.equal(forbidden.statusCode, 403);
+
+    insertBusinessUser({ id: "business-user-external-handoff", email: "external-handoff@example.local", userType: "EXTERNAL_CLIENT" });
+    insertForcedSession({ id: "forced-external-handoff-session", userId: "business-user-external-handoff", rawToken: "external-handoff-token" });
+    const external = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`,
+      headers: { cookie: cookie("external-handoff-token") }
+    });
+    assert.equal(external.statusCode, 403);
+
+    const suspendedToken = "suspended-handoff-token";
+    createInternalSession("business-user-shiva", suspendedToken);
+    db.prepare("UPDATE business_users SET status='SUSPENDED' WHERE id='business-user-shiva'").run();
+    const suspended = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`,
+      headers: { cookie: cookie(suspendedToken) }
+    });
+    assert.equal(suspended.statusCode, 403);
+    db.prepare("UPDATE business_users SET status='ACTIVE' WHERE id='business-user-shiva'").run();
+
+    const deniedEvents = db.prepare("SELECT COUNT(*) AS count FROM denied_access_events WHERE attempted_module='app_studio' AND attempted_action='create'").get() as { count: number };
+    assert.ok(deniedEvents.count >= 1);
   });
 });

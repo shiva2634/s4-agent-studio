@@ -703,4 +703,128 @@ describe("database initialization", () => {
       db.close();
     }
   });
+
+  it("adds and manages App Studio Build Mission handoff fields for project intakes", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        initializeDatabaseOn,
+        createBusinessProjectIntake,
+        getBusinessProjectIntakeById,
+        markBusinessProjectIntakeBuildMissionHandoff,
+        listBusinessProjectPrdEvents
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      const created = createBusinessProjectIntake(db, {
+        projectName: "Client Portal Build Mission",
+        clientOrCompanyName: "Shrinika Technologies",
+        projectType: "SaaS",
+        priority: "High",
+        projectSource: "Admin instruction",
+        prdStatus: "Approved",
+        shortSummary: "Prepare a governed client portal mission.",
+        problemStatement: "The approved PRD needs a build mission draft.",
+        coreModulesRequired: "Authentication, dashboard, support",
+        keyFeatures: "Client login, ticket view, notifications",
+        finalApprovalOwner: "Shrinika",
+        workflowStatus: "READY_FOR_APP_STUDIO",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-02T00:00:00.000Z"
+      }) as { id: string; appStudioBuildMissionId: string | null };
+      assert.equal(created.appStudioBuildMissionId, null);
+
+      const handedOff = markBusinessProjectIntakeBuildMissionHandoff(db, {
+        intakeId: created.id,
+        buildMissionId: "mission-client-portal",
+        actorUserId: "business-user-shiva",
+        now: "2026-01-02T00:05:00.000Z"
+      }) as { appStudioBuildMissionId: string; handedOffAt: string; handedOffByUserId: string; workflowStatus: string };
+      assert.equal(handedOff.appStudioBuildMissionId, "mission-client-portal");
+      assert.equal(handedOff.handedOffAt, "2026-01-02T00:05:00.000Z");
+      assert.equal(handedOff.handedOffByUserId, "business-user-shiva");
+      assert.equal(handedOff.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
+
+      const fetched = getBusinessProjectIntakeById(db, created.id) as { appStudioBuildMissionId: string };
+      assert.equal(fetched.appStudioBuildMissionId, "mission-client-portal");
+      assert.throws(() => markBusinessProjectIntakeBuildMissionHandoff(db, {
+        intakeId: created.id,
+        buildMissionId: "mission-duplicate",
+        actorUserId: "business-user-shiva",
+        now: "2026-01-02T00:06:00.000Z"
+      }), /already exists/);
+
+      const events = listBusinessProjectPrdEvents(db, created.id) as Array<{ eventType: string; metadataJson: string | null }>;
+      assert.ok(events.some((event) => event.eventType === "APP_STUDIO_BUILD_MISSION_DRAFT_CREATED"));
+      assert.ok(events.some((event) => event.metadataJson?.includes("mission-client-portal")));
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM business_project_intakes WHERE id=?").get(created.id) as { count: number }).count, 1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migrates legacy project intake rows with nullable handoff fields", async () => {
+    const db = new Database(":memory:");
+    try {
+      const { initializeDatabaseOn, getBusinessProjectIntakeById } = await loadInitializer();
+      db.exec(`CREATE TABLE business_project_intakes (
+        id TEXT PRIMARY KEY,
+        project_name TEXT NOT NULL,
+        client_or_company_name TEXT NOT NULL,
+        project_type TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        project_source TEXT NOT NULL,
+        prd_status TEXT NOT NULL,
+        short_summary TEXT NOT NULL,
+        problem_statement TEXT NOT NULL,
+        target_users TEXT,
+        core_modules_required TEXT,
+        key_features TEXT,
+        integrations_needed TEXT,
+        design_references TEXT,
+        delivery_deadline TEXT,
+        estimated_budget_range TEXT,
+        risks_assumptions TEXT,
+        final_approval_owner TEXT NOT NULL,
+        workflow_status TEXT NOT NULL,
+        created_by_user_id TEXT NOT NULL,
+        updated_by_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT
+      )`);
+      db.prepare(`INSERT INTO business_project_intakes
+        (id,project_name,client_or_company_name,project_type,priority,project_source,prd_status,short_summary,problem_statement,
+          final_approval_owner,workflow_status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+        "legacy-intake",
+        "Legacy Intake",
+        "Shrinika Technologies",
+        "SaaS",
+        "Medium",
+        "Admin instruction",
+        "Approved",
+        "Legacy summary",
+        "Legacy problem",
+        "Manager",
+        "READY_FOR_APP_STUDIO",
+        "business-user-shrinika",
+        "business-user-shrinika",
+        "created",
+        "created"
+      );
+
+      initializeDatabaseOn(db);
+      const columns = db.prepare("PRAGMA table_info(business_project_intakes)").all() as Array<{ name: string }>;
+      assert.ok(columns.some((column) => column.name === "app_studio_build_mission_id"));
+      assert.ok(columns.some((column) => column.name === "handed_off_at"));
+      assert.ok(columns.some((column) => column.name === "handed_off_by_user_id"));
+      const legacy = getBusinessProjectIntakeById(db, "legacy-intake") as { id: string; appStudioBuildMissionId: string | null; handedOffAt: string | null };
+      assert.equal(legacy.id, "legacy-intake");
+      assert.equal(legacy.appStudioBuildMissionId, null);
+      assert.equal(legacy.handedOffAt, null);
+    } finally {
+      db.close();
+    }
+  });
 });
