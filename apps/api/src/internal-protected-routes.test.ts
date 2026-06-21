@@ -115,7 +115,8 @@ describe("protected internal Business Control Centre and App Studio routes", () 
       "/api/business-control-centre/audit",
       "/api/business-control-centre/approvals",
       "/api/business-control-centre/system-health",
-      "/api/business-control-centre/deployment-hardening-status"
+      "/api/business-control-centre/deployment-hardening-status",
+      "/api/business-control-centre/internal-smoke-test-status"
     ]) {
       const response = await app.inject({
         method: "GET",
@@ -137,6 +138,20 @@ describe("protected internal Business Control Centre and App Studio routes", () 
     assert.ok(Array.isArray(hardeningBody.missingConfigNames));
     assert.ok(!hardening.body.includes("AI_API_KEY"));
     assert.ok(!hardening.body.includes("SESSION_SECRET"));
+
+    const smokeStatus = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/internal-smoke-test-status",
+      headers: { cookie: cookie(ownerToken) }
+    });
+    assert.equal(smokeStatus.statusCode, 200);
+    const smokeBody = smokeStatus.json() as { command: string; docsPath: string; status: string; deploymentRequiresManualApproval: boolean };
+    assert.equal(smokeBody.command, "npm run internal:smoke");
+    assert.equal(smokeBody.docsPath, "docs/final-internal-deployment-smoke-test.md");
+    assert.equal(smokeBody.status, "manual-run-required");
+    assert.equal(smokeBody.deploymentRequiresManualApproval, true);
+    assert.ok(!smokeStatus.body.includes("secret"));
+    assert.ok(!smokeStatus.body.includes("token"));
   });
 
   it("protects App Studio internal overview and allows seeded guardian access", async () => {

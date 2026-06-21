@@ -69,6 +69,7 @@ import {
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 import { getDeploymentHardeningStatus, type DeploymentHardeningStatus } from "./deployment-hardening";
+import { getInternalDeploymentSmokeStatus, type InternalDeploymentSmokeStatus } from "./internal-deployment-smoke";
 
 type AppTheme = "dark" | "midnight" | "purple" | "emerald" | "sunset" | "light" | "contrast";
 
@@ -2434,6 +2435,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [deploymentHardeningStatus, setDeploymentHardeningStatus] = useState<DeploymentHardeningStatus | null>(null);
   const [deploymentHardeningLoading, setDeploymentHardeningLoading] = useState(false);
   const [deploymentHardeningError, setDeploymentHardeningError] = useState("");
+  const [internalDeploymentSmokeStatus, setInternalDeploymentSmokeStatus] = useState<InternalDeploymentSmokeStatus | null>(null);
+  const [internalDeploymentSmokeLoading, setInternalDeploymentSmokeLoading] = useState(false);
+  const [internalDeploymentSmokeError, setInternalDeploymentSmokeError] = useState("");
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2689,6 +2693,26 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       })
       .finally(() => {
         if (!cancelled) setDeploymentHardeningLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "deployment-cloud") return;
+    let cancelled = false;
+    setInternalDeploymentSmokeLoading(true);
+    setInternalDeploymentSmokeError("");
+    getInternalDeploymentSmokeStatus()
+      .then(status => {
+        if (!cancelled) setInternalDeploymentSmokeStatus(status);
+      })
+      .catch(error => {
+        if (!cancelled) setInternalDeploymentSmokeError(error instanceof Error ? error.message : "Unable to load internal smoke test status");
+      })
+      .finally(() => {
+        if (!cancelled) setInternalDeploymentSmokeLoading(false);
       });
     return () => {
       cancelled = true;
@@ -5229,6 +5253,37 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                     ))}
                   </div>
                 </>
+              ) : null}
+            </div>
+            <div className="deployment-hardening-panel">
+              <div className="business-section-heading">
+                <span>Read-only final readiness smoke test. No deployment or provider action is executed from this UI.</span>
+                <h2>Final Internal Smoke Test</h2>
+              </div>
+              <div className="recent-intake-meta">
+                <div><span>Command</span><strong>npm run internal:smoke</strong></div>
+                <div><span>Checklist doc</span><strong>docs/final-internal-deployment-smoke-test.md</strong></div>
+              </div>
+              {internalDeploymentSmokeLoading ? <p>Loading internal smoke test status...</p> : null}
+              {internalDeploymentSmokeError ? <p className="error">{internalDeploymentSmokeError}</p> : null}
+              {internalDeploymentSmokeStatus ? (
+                <div className="deployment-hardening-grid">
+                  <article className="system-ops-card">
+                    <div className="system-ops-card-header">
+                      <div>
+                        <span>internal-smoke-test</span>
+                        <h3>{internalDeploymentSmokeStatus.status}</h3>
+                      </div>
+                      <span className="system-ops-status-badge warning">Manual run required</span>
+                    </div>
+                    <p>{internalDeploymentSmokeStatus.summary}</p>
+                    <div className="system-ops-detail-grid">
+                      <div><span>Command</span><strong>{internalDeploymentSmokeStatus.command}</strong></div>
+                      <div><span>Docs</span><strong>{internalDeploymentSmokeStatus.docsPath}</strong></div>
+                      <div><span>Manual approval</span><strong>{internalDeploymentSmokeStatus.deploymentRequiresManualApproval ? "Required" : "Not reported"}</strong></div>
+                    </div>
+                  </article>
+                </div>
               ) : null}
             </div>
             <div className="business-card-grid deployment-overview-grid" aria-label="Deployment overview cards">

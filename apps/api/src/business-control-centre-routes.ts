@@ -50,6 +50,15 @@ export function registerBusinessControlCentreRoutes(app: FastifyInstance) {
     module: "deployment-hardening",
     ...buildDeploymentHardeningStatus(process.env)
   })));
+
+  app.get("/api/business-control-centre/internal-smoke-test-status", withBusinessPermission("system.view", async () => ({
+    module: "internal-smoke-test",
+    command: "npm run internal:smoke",
+    docsPath: "docs/final-internal-deployment-smoke-test.md",
+    status: "manual-run-required",
+    summary: "Read-only smoke validation is available. Deployment still requires explicit manual approval.",
+    deploymentRequiresManualApproval: true
+  })));
 }
 
 function count(table: string) {
