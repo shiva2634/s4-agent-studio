@@ -137,6 +137,7 @@ export const businessBuildMissionQaChecklistSeverities = ["LOW", "MEDIUM", "HIGH
 export const businessBuildMissionProductionReadinessChecklistStatuses = ["DRAFT", "IN_PROGRESS", "FIXES_REQUIRED", "READY_FOR_APPROVAL", "APPROVED", "REJECTED", "ARCHIVED"] as const;
 export const businessBuildMissionProductionReadinessChecklistItemStatuses = ["NOT_CHECKED", "PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"] as const;
 export const businessBuildMissionProductionReadinessChecklistSeverities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const;
+export const businessBuildMissionDeploymentApprovalStatuses = ["DRAFT", "REQUESTED", "APPROVED", "REJECTED", "CANCELLED", "ARCHIVED"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -154,6 +155,7 @@ type BusinessBuildMissionQaChecklistSeverity = (typeof businessBuildMissionQaChe
 type BusinessBuildMissionProductionReadinessChecklistStatus = (typeof businessBuildMissionProductionReadinessChecklistStatuses)[number];
 type BusinessBuildMissionProductionReadinessChecklistItemStatus = (typeof businessBuildMissionProductionReadinessChecklistItemStatuses)[number];
 type BusinessBuildMissionProductionReadinessChecklistSeverity = (typeof businessBuildMissionProductionReadinessChecklistSeverities)[number];
+type BusinessBuildMissionDeploymentApprovalStatus = (typeof businessBuildMissionDeploymentApprovalStatuses)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -305,6 +307,14 @@ export type BuildMissionProductionReadinessChecklistItemUpdateInput = {
   severity?: BusinessBuildMissionProductionReadinessChecklistSeverity | null;
   evidenceNote?: string | null;
   blockerReason?: string | null;
+  now?: string;
+};
+
+export type BuildMissionDeploymentApprovalInput = {
+  buildMissionId: string;
+  actorUserId: string;
+  note?: string | null;
+  reason?: string | null;
   now?: string;
 };
 
@@ -1037,6 +1047,27 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(readiness_checklist_id) REFERENCES business_build_mission_production_readiness_checklists(id) ON DELETE CASCADE,
       FOREIGN KEY(checked_by_user_id) REFERENCES business_users(id)
     );
+    CREATE TABLE IF NOT EXISTS business_build_mission_deployment_approvals (
+      id TEXT PRIMARY KEY,
+      build_mission_id TEXT NOT NULL,
+      production_readiness_checklist_id TEXT NOT NULL,
+      approval_status TEXT NOT NULL CHECK(approval_status IN ('DRAFT','REQUESTED','APPROVED','REJECTED','CANCELLED','ARCHIVED')),
+      requested_by_user_id TEXT NOT NULL,
+      approved_by_user_id TEXT,
+      rejected_by_user_id TEXT,
+      approval_note TEXT,
+      rejection_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      approved_at TEXT,
+      rejected_at TEXT,
+      archived_at TEXT,
+      FOREIGN KEY(build_mission_id) REFERENCES build_missions(id) ON DELETE CASCADE,
+      FOREIGN KEY(production_readiness_checklist_id) REFERENCES business_build_mission_production_readiness_checklists(id) ON DELETE CASCADE,
+      FOREIGN KEY(requested_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(approved_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(rejected_by_user_id) REFERENCES business_users(id)
+    );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -1459,6 +1490,9 @@ export function initializeDatabaseOn(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_production_readiness_items_checklist ON business_build_mission_production_readiness_items(readiness_checklist_id, archived_at);
     CREATE INDEX IF NOT EXISTS idx_business_build_mission_production_readiness_items_status ON business_build_mission_production_readiness_items(item_status, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_production_readiness_items_active_unique ON business_build_mission_production_readiness_items(readiness_checklist_id, item_key) WHERE archived_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_deployment_approvals_mission ON business_build_mission_deployment_approvals(build_mission_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_business_build_mission_deployment_approvals_status ON business_build_mission_deployment_approvals(approval_status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_business_build_mission_deployment_approvals_active_unique ON business_build_mission_deployment_approvals(build_mission_id) WHERE archived_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_change_proposals_task ON change_proposals(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_task_executions_task ON task_executions(task_id, created_at DESC);
@@ -3043,6 +3077,23 @@ type BuildMissionProductionReadinessChecklistItemRow = {
   archivedAt: string | null;
 };
 
+type BuildMissionDeploymentApprovalRow = {
+  id: string;
+  buildMissionId: string;
+  productionReadinessChecklistId: string;
+  approvalStatus: BusinessBuildMissionDeploymentApprovalStatus;
+  requestedByUserId: string;
+  approvedByUserId: string | null;
+  rejectedByUserId: string | null;
+  approvalNote: string | null;
+  rejectionReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  archivedAt: string | null;
+};
+
 const buildMissionQaChecklistTemplates: Array<Pick<BuildMissionQaChecklistItemRow, "itemKey" | "itemTitle" | "itemDescription" | "severity">> = [
   { itemKey: "requirements_covered", itemTitle: "Requirements covered", itemDescription: "Confirm the approved PRD scope and acceptance criteria are reflected in the implementation.", severity: "HIGH" },
   { itemKey: "frontend_basic_flow", itemTitle: "Frontend basic flow", itemDescription: "Verify the primary frontend path renders correctly and supports the intended interaction flow.", severity: "MEDIUM" },
@@ -3543,6 +3594,120 @@ export function recordBuildMissionProductionReadinessEvent(database: Database.Da
   return recordBuildMissionQueueEvent(database, input);
 }
 
+export function getBuildMissionDeploymentApproval(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  return getBuildMissionDeploymentApprovalSummary(database, buildMissionId, options);
+}
+
+export function createBuildMissionDeploymentApproval(database: Database.Database, input: BuildMissionDeploymentApprovalInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const readiness = assertBuildMissionDeploymentApprovalReady(database, input.buildMissionId);
+  if (getBuildMissionDeploymentApprovalSummary(database, input.buildMissionId)) throw new Error("Active deployment approval already exists for this Build Mission");
+  const approvalId = `business-build-mission-deployment-approval-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO business_build_mission_deployment_approvals
+    (id,build_mission_id,production_readiness_checklist_id,approval_status,requested_by_user_id,approved_by_user_id,rejected_by_user_id,
+      approval_note,rejection_reason,created_at,updated_at,approved_at,rejected_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    approvalId,
+    input.buildMissionId,
+    readiness.productionReadinessChecklist.id,
+    "REQUESTED",
+    input.actorUserId,
+    null,
+    null,
+    sanitizeOptionalEventText(input.note),
+    null,
+    timestamp,
+    timestamp,
+    null,
+    null
+  );
+  recordBuildMissionDeploymentApprovalEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_DEPLOYMENT_APPROVAL_REQUESTED",
+    summary: "Deployment approval requested after production readiness approval",
+    actorUserId: input.actorUserId,
+    payload: { deploymentApprovalId: approvalId, productionReadinessChecklistId: readiness.productionReadinessChecklist.id },
+    now: timestamp
+  });
+  return getBuildMissionDeploymentApproval(database, input.buildMissionId);
+}
+
+export function approveBuildMissionDeploymentApproval(database: Database.Database, input: BuildMissionDeploymentApprovalInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const approval = getBuildMissionDeploymentApprovalSummary(database, input.buildMissionId) as BuildMissionDeploymentApprovalRow | undefined;
+  if (!approval || approval.archivedAt) throw new Error("Deployment approval not found");
+  if (approval.approvalStatus !== "REQUESTED" && approval.approvalStatus !== "DRAFT") throw new Error("Deployment approval must be requested before approval");
+  database.prepare(`UPDATE business_build_mission_deployment_approvals
+    SET approval_status='APPROVED',approved_by_user_id=?,approval_note=?,approved_at=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(input.actorUserId, sanitizeOptionalEventText(input.note), timestamp, timestamp, approval.id);
+  recordBuildMissionDeploymentApprovalEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_DEPLOYMENT_APPROVAL_APPROVED",
+    summary: "Deployment approval manually approved",
+    actorUserId: input.actorUserId,
+    payload: { deploymentApprovalId: approval.id, note: input.note ?? null },
+    now: timestamp
+  });
+  return getBuildMissionDeploymentApproval(database, input.buildMissionId);
+}
+
+export function rejectBuildMissionDeploymentApproval(database: Database.Database, input: BuildMissionDeploymentApprovalInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const approval = getBuildMissionDeploymentApprovalSummary(database, input.buildMissionId) as BuildMissionDeploymentApprovalRow | undefined;
+  if (!approval || approval.archivedAt) throw new Error("Deployment approval not found");
+  if (approval.approvalStatus === "APPROVED" || approval.approvalStatus === "REJECTED" || approval.approvalStatus === "ARCHIVED") throw new Error("Terminal deployment approvals cannot be rejected");
+  const reason = normalizeRequiredText("reason", input.reason ?? "");
+  database.prepare(`UPDATE business_build_mission_deployment_approvals
+    SET approval_status='REJECTED',rejected_by_user_id=?,rejection_reason=?,rejected_at=?,updated_at=?
+    WHERE id=? AND archived_at IS NULL`).run(input.actorUserId, sanitizeEventText(reason), timestamp, timestamp, approval.id);
+  recordBuildMissionDeploymentApprovalEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_DEPLOYMENT_APPROVAL_REJECTED",
+    summary: "Deployment approval rejected",
+    actorUserId: input.actorUserId,
+    payload: { deploymentApprovalId: approval.id, reason },
+    now: timestamp
+  });
+  return getBuildMissionDeploymentApproval(database, input.buildMissionId);
+}
+
+export function archiveBuildMissionDeploymentApproval(database: Database.Database, input: BuildMissionDeploymentApprovalInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const approval = getBuildMissionDeploymentApprovalSummary(database, input.buildMissionId) as BuildMissionDeploymentApprovalRow | undefined;
+  if (!approval || approval.archivedAt) throw new Error("Deployment approval not found");
+  database.prepare("UPDATE business_build_mission_deployment_approvals SET approval_status='ARCHIVED',archived_at=?,updated_at=? WHERE id=? AND archived_at IS NULL")
+    .run(timestamp, timestamp, approval.id);
+  recordBuildMissionDeploymentApprovalEvent(database, {
+    buildMissionId: input.buildMissionId,
+    eventType: "BUILD_MISSION_DEPLOYMENT_APPROVAL_ARCHIVED",
+    summary: "Deployment approval archived",
+    actorUserId: input.actorUserId,
+    payload: { deploymentApprovalId: approval.id },
+    now: timestamp
+  });
+  return getBuildMissionDeploymentApproval(database, input.buildMissionId, { includeArchived: true });
+}
+
+export function listBuildMissionDeploymentApprovalDashboardItems(database: Database.Database) {
+  return listBuildMissionProductionReadinessDashboardItems(database)
+    .filter((item: any) => isBuildMissionDeploymentApprovalDashboardEligible(item))
+    .map((item: any) => ({ ...item, deploymentApproval: getBuildMissionDeploymentApprovalSummary(database, item.buildMissionId) }));
+}
+
+export function getBuildMissionDeploymentApprovalDashboardItem(database: Database.Database, buildMissionId: string) {
+  const item = getBuildMissionProductionReadinessDashboardItem(database, buildMissionId) as any;
+  if (!item || !isBuildMissionDeploymentApprovalDashboardEligible(item)) return undefined;
+  return { ...item, deploymentApproval: getBuildMissionDeploymentApproval(database, buildMissionId) };
+}
+
+export function recordBuildMissionDeploymentApprovalEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
+  return recordBuildMissionQueueEvent(database, input);
+}
+
 export function listBuildMissionQaDashboardItems(database: Database.Database) {
   return listBuildMissionExecutionDashboardItems(database)
     .filter((item: any) => isBuildMissionQaDashboardEligible(item))
@@ -3849,6 +4014,10 @@ function isBuildMissionProductionReadinessDashboardEligible(item: any) {
   );
 }
 
+function isBuildMissionDeploymentApprovalDashboardEligible(item: any) {
+  return Boolean(item?.deploymentApproval) || item?.productionReadinessChecklist?.readinessStatus === "APPROVED";
+}
+
 function isBuildMissionQaDashboardEligible(item: any) {
   return Boolean(item?.qaChecklist) || Boolean(item?.executionStatus && isBuildMissionQaReadyExecution(item.executionStatus));
 }
@@ -3901,6 +4070,27 @@ function getBuildMissionProductionReadinessChecklistItems(database: Database.Dat
 function areBuildMissionProductionReadinessChecklistItemsReady(database: Database.Database, readinessChecklistId: string) {
   const rows = getBuildMissionProductionReadinessChecklistItems(database, readinessChecklistId);
   return rows.length > 0 && rows.every((item) => item.itemStatus === "PASS" || item.itemStatus === "NOT_APPLICABLE");
+}
+
+function getBuildMissionDeploymentApprovalSummary(database: Database.Database, buildMissionId: string, options: { includeArchived?: boolean } = {}) {
+  return database.prepare(`SELECT id,build_mission_id AS buildMissionId,production_readiness_checklist_id AS productionReadinessChecklistId,
+      approval_status AS approvalStatus,requested_by_user_id AS requestedByUserId,approved_by_user_id AS approvedByUserId,
+      rejected_by_user_id AS rejectedByUserId,approval_note AS approvalNote,rejection_reason AS rejectionReason,created_at AS createdAt,
+      updated_at AS updatedAt,approved_at AS approvedAt,rejected_at AS rejectedAt,archived_at AS archivedAt
+    FROM business_build_mission_deployment_approvals
+    WHERE build_mission_id=?${options.includeArchived ? "" : " AND archived_at IS NULL"}
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1`).get(buildMissionId) as BuildMissionDeploymentApprovalRow | undefined;
+}
+
+function assertBuildMissionDeploymentApprovalReady(database: Database.Database, buildMissionId: string) {
+  const item = getBuildMissionProductionReadinessDashboardItem(database, buildMissionId) as any;
+  if (!item) throw new Error("Build Mission not found");
+  const productionReadinessChecklist = getBuildMissionProductionReadinessChecklistSummary(database, buildMissionId) as BuildMissionProductionReadinessChecklistSummaryRow | undefined;
+  if (!productionReadinessChecklist || productionReadinessChecklist.readinessStatus !== "APPROVED") {
+    throw new Error("Production readiness must be APPROVED before deployment approval creation");
+  }
+  return { item, productionReadinessChecklist };
 }
 
 function syncExecutionProductionReadinessStatus(database: Database.Database, buildMissionId: string, readinessStatus: BusinessBuildMissionProductionReadinessChecklistStatus | "PRODUCTION_READINESS_CHECKLIST_CREATED", actorUserId: string, now: string, explicitExecutionStatus?: string) {

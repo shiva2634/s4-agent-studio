@@ -57,6 +57,15 @@ import {
   type BuildMissionProductionReadinessDashboardItem,
   type BuildMissionProductionReadinessDetailItem
 } from "./build-mission-production-readiness";
+import {
+  approveBuildMissionDeploymentApproval,
+  archiveBuildMissionDeploymentApproval,
+  createBuildMissionDeploymentApproval,
+  getBuildMissionDeploymentApprovalDashboardItem,
+  listBuildMissionDeploymentApprovalDashboard,
+  rejectBuildMissionDeploymentApproval,
+  type BuildMissionDeploymentApprovalDashboardItem
+} from "./build-mission-deployment-approval";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 
@@ -454,6 +463,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "build-mission-execution", label: "Build Mission Execution", group: "Operations" },
   { id: "build-mission-qa", label: "QA / Testing Approval", group: "Operations" },
   { id: "build-mission-production-readiness", label: "Production Readiness", group: "Operations" },
+  { id: "build-mission-deployment-approval", label: "Deployment Approval", group: "Operations" },
   { id: "project-assignment-control", label: "Project Assignment Control", group: "Operations" },
   { id: "client-management", label: "Client Management", group: "Operations" },
   { id: "approvals", label: "Approvals Control Centre", group: "Operations" },
@@ -2412,6 +2422,14 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionProductionReadinessError, setBuildMissionProductionReadinessError] = useState("");
   const [buildMissionProductionReadinessStatusForm, setBuildMissionProductionReadinessStatusForm] = useState<ProductionReadinessChecklistStatusForm>({ readinessStatus: "DRAFT", note: "", readinessOwnerUserId: "" });
   const [buildMissionProductionReadinessItemDrafts, setBuildMissionProductionReadinessItemDrafts] = useState<Record<string, ProductionReadinessChecklistItemDraft>>({});
+  const [buildMissionDeploymentApprovalItems, setBuildMissionDeploymentApprovalItems] = useState<BuildMissionDeploymentApprovalDashboardItem[]>([]);
+  const [selectedBuildMissionDeploymentApprovalId, setSelectedBuildMissionDeploymentApprovalId] = useState("");
+  const [selectedBuildMissionDeploymentApprovalDetail, setSelectedBuildMissionDeploymentApprovalDetail] = useState<BuildMissionDeploymentApprovalDashboardItem | null>(null);
+  const [buildMissionDeploymentApprovalLoading, setBuildMissionDeploymentApprovalLoading] = useState(false);
+  const [buildMissionDeploymentApprovalSaving, setBuildMissionDeploymentApprovalSaving] = useState(false);
+  const [buildMissionDeploymentApprovalMessage, setBuildMissionDeploymentApprovalMessage] = useState("");
+  const [buildMissionDeploymentApprovalError, setBuildMissionDeploymentApprovalError] = useState("");
+  const [buildMissionDeploymentApprovalNote, setBuildMissionDeploymentApprovalNote] = useState("");
 
   useEffect(() => {
     if (activeSection.id !== "create-project-prd") return;
@@ -2611,6 +2629,48 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     };
   }, [activeSection.id, selectedBuildMissionProductionReadinessId]);
 
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-deployment-approval") return;
+    let cancelled = false;
+    setBuildMissionDeploymentApprovalLoading(true);
+    setBuildMissionDeploymentApprovalError("");
+    listBuildMissionDeploymentApprovalDashboard()
+      .then(dashboard => {
+        if (cancelled) return;
+        setBuildMissionDeploymentApprovalItems(dashboard);
+        setSelectedBuildMissionDeploymentApprovalId(current => current || dashboard[0]?.buildMissionId || "");
+      })
+      .catch(error => {
+        if (!cancelled) setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to load deployment approval dashboard");
+      })
+      .finally(() => {
+        if (!cancelled) setBuildMissionDeploymentApprovalLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "build-mission-deployment-approval" || !selectedBuildMissionDeploymentApprovalId) return;
+    let cancelled = false;
+    setBuildMissionDeploymentApprovalLoading(true);
+    setBuildMissionDeploymentApprovalError("");
+    getBuildMissionDeploymentApprovalDashboardItem(selectedBuildMissionDeploymentApprovalId)
+      .then(item => {
+        if (!cancelled) setSelectedBuildMissionDeploymentApprovalDetail(item);
+      })
+      .catch(error => {
+        if (!cancelled) setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to load deployment approval dashboard item");
+      })
+      .finally(() => {
+        if (!cancelled) setBuildMissionDeploymentApprovalLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id, selectedBuildMissionDeploymentApprovalId]);
+
   const selectedProjectIntake = projectIntakes.find(intake => intake.id === selectedProjectIntakeId) ?? projectIntakes[0] ?? null;
   const selectedProjectIntakeHandoffChecklist = buildProjectIntakeHandoffChecklist(selectedProjectIntake);
   const selectedProjectIntakeHandoffEligible = Boolean(selectedProjectIntake) && selectedProjectIntakeHandoffChecklist.every(item => item.complete) && !selectedProjectIntake?.appStudioBuildMissionId;
@@ -2623,6 +2683,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const selectedBuildMissionProductionReadinessChecklistSummary = selectedBuildMissionProductionReadinessDetailResolved?.productionReadinessChecklist ?? null;
   const selectedBuildMissionProductionReadinessChecklist = selectedBuildMissionProductionReadinessDetail?.productionReadinessChecklist ?? null;
   const selectedBuildMissionProductionReadinessChecklistTerminal = Boolean(selectedBuildMissionProductionReadinessChecklistSummary && ["APPROVED", "REJECTED", "ARCHIVED"].includes(selectedBuildMissionProductionReadinessChecklistSummary.readinessStatus));
+  const selectedBuildMissionDeploymentApprovalDetailResolved = selectedBuildMissionDeploymentApprovalDetail ?? buildMissionDeploymentApprovalItems.find(item => item.buildMissionId === selectedBuildMissionDeploymentApprovalId) ?? null;
+  const selectedBuildMissionDeploymentApproval = selectedBuildMissionDeploymentApprovalDetailResolved?.deploymentApproval ?? null;
+  const selectedBuildMissionDeploymentApprovalTerminal = Boolean(selectedBuildMissionDeploymentApproval && ["APPROVED", "REJECTED", "ARCHIVED"].includes(selectedBuildMissionDeploymentApproval.approvalStatus));
 
   useEffect(() => {
     if (!selectedBuildMission) {
@@ -3207,6 +3270,83 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setBuildMissionProductionReadinessError(error instanceof Error ? error.message : "Unable to archive production readiness checklist");
     } finally {
       setBuildMissionProductionReadinessSaving(false);
+    }
+  };
+  const refreshBuildMissionDeploymentApprovalDashboard = async (selectedId?: string) => {
+    const dashboard = await listBuildMissionDeploymentApprovalDashboard();
+    setBuildMissionDeploymentApprovalItems(dashboard);
+    setSelectedBuildMissionDeploymentApprovalId(selectedId || dashboard.find(item => item.buildMissionId === selectedBuildMissionDeploymentApprovalDetailResolved?.buildMissionId)?.buildMissionId || dashboard[0]?.buildMissionId || "");
+  };
+  const handleCreateBuildMissionDeploymentApproval = async () => {
+    if (!selectedBuildMissionDeploymentApprovalDetailResolved) return;
+    setBuildMissionDeploymentApprovalSaving(true);
+    setBuildMissionDeploymentApprovalMessage("");
+    setBuildMissionDeploymentApprovalError("");
+    try {
+      const item = await createBuildMissionDeploymentApproval(selectedBuildMissionDeploymentApprovalDetailResolved.buildMissionId, buildMissionDeploymentApprovalNote);
+      setBuildMissionDeploymentApprovalItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionDeploymentApprovalId(item.buildMissionId);
+      setSelectedBuildMissionDeploymentApprovalDetail(item);
+      setBuildMissionDeploymentApprovalMessage("Deployment approval requested. Approval does not deploy.");
+      await refreshBuildMissionDeploymentApprovalDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to create deployment approval");
+    } finally {
+      setBuildMissionDeploymentApprovalSaving(false);
+    }
+  };
+  const handleApproveBuildMissionDeploymentApproval = async () => {
+    if (!selectedBuildMissionDeploymentApproval) return;
+    setBuildMissionDeploymentApprovalSaving(true);
+    setBuildMissionDeploymentApprovalMessage("");
+    setBuildMissionDeploymentApprovalError("");
+    try {
+      const item = await approveBuildMissionDeploymentApproval(selectedBuildMissionDeploymentApproval.buildMissionId, buildMissionDeploymentApprovalNote);
+      setBuildMissionDeploymentApprovalItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionDeploymentApprovalId(item.buildMissionId);
+      setSelectedBuildMissionDeploymentApprovalDetail(item);
+      setBuildMissionDeploymentApprovalMessage("Deployment approval manually approved. Cloud deployment execution remains separate.");
+      await refreshBuildMissionDeploymentApprovalDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to approve deployment approval");
+    } finally {
+      setBuildMissionDeploymentApprovalSaving(false);
+    }
+  };
+  const handleRejectBuildMissionDeploymentApproval = async () => {
+    if (!selectedBuildMissionDeploymentApproval) return;
+    setBuildMissionDeploymentApprovalSaving(true);
+    setBuildMissionDeploymentApprovalMessage("");
+    setBuildMissionDeploymentApprovalError("");
+    try {
+      const item = await rejectBuildMissionDeploymentApproval(selectedBuildMissionDeploymentApproval.buildMissionId, buildMissionDeploymentApprovalNote);
+      setBuildMissionDeploymentApprovalItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionDeploymentApprovalId(item.buildMissionId);
+      setSelectedBuildMissionDeploymentApprovalDetail(item);
+      setBuildMissionDeploymentApprovalMessage("Deployment approval rejected. No deployment action was triggered.");
+      await refreshBuildMissionDeploymentApprovalDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to reject deployment approval");
+    } finally {
+      setBuildMissionDeploymentApprovalSaving(false);
+    }
+  };
+  const handleArchiveBuildMissionDeploymentApproval = async () => {
+    if (!selectedBuildMissionDeploymentApproval) return;
+    setBuildMissionDeploymentApprovalSaving(true);
+    setBuildMissionDeploymentApprovalMessage("");
+    setBuildMissionDeploymentApprovalError("");
+    try {
+      const item = await archiveBuildMissionDeploymentApproval(selectedBuildMissionDeploymentApproval.buildMissionId);
+      setBuildMissionDeploymentApprovalItems(current => current.map(entry => entry.buildMissionId === item.buildMissionId ? item : entry));
+      setSelectedBuildMissionDeploymentApprovalId(item.buildMissionId);
+      setSelectedBuildMissionDeploymentApprovalDetail(item);
+      setBuildMissionDeploymentApprovalMessage("Deployment approval archived. History is preserved.");
+      await refreshBuildMissionDeploymentApprovalDashboard(item.buildMissionId);
+    } catch (error) {
+      setBuildMissionDeploymentApprovalError(error instanceof Error ? error.message : "Unable to archive deployment approval");
+    } finally {
+      setBuildMissionDeploymentApprovalSaving(false);
     }
   };
   const assignableUserLabel = (user: AssignableUser) => {
@@ -4296,6 +4436,90 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                         </div>
                       ) : <p>Production readiness checklist not created yet.</p>}
                     </section>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+          ) : null}
+
+          {activeSection.id === "build-mission-deployment-approval" ? (
+          <section className="business-section build-mission-deployment-approval-section" id="build-mission-deployment-approval">
+            <div className="business-section-heading">
+              <span>Real deployment approval records only. No deployment execution is connected.</span>
+              <h2>Deployment Approval</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>Deployment approval boundary</strong>
+              <p>Approval does not deploy. Cloud deployment execution remains separate.</p>
+            </div>
+            {buildMissionDeploymentApprovalMessage ? <p className="success">{buildMissionDeploymentApprovalMessage}</p> : null}
+            {buildMissionDeploymentApprovalError ? <p className="error">{buildMissionDeploymentApprovalError}</p> : null}
+            {buildMissionDeploymentApprovalLoading ? <p>Loading deployment approval dashboard...</p> : null}
+            {!buildMissionDeploymentApprovalLoading && !buildMissionDeploymentApprovalItems.length ? <p>No Build Missions are ready for deployment approval yet.</p> : null}
+            {buildMissionDeploymentApprovalItems.length ? (
+              <div className="build-mission-queue-layout">
+                <div className="build-mission-queue-list">
+                  {buildMissionDeploymentApprovalItems.map(item => (
+                    <button type="button" className={item.buildMissionId === selectedBuildMissionDeploymentApprovalDetailResolved?.buildMissionId ? "active" : ""} key={item.buildMissionId} onClick={() => setSelectedBuildMissionDeploymentApprovalId(item.buildMissionId)}>
+                      <strong>{item.intake.projectName}</strong>
+                      <span>{item.targetModule} / {item.riskLevel}</span>
+                      <small>{item.deploymentApproval?.approvalStatus ?? "Deployment approval not created yet"} / Production readiness {item.productionReadinessChecklist?.readinessStatus ?? "Not approved"}</small>
+                    </button>
+                  ))}
+                </div>
+                {selectedBuildMissionDeploymentApprovalDetailResolved ? (
+                  <article className="build-mission-queue-detail">
+                    <div className="build-mission-detail-header">
+                      <div>
+                        <span>Build Mission</span>
+                        <h3>{selectedBuildMissionDeploymentApprovalDetailResolved.intake.projectName}</h3>
+                      </div>
+                      <strong className={`assignment-risk ${selectedBuildMissionDeploymentApprovalDetailResolved.riskLevel}`}>{selectedBuildMissionDeploymentApprovalDetailResolved.riskLevel} risk</strong>
+                    </div>
+                    <div className="recent-intake-meta">
+                      <div><span>Mission status</span><strong>{selectedBuildMissionDeploymentApprovalDetailResolved.status}</strong></div>
+                      <div><span>Execution stage</span><strong>{selectedBuildMissionDeploymentApprovalDetailResolved.executionStatus?.currentStage ?? "Not created"}</strong></div>
+                      <div><span>QA checklist</span><strong>{selectedBuildMissionDeploymentApprovalDetailResolved.qaChecklist?.qaStatus ?? "Not created"}</strong></div>
+                      <div><span>Production readiness</span><strong>{selectedBuildMissionDeploymentApprovalDetailResolved.productionReadinessChecklist?.readinessStatus ?? "Not created"}</strong></div>
+                      <div><span>Deployment approval</span><strong>{selectedBuildMissionDeploymentApproval?.approvalStatus ?? "Not created"}</strong></div>
+                      <div><span>Requested by</span><strong>{displayAssignableUser(selectedBuildMissionDeploymentApproval?.requestedByUserId)}</strong></div>
+                      <div><span>Approved by</span><strong>{displayAssignableUser(selectedBuildMissionDeploymentApproval?.approvedByUserId)}</strong></div>
+                      <div><span>Updated</span><strong>{selectedBuildMissionDeploymentApproval?.updatedAt ?? selectedBuildMissionDeploymentApprovalDetailResolved.productionReadinessChecklist?.updatedAt ?? "Not updated"}</strong></div>
+                    </div>
+                    <div className="execution-readiness-grid">
+                      {([
+                        ["Build Mission approved", selectedBuildMissionDeploymentApprovalDetailResolved.status === "APPROVED"],
+                        ["Team assigned", ["ASSIGNED", "READY_FOR_DEVELOPMENT_APPROVAL"].includes(selectedBuildMissionDeploymentApprovalDetailResolved.assignment?.assignmentStatus ?? "")],
+                        ["Development start approved", selectedBuildMissionDeploymentApprovalDetailResolved.developmentGate?.gateStatus === "APPROVED"],
+                        ["Execution record exists", Boolean(selectedBuildMissionDeploymentApprovalDetailResolved.executionStatus)],
+                        ["QA approved", selectedBuildMissionDeploymentApprovalDetailResolved.qaChecklist?.qaStatus === "APPROVED"],
+                        ["Production readiness approved", selectedBuildMissionDeploymentApprovalDetailResolved.productionReadinessChecklist?.readinessStatus === "APPROVED"],
+                        ["Deployment approval record created", Boolean(selectedBuildMissionDeploymentApproval)]
+                      ] as Array<[string, boolean]>).map(([label, ready]) => (
+                        <div className={ready ? "ready" : "pending"} key={String(label)}>
+                          <span>{ready ? "Ready" : "Pending"}</span>
+                          <strong>{label}</strong>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="queue-action-grid">
+                      <section className="queue-action-card">
+                        <h3>Deployment approval request</h3>
+                        <label>Note<textarea value={buildMissionDeploymentApprovalNote} onChange={event => setBuildMissionDeploymentApprovalNote(event.target.value)} placeholder="Approval context, rejection reason, or archive note." /></label>
+                        <button type="button" onClick={() => void handleCreateBuildMissionDeploymentApproval()} disabled={buildMissionDeploymentApprovalSaving || Boolean(selectedBuildMissionDeploymentApproval) || selectedBuildMissionDeploymentApprovalDetailResolved.productionReadinessChecklist?.readinessStatus !== "APPROVED"}>Create Deployment Approval</button>
+                        <small>Deployment approval can be created only after production readiness is approved.</small>
+                      </section>
+                      <section className="queue-action-card">
+                        <h3>Manual final approval</h3>
+                        <div className="project-prd-actions">
+                          <button type="button" onClick={() => void handleApproveBuildMissionDeploymentApproval()} disabled={buildMissionDeploymentApprovalSaving || !selectedBuildMissionDeploymentApproval || selectedBuildMissionDeploymentApprovalTerminal || !["REQUESTED", "DRAFT"].includes(selectedBuildMissionDeploymentApproval.approvalStatus)}>Approve Deployment</button>
+                          <button type="button" onClick={() => void handleRejectBuildMissionDeploymentApproval()} disabled={buildMissionDeploymentApprovalSaving || !selectedBuildMissionDeploymentApproval || selectedBuildMissionDeploymentApprovalTerminal || !buildMissionDeploymentApprovalNote.trim()}>Reject Deployment Approval</button>
+                          <button type="button" onClick={() => void handleArchiveBuildMissionDeploymentApproval()} disabled={buildMissionDeploymentApprovalSaving || !selectedBuildMissionDeploymentApproval}>Archive Approval</button>
+                        </div>
+                        <small>These controls update approval records only. They do not deploy, call cloud providers, run agents, create proposals, or apply code.</small>
+                      </section>
+                    </div>
                   </article>
                 ) : null}
               </div>

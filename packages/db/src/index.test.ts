@@ -1657,7 +1657,13 @@ describe("database initialization", () => {
         archiveBuildMissionProductionReadiness,
         getBuildMissionProductionReadinessChecklist,
         getBuildMissionExecutionDashboardItem,
-        listBuildMissionProductionReadinessDashboardItems
+        listBuildMissionProductionReadinessDashboardItems,
+        createBuildMissionDeploymentApproval,
+        getBuildMissionDeploymentApproval,
+        approveBuildMissionDeploymentApproval,
+        rejectBuildMissionDeploymentApproval,
+        archiveBuildMissionDeploymentApproval,
+        listBuildMissionDeploymentApprovalDashboardItems
       } = await loadInitializer();
       initializeDatabaseOn(db);
       db.prepare("INSERT INTO projects (id,name,root_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
@@ -1883,6 +1889,13 @@ describe("database initialization", () => {
       });
       assert.equal(readyChecklist?.readinessStatus, "READY_FOR_APPROVAL");
 
+      assert.throws(() => createBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        note: "Deployment approval must wait for production readiness approval",
+        now: "2026-01-08T00:11:30.000Z"
+      }), /Production readiness must be APPROVED/i);
+
       const approvalCountBefore = (db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count;
       const approved = approveBuildMissionProductionReadiness(db, {
         buildMissionId: "build-mission-production-readiness-flow",
@@ -1900,6 +1913,51 @@ describe("database initialization", () => {
 
       const dashboard = listBuildMissionProductionReadinessDashboardItems(db) as Array<{ buildMissionId: string; productionReadinessChecklist: { readinessStatus: string; itemCount: number; readyForApproval: boolean } | null }>;
       assert.ok(dashboard.some((item) => item.buildMissionId === "build-mission-production-readiness-flow" && item.productionReadinessChecklist?.readinessStatus === "APPROVED"));
+
+      const deploymentApproval = createBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        note: "Request final deployment approval without deployment execution",
+        now: "2026-01-08T00:11:50.000Z"
+      });
+      assert.equal(deploymentApproval?.approvalStatus, "REQUESTED");
+      assert.equal(deploymentApproval?.productionReadinessChecklistId, approved?.id);
+      assert.throws(() => createBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        note: "Duplicate deployment approval",
+        now: "2026-01-08T00:11:55.000Z"
+      }), /Active deployment approval already exists/i);
+      assert.throws(() => rejectBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        reason: "",
+        now: "2026-01-08T00:12:00.000Z"
+      }), /reason is required/);
+
+      const approvedDeployment = approveBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shiva",
+        note: "Final approval recorded only; no cloud deployment",
+        now: "2026-01-08T00:12:05.000Z"
+      });
+      assert.equal(approvedDeployment?.approvalStatus, "APPROVED");
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count, approvalCountBefore);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals").get() as { count: number }).count, 0);
+      assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments").get() as { count: number }).count, 0);
+      assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='BUILD_MISSION_DEPLOYMENT_APPROVAL_APPROVED'").get("build-mission-production-readiness-flow"));
+
+      const deploymentDashboard = listBuildMissionDeploymentApprovalDashboardItems(db) as Array<{ buildMissionId: string; deploymentApproval: { approvalStatus: string } | null }>;
+      assert.ok(deploymentDashboard.some((item) => item.buildMissionId === "build-mission-production-readiness-flow" && item.deploymentApproval?.approvalStatus === "APPROVED"));
+
+      const archivedDeployment = archiveBuildMissionDeploymentApproval(db, {
+        buildMissionId: "build-mission-production-readiness-flow",
+        actorUserId: "business-user-shrinika",
+        now: "2026-01-08T00:12:08.000Z"
+      });
+      assert.equal(archivedDeployment?.approvalStatus, "ARCHIVED");
+      const archivedDeploymentApproval = getBuildMissionDeploymentApproval(db, "build-mission-production-readiness-flow", { includeArchived: true });
+      assert.equal(archivedDeploymentApproval?.archivedAt, "2026-01-08T00:12:08.000Z");
 
       const archived = archiveBuildMissionProductionReadiness(db, {
         buildMissionId: "build-mission-production-readiness-flow",

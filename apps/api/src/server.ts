@@ -39,6 +39,7 @@ import { registerBuildMissionQueueRoutes } from "./build-mission-queue-routes.js
 import { registerBuildMissionExecutionRoutes } from "./build-mission-execution-routes.js";
 import { registerBuildMissionQaRoutes } from "./build-mission-qa-routes.js";
 import { registerBuildMissionProductionReadinessRoutes } from "./build-mission-production-readiness-routes.js";
+import { registerBuildMissionDeploymentApprovalRoutes } from "./build-mission-deployment-approval-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 
 const app = Fastify({ logger: true });
@@ -93,6 +94,7 @@ registerBuildMissionQueueRoutes(app);
 registerBuildMissionExecutionRoutes(app);
 registerBuildMissionQaRoutes(app);
 registerBuildMissionProductionReadinessRoutes(app);
+registerBuildMissionDeploymentApprovalRoutes(app);
 registerAppStudioInternalRoutes(app);
 
 app.get("/api/providers/status", async () => getProviderStatus());

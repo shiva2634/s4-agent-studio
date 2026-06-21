@@ -476,4 +476,123 @@ describe("Business Control Centre production readiness API", () => {
     assert.ok(!response.body.includes("scrypt$"));
     assert.ok(!response.body.includes("session_token_hash"));
   });
+
+  it("governs deployment approval after production readiness without deployment side effects", async () => {
+    const buildMissionId = prepareProductionReadinessMission("deployment-approval-flow");
+    const ownerSession = createInternalSession("business-user-shrinika", "deployment-approval-owner-token");
+    const guardianSession = createInternalSession("business-user-shiva", "deployment-approval-guardian-token");
+
+    const noPermissionUserId = "business-user-deployment-approval-no-permission";
+    insertBusinessUser({ id: noPermissionUserId, email: "deployment-no-permission@example.local" });
+    const noPermissionSession = createInternalSession(noPermissionUserId, "deployment-approval-no-permission-token");
+
+    const deniedList = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-deployment-approvals"
+    });
+    assert.equal(deniedList.statusCode, 401);
+
+    const deniedCreate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/create`,
+      headers: { cookie: noPermissionSession },
+      payload: { note: "Should not create" }
+    });
+    assert.equal(deniedCreate.statusCode, 403);
+
+    const gatedCreate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/create`,
+      headers: { cookie: ownerSession },
+      payload: { note: "Production readiness is not approved yet" }
+    });
+    assert.equal(gatedCreate.statusCode, 400);
+
+    const readinessChecklist = createBuildMissionProductionReadinessChecklist(db, {
+      buildMissionId,
+      actorUserId: "business-user-shrinika",
+      readinessOwnerUserId: "business-user-shiva",
+      now: "2026-01-08T00:11:00.000Z"
+    });
+    assert.ok(readinessChecklist);
+    db.prepare(`UPDATE business_build_mission_production_readiness_items
+      SET item_status='PASS',evidence_note='Validated for deployment approval test',checked_by_user_id='business-user-shiva',checked_at=?,updated_at=?
+      WHERE readiness_checklist_id=?`).run("2026-01-08T00:11:20.000Z", "2026-01-08T00:11:20.000Z", readinessChecklist!.id);
+    db.prepare("UPDATE business_build_mission_production_readiness_checklists SET readiness_status='READY_FOR_APPROVAL',updated_at=? WHERE id=?")
+      .run("2026-01-08T00:11:30.000Z", readinessChecklist!.id);
+    const approvedReadiness = approveBuildMissionProductionReadiness(db, {
+      buildMissionId,
+      actorUserId: "business-user-shiva",
+      note: "Production readiness approved for deployment approval",
+      now: "2026-01-08T00:11:40.000Z"
+    });
+    assert.equal(approvedReadiness?.readinessStatus, "APPROVED");
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/build-mission-deployment-approvals",
+      headers: { cookie: ownerSession }
+    });
+    assert.equal(list.statusCode, 200);
+    const dashboard = (list.json() as { dashboard: Array<{ buildMissionId: string; deploymentApproval: { approvalStatus: string } | null }> }).dashboard;
+    assert.ok(dashboard.some((item) => item.buildMissionId === buildMissionId));
+    assert.ok(!list.body.includes("scrypt$"));
+    assert.ok(!list.body.includes("session_token_hash"));
+
+    const create = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/create`,
+      headers: { cookie: ownerSession },
+      payload: { note: "Request deployment approval only" }
+    });
+    assert.equal(create.statusCode, 201);
+    assert.equal((create.json() as { item: { deploymentApproval: { approvalStatus: string } } }).item.deploymentApproval.approvalStatus, "REQUESTED");
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/create`,
+      headers: { cookie: ownerSession },
+      payload: { note: "Duplicate request" }
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const deniedApprove = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/approve`,
+      headers: { cookie: noPermissionSession },
+      payload: { note: "Should not approve" }
+    });
+    assert.equal(deniedApprove.statusCode, 403);
+
+    const emptyReject = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/reject`,
+      headers: { cookie: guardianSession },
+      payload: { reason: "" }
+    });
+    assert.equal(emptyReject.statusCode, 400);
+
+    const approvalCountBefore = (db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count;
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/approve`,
+      headers: { cookie: guardianSession },
+      payload: { note: "Final deployment approval recorded only" }
+    });
+    assert.equal(approve.statusCode, 200);
+    assert.equal((approve.json() as { item: { deploymentApproval: { approvalStatus: string } } }).item.deploymentApproval.approvalStatus, "APPROVED");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM approvals").get() as { count: number }).count, approvalCountBefore);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals").get() as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments").get() as { count: number }).count, 0);
+    assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='BUILD_MISSION_DEPLOYMENT_APPROVAL_APPROVED'").get(buildMissionId));
+
+    const archive = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-deployment-approvals/${buildMissionId}/archive`,
+      headers: { cookie: ownerSession },
+      payload: {}
+    });
+    assert.equal(archive.statusCode, 200);
+    assert.equal((archive.json() as { item: { deploymentApproval: { approvalStatus: string } } }).item.deploymentApproval.approvalStatus, "ARCHIVED");
+  });
 });
