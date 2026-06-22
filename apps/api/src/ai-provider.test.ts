@@ -175,6 +175,19 @@ describe("AI provider configuration and validation", () => {
     assert.equal(status.configured, false);
   });
 
+  it("includes config source and safe blockers in status output", () => {
+    const status = providerStatusResponse(loadProviderConfig({
+      AI_PROVIDER: "disabled",
+      PROVIDER_OPENAI_ENABLED: "true",
+      OPENAI_API_KEY: "openai-status-secret"
+    }), null);
+    const serialized = JSON.stringify(status);
+    assert.match(serialized, /"configSource":"disabled"/);
+    assert.ok(Array.isArray(status.blockers));
+    assert.ok(status.blockers.some((blocker) => blocker.includes("missing OPENAI_DEFAULT_MODEL")));
+    assert.doesNotMatch(serialized, /openai-status-secret/);
+  });
+
   it("uses mocked chat completions for NVIDIA-compatible provider calls", async () => {
     const config = loadProviderConfig({ AI_PROVIDER: "nvidia", AI_API_KEY: "secret", AI_MODEL: "exact-model" });
     let requestedModel = "";

@@ -51,6 +51,7 @@ export interface AiProvider {
 
 export type ProviderConfig = {
   provider: ProviderId;
+  configSource: "legacy_ai" | "app_studio_openai" | "app_studio_nvidia" | "disabled";
   configured: boolean;
   apiKey?: string;
   baseUrl: string;
@@ -59,6 +60,7 @@ export type ProviderConfig = {
   maxRetries: number;
   maxProposalFiles: number;
   maxOutputBytes: number;
+  blockers: string[];
 };
 
 export const CODE_PROPOSAL_SYSTEM_PROMPT_VERSION = "code-proposal-adviser.v1";
@@ -109,39 +111,53 @@ export function loadProviderConfig(env: NodeJS.ProcessEnv = process.env): Provid
 
 function resolveLegacyAiProviderConfig(env: NodeJS.ProcessEnv): ProviderConfig | null {
   const provider = normalizeString(env.AI_PROVIDER).toLowerCase();
+  if (provider === "disabled" || !provider) return null;
   if (provider !== "nvidia" && provider !== "openai_compatible") return null;
   const apiKey = normalizeString(env.AI_API_KEY);
   const model = normalizeString(env.AI_MODEL);
   const baseUrl = normalizeString(env.AI_BASE_URL) || (provider === "openai_compatible" ? "https://api.openai.com/v1" : "https://integrate.api.nvidia.com/v1");
   return buildProviderConfig({
     provider,
+    configSource: "legacy_ai",
     configured: Boolean(apiKey && model),
     apiKey,
     baseUrl,
     model,
-    timeoutMs: resolveTimeoutMs(env)
+    timeoutMs: resolveTimeoutMs(env),
+    blockers: buildLegacyBlockers(provider, apiKey, model)
   }, env);
 }
 
 function resolveAppStudioProviderFallbackConfig(env: NodeJS.ProcessEnv): ProviderConfig | null {
-  if (readBoolean(env.PROVIDER_OPENAI_ENABLED) && normalizeString(env.OPENAI_API_KEY) && normalizeString(env.OPENAI_DEFAULT_MODEL)) {
+  const openaiEnabled = readBoolean(env.PROVIDER_OPENAI_ENABLED);
+  const openaiApiKey = normalizeString(env.OPENAI_API_KEY);
+  const openaiModel = normalizeString(env.OPENAI_DEFAULT_MODEL);
+  const nvidiaEnabled = readBoolean(env.PROVIDER_NVIDIA_ENABLED);
+  const nvidiaApiKey = normalizeString(env.NVIDIA_API_KEY);
+  const nvidiaModel = normalizeString(env.NVIDIA_DEFAULT_MODEL);
+
+  if (openaiEnabled && openaiApiKey && openaiModel) {
     return buildProviderConfig({
       provider: "openai_compatible",
+      configSource: "app_studio_openai",
       configured: true,
-      apiKey: normalizeString(env.OPENAI_API_KEY),
+      apiKey: openaiApiKey,
       baseUrl: normalizeString(env.OPENAI_BASE_URL) || "https://api.openai.com/v1",
-      model: normalizeString(env.OPENAI_DEFAULT_MODEL),
-      timeoutMs: resolveTimeoutMs(env)
+      model: openaiModel,
+      timeoutMs: resolveTimeoutMs(env),
+      blockers: []
     }, env);
   }
-  if (readBoolean(env.PROVIDER_NVIDIA_ENABLED) && normalizeString(env.NVIDIA_API_KEY) && normalizeString(env.NVIDIA_DEFAULT_MODEL)) {
+  if (nvidiaEnabled && nvidiaApiKey && nvidiaModel) {
     return buildProviderConfig({
       provider: "nvidia",
+      configSource: "app_studio_nvidia",
       configured: true,
-      apiKey: normalizeString(env.NVIDIA_API_KEY),
+      apiKey: nvidiaApiKey,
       baseUrl: normalizeString(env.NVIDIA_BASE_URL) || "https://integrate.api.nvidia.com/v1",
-      model: normalizeString(env.NVIDIA_DEFAULT_MODEL),
-      timeoutMs: resolveTimeoutMs(env)
+      model: nvidiaModel,
+      timeoutMs: resolveTimeoutMs(env),
+      blockers: []
     }, env);
   }
   return null;
@@ -150,17 +166,20 @@ function resolveAppStudioProviderFallbackConfig(env: NodeJS.ProcessEnv): Provide
 function createDisabledProviderConfig(env: NodeJS.ProcessEnv): ProviderConfig {
   return buildProviderConfig({
     provider: "disabled",
+    configSource: "disabled",
     configured: false,
     apiKey: "",
     baseUrl: normalizeString(env.AI_BASE_URL) || "https://integrate.api.nvidia.com/v1",
     model: "",
-    timeoutMs: resolveTimeoutMs(env)
+    timeoutMs: resolveTimeoutMs(env),
+    blockers: buildDisabledBlockers(env)
   }, env);
 }
 
-function buildProviderConfig(base: Pick<ProviderConfig, "provider" | "configured" | "apiKey" | "baseUrl" | "model" | "timeoutMs">, env: NodeJS.ProcessEnv): ProviderConfig {
+function buildProviderConfig(base: Pick<ProviderConfig, "provider" | "configSource" | "configured" | "apiKey" | "baseUrl" | "model" | "timeoutMs" | "blockers">, env: NodeJS.ProcessEnv): ProviderConfig {
   return {
     provider: base.provider,
+    configSource: base.configSource,
     configured: base.configured,
     apiKey: base.apiKey,
     baseUrl: base.baseUrl,
@@ -168,7 +187,8 @@ function buildProviderConfig(base: Pick<ProviderConfig, "provider" | "configured
     timeoutMs: base.timeoutMs,
     maxRetries: Number(env.AI_MAX_RETRIES ?? 1),
     maxProposalFiles: Number(env.AI_MAX_PROPOSAL_FILES ?? 6),
-    maxOutputBytes: Number(env.AI_MAX_OUTPUT_BYTES ?? 120_000)
+    maxOutputBytes: Number(env.AI_MAX_OUTPUT_BYTES ?? 120_000),
+    blockers: base.blockers
   };
 }
 
@@ -195,12 +215,55 @@ export function providerStatusResponse(config: ProviderConfig, health?: Provider
   return {
     configured: config.configured,
     provider: config.provider,
+    baseUrlHost: hostname,
     baseUrlHostname: hostname,
     model: config.model,
+    configSource: config.configSource,
+    keyConfigured: Boolean(config.apiKey),
+    blockers: config.blockers,
     status: health?.status ?? (config.configured ? "unknown" : "disabled"),
     lastTestedAt: health?.lastTestedAt ?? null,
     sanitizedError: health?.sanitizedError ?? null
   };
+}
+
+function buildLegacyBlockers(provider: "nvidia" | "openai_compatible", apiKey: string, model: string) {
+  if (provider === "nvidia") {
+    return [
+      ...(apiKey ? [] : ["missing AI_API_KEY"]),
+      ...(model ? [] : ["missing AI_MODEL"])
+    ];
+  }
+  return [
+    ...(apiKey ? [] : ["missing AI_API_KEY"]),
+    ...(model ? [] : ["missing AI_MODEL"])
+  ];
+}
+
+function buildDisabledBlockers(env: NodeJS.ProcessEnv) {
+  const blockers: string[] = [];
+  const legacyProvider = normalizeString(env.AI_PROVIDER).toLowerCase();
+  if (legacyProvider === "disabled" || !legacyProvider) blockers.push("legacy AI_PROVIDER disabled");
+  if (legacyProvider === "nvidia" || legacyProvider === "openai_compatible") {
+    if (!normalizeString(env.AI_API_KEY)) blockers.push("missing AI_API_KEY");
+    if (!normalizeString(env.AI_MODEL)) blockers.push("missing AI_MODEL");
+  }
+
+  const openaiEnabled = readBoolean(env.PROVIDER_OPENAI_ENABLED);
+  if (!openaiEnabled) blockers.push("PROVIDER_OPENAI_ENABLED not true");
+  else {
+    if (!normalizeString(env.OPENAI_API_KEY)) blockers.push("missing OPENAI_API_KEY");
+    if (!normalizeString(env.OPENAI_DEFAULT_MODEL)) blockers.push("missing OPENAI_DEFAULT_MODEL");
+  }
+
+  const nvidiaEnabled = readBoolean(env.PROVIDER_NVIDIA_ENABLED);
+  if (!nvidiaEnabled) blockers.push("PROVIDER_NVIDIA_ENABLED not true");
+  else {
+    if (!normalizeString(env.NVIDIA_API_KEY)) blockers.push("missing NVIDIA_API_KEY");
+    if (!normalizeString(env.NVIDIA_DEFAULT_MODEL)) blockers.push("missing NVIDIA_DEFAULT_MODEL");
+  }
+
+  return Array.from(new Set(blockers));
 }
 
 export function validateCodeProposalOutput(raw: unknown, rootPath: string, limits: { maximumFiles: number; maximumOutputBytes: number }) {

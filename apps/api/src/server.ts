@@ -3,6 +3,9 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { nanoid } from "nanoid";
 import { createReadStream } from "node:fs";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { db } from "@s4/db";
 import { ApplyMediaTemplateSchema, ApprovalActionSchema, ChatRequestSchema, ClearMediaAssetApprovalSchema, ConvertBuildMissionSchema, CreateAgentSchema, CreateBuildMissionSchema, CreateMediaProjectSchema, CreateProjectFromTemplateSchema, CreateProjectSchema, CreateProposalSchema, CreateScaffoldJobSchema, CreateTaskGitWorkflowSchema, FlowFallbackWanSchema, FlowJobActionSchema, GenerateScaffoldProposalsSchema, GenerateWanSceneSchema, ImportComfyWorkflowSchema, ImportMediaAssetSchema, MediaBrandKitSchema, MediaChatMessageSchema, MediaPresenterProfileSchema, MediaTemplateSchema, PermissionDecisionTestSchema, PolicyChangeRequestSchema, PreviewComfyWorkflowSchema, ProposalActionSchema, RegenerateMediaAssetSchema, RejectMediaAssetSchema, RenameMediaAssetSchema, RenderMediaDraftSchema, RenderMediaExportSchema, ReorderMediaScenesSchema, RestoreMediaSceneVersionSchema, RetryWanGenerationSchema, ReuseMediaPromptVersionSchema, RouteMediaGenerationSchema, SelectMediaDefaultsSchema, UpdateComfyWorkflowSchema, UpdateMediaAudioSettingsSchema, UpdateMediaBriefSchema, UpdateMediaProjectSchema, UpdateMediaSceneSchema } from "@s4/shared";
 import { classifyRisk, isMutationRequest, isReadOnlyInspectionRequest, requiresApproval } from "./policy.js";
@@ -42,6 +45,11 @@ import { registerBuildMissionProductionReadinessRoutes } from "./build-mission-p
 import { registerBuildMissionDeploymentApprovalRoutes } from "./build-mission-deployment-approval-routes.js";
 import { registerAppStudioInternalRoutes } from "./app-studio-internal-routes.js";
 import { applySecurityHeaders } from "./deployment-hardening.js";
+
+const repoRootEnvPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env");
+if (existsSync(repoRootEnvPath)) {
+  process.loadEnvFile(repoRootEnvPath);
+}
 
 const app = Fastify({ logger: true });
 const allowedOrigins = new Set((process.env.S4_WEB_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173").split(",").map((origin) => origin.trim()).filter(Boolean));
@@ -101,13 +109,13 @@ registerBuildMissionProductionReadinessRoutes(app);
 registerBuildMissionDeploymentApprovalRoutes(app);
 registerAppStudioInternalRoutes(app);
 
-app.get("/api/providers/status", async () => getProviderStatus());
+app.get("/api/providers/status", async () => getProviderStatus(loadProviderConfig(process.env)));
 
 app.post("/api/providers/test", async (_request, reply) => {
   try {
-    return await testConfiguredProvider();
+    return await testConfiguredProvider(loadProviderConfig(process.env));
   } catch (error) {
-    return reply.status(502).send({ ...getProviderStatus(), status: "error", sanitizedError: sanitizeProviderError(error) });
+    return reply.status(502).send({ ...getProviderStatus(loadProviderConfig(process.env)), status: "error", sanitizedError: sanitizeProviderError(error) });
   }
 });
 
