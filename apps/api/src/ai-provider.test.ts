@@ -74,12 +74,105 @@ describe("AI provider configuration and validation", () => {
     assert.equal(config.maxOutputBytes, 4567);
   });
 
+  it("keeps explicit legacy openai_compatible configuration working", () => {
+    const config = loadProviderConfig({
+      AI_PROVIDER: "openai_compatible",
+      AI_API_KEY: "legacy-openai-secret",
+      AI_MODEL: "gpt-5.5",
+      AI_BASE_URL: "https://legacy.openai.test/v1",
+      AI_TIMEOUT_MS: "2345"
+    });
+    assert.equal(config.provider, "openai_compatible");
+    assert.equal(config.configured, true);
+    assert.equal(config.apiKey, "legacy-openai-secret");
+    assert.equal(config.baseUrl, "https://legacy.openai.test/v1");
+    assert.equal(config.model, "gpt-5.5");
+    assert.equal(config.timeoutMs, 2345);
+  });
+
+  it("keeps explicit legacy nvidia configuration working", () => {
+    const config = loadProviderConfig({
+      AI_PROVIDER: "nvidia",
+      AI_API_KEY: "legacy-nvidia-secret",
+      AI_MODEL: "nvidia/custom-model",
+      AI_BASE_URL: "https://legacy.nvidia.test/v1",
+      AI_TIMEOUT_MS: "3456"
+    });
+    assert.equal(config.provider, "nvidia");
+    assert.equal(config.configured, true);
+    assert.equal(config.apiKey, "legacy-nvidia-secret");
+    assert.equal(config.baseUrl, "https://legacy.nvidia.test/v1");
+    assert.equal(config.model, "nvidia/custom-model");
+    assert.equal(config.timeoutMs, 3456);
+  });
+
+  it("falls back to App Studio OpenAI provider config when legacy provider is disabled", () => {
+    const config = loadProviderConfig({
+      AI_PROVIDER: "disabled",
+      PROVIDER_OPENAI_ENABLED: "true",
+      OPENAI_API_KEY: "openai-fallback-secret",
+      OPENAI_BASE_URL: "https://api.openai.com/v1",
+      OPENAI_DEFAULT_MODEL: "gpt-5.5",
+      PROVIDER_REQUEST_TIMEOUT_MS: "4321"
+    });
+    assert.equal(config.provider, "openai_compatible");
+    assert.equal(config.configured, true);
+    assert.equal(config.apiKey, "openai-fallback-secret");
+    assert.equal(config.baseUrl, "https://api.openai.com/v1");
+    assert.equal(config.model, "gpt-5.5");
+    assert.equal(config.timeoutMs, 4321);
+  });
+
+  it("falls back to App Studio OpenAI provider config when legacy provider is missing", () => {
+    const config = loadProviderConfig({
+      PROVIDER_OPENAI_ENABLED: "true",
+      OPENAI_API_KEY: "openai-fallback-secret",
+      OPENAI_DEFAULT_MODEL: "gpt-5.5"
+    });
+    assert.equal(config.provider, "openai_compatible");
+    assert.equal(config.configured, true);
+  });
+
+  it("stays disabled when OpenAI fallback is missing a model", () => {
+    const config = loadProviderConfig({
+      AI_PROVIDER: "disabled",
+      PROVIDER_OPENAI_ENABLED: "true",
+      OPENAI_API_KEY: "openai-fallback-secret"
+    });
+    assert.equal(config.provider, "disabled");
+    assert.equal(config.configured, false);
+  });
+
+  it("falls back to App Studio NVIDIA provider config when OpenAI is unavailable", () => {
+    const config = loadProviderConfig({
+      AI_PROVIDER: "disabled",
+      PROVIDER_NVIDIA_ENABLED: "true",
+      NVIDIA_API_KEY: "nvidia-fallback-secret",
+      NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1",
+      NVIDIA_DEFAULT_MODEL: "nvidia/llama-3.1"
+    });
+    assert.equal(config.provider, "nvidia");
+    assert.equal(config.configured, true);
+    assert.equal(config.apiKey, "nvidia-fallback-secret");
+    assert.equal(config.baseUrl, "https://integrate.api.nvidia.com/v1");
+    assert.equal(config.model, "nvidia/llama-3.1");
+  });
+
   it("never exposes API keys through provider status", () => {
     const config = loadProviderConfig({ AI_PROVIDER: "nvidia", AI_API_KEY: "super-secret", AI_MODEL: "model" });
     const status = providerStatusResponse(config, { status: "error", lastTestedAt: "now", sanitizedError: sanitizeProviderError("Bearer super-secret failed") });
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /super-secret/);
     assert.match(serialized, /\[redacted\]/);
+  });
+
+  it("never exposes API keys in disabled provider status", () => {
+    const config = loadProviderConfig({ AI_PROVIDER: "disabled" });
+    const status = providerStatusResponse(config, null);
+    const serialized = JSON.stringify(status);
+    assert.doesNotMatch(serialized, /AI_API_KEY|OPENAI_API_KEY|NVIDIA_API_KEY/);
+    assert.equal(status.status, "disabled");
+    assert.equal(status.configured, false);
   });
 
   it("uses mocked chat completions for NVIDIA-compatible provider calls", async () => {

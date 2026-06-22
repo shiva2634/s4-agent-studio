@@ -104,22 +104,85 @@ export function sanitizeProviderError(error: unknown) {
 }
 
 export function loadProviderConfig(env: NodeJS.ProcessEnv = process.env): ProviderConfig {
-  const provider = (env.AI_PROVIDER ?? "disabled").toLowerCase() as ProviderId;
-  const normalizedProvider: ProviderId = provider === "nvidia" || provider === "openai_compatible" ? provider : "disabled";
-  const baseUrl = env.AI_BASE_URL || "https://integrate.api.nvidia.com/v1";
-  const model = env.AI_MODEL || "";
-  const apiKey = env.AI_API_KEY || "";
-  return {
-    provider: normalizedProvider,
-    configured: normalizedProvider !== "disabled" && Boolean(apiKey && model),
+  return resolveLegacyAiProviderConfig(env) ?? resolveAppStudioProviderFallbackConfig(env) ?? createDisabledProviderConfig(env);
+}
+
+function resolveLegacyAiProviderConfig(env: NodeJS.ProcessEnv): ProviderConfig | null {
+  const provider = normalizeString(env.AI_PROVIDER).toLowerCase();
+  if (provider !== "nvidia" && provider !== "openai_compatible") return null;
+  const apiKey = normalizeString(env.AI_API_KEY);
+  const model = normalizeString(env.AI_MODEL);
+  const baseUrl = normalizeString(env.AI_BASE_URL) || (provider === "openai_compatible" ? "https://api.openai.com/v1" : "https://integrate.api.nvidia.com/v1");
+  return buildProviderConfig({
+    provider,
+    configured: Boolean(apiKey && model),
     apiKey,
     baseUrl,
     model,
-    timeoutMs: Number(env.AI_TIMEOUT_MS ?? 30_000),
+    timeoutMs: resolveTimeoutMs(env)
+  }, env);
+}
+
+function resolveAppStudioProviderFallbackConfig(env: NodeJS.ProcessEnv): ProviderConfig | null {
+  if (readBoolean(env.PROVIDER_OPENAI_ENABLED) && normalizeString(env.OPENAI_API_KEY) && normalizeString(env.OPENAI_DEFAULT_MODEL)) {
+    return buildProviderConfig({
+      provider: "openai_compatible",
+      configured: true,
+      apiKey: normalizeString(env.OPENAI_API_KEY),
+      baseUrl: normalizeString(env.OPENAI_BASE_URL) || "https://api.openai.com/v1",
+      model: normalizeString(env.OPENAI_DEFAULT_MODEL),
+      timeoutMs: resolveTimeoutMs(env)
+    }, env);
+  }
+  if (readBoolean(env.PROVIDER_NVIDIA_ENABLED) && normalizeString(env.NVIDIA_API_KEY) && normalizeString(env.NVIDIA_DEFAULT_MODEL)) {
+    return buildProviderConfig({
+      provider: "nvidia",
+      configured: true,
+      apiKey: normalizeString(env.NVIDIA_API_KEY),
+      baseUrl: normalizeString(env.NVIDIA_BASE_URL) || "https://integrate.api.nvidia.com/v1",
+      model: normalizeString(env.NVIDIA_DEFAULT_MODEL),
+      timeoutMs: resolveTimeoutMs(env)
+    }, env);
+  }
+  return null;
+}
+
+function createDisabledProviderConfig(env: NodeJS.ProcessEnv): ProviderConfig {
+  return buildProviderConfig({
+    provider: "disabled",
+    configured: false,
+    apiKey: "",
+    baseUrl: normalizeString(env.AI_BASE_URL) || "https://integrate.api.nvidia.com/v1",
+    model: "",
+    timeoutMs: resolveTimeoutMs(env)
+  }, env);
+}
+
+function buildProviderConfig(base: Pick<ProviderConfig, "provider" | "configured" | "apiKey" | "baseUrl" | "model" | "timeoutMs">, env: NodeJS.ProcessEnv): ProviderConfig {
+  return {
+    provider: base.provider,
+    configured: base.configured,
+    apiKey: base.apiKey,
+    baseUrl: base.baseUrl,
+    model: base.model,
+    timeoutMs: base.timeoutMs,
     maxRetries: Number(env.AI_MAX_RETRIES ?? 1),
     maxProposalFiles: Number(env.AI_MAX_PROPOSAL_FILES ?? 6),
     maxOutputBytes: Number(env.AI_MAX_OUTPUT_BYTES ?? 120_000)
   };
+}
+
+function resolveTimeoutMs(env: NodeJS.ProcessEnv) {
+  return Number(env.AI_TIMEOUT_MS ?? env.PROVIDER_REQUEST_TIMEOUT_MS ?? 30_000);
+}
+
+function normalizeString(value: string | undefined) {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length ? trimmed : "";
+}
+
+function readBoolean(value: string | undefined) {
+  return typeof value === "string" && /^(1|true|yes|on)$/i.test(value.trim());
 }
 
 export function providerStatusResponse(config: ProviderConfig, health?: ProviderHealthResult | null) {
