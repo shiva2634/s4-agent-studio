@@ -67,6 +67,7 @@ import {
   type BuildMissionDeploymentApprovalDashboardItem
 } from "./build-mission-deployment-approval";
 import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, socialAutomationStudioPhase1MvpShellIntakePayload, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
+import { getSocialAutomationSummary, type SocialAutomationSummary } from "./social-automation-summary";
 import type { InternalAuthState } from "./internal-auth";
 import { getDeploymentHardeningStatus, type DeploymentHardeningStatus } from "./deployment-hardening";
 import { getInternalDeploymentSmokeStatus, type InternalDeploymentSmokeStatus } from "./internal-deployment-smoke";
@@ -139,9 +140,12 @@ type RoleHierarchyItem = {
 
 type SocialAutomationStudioModuleCard = {
   title: string;
+  countKey: keyof SocialAutomationSummary["counts"];
   status: "Not Started" | "Intake Ready" | "Approval Required" | "Provider Ready" | "No Live Integrations";
   chips: Array<"Not Started" | "Intake Ready" | "Approval Required" | "Provider Ready" | "No Live Integrations">;
   description: string;
+  emptyStateMessage: string;
+  nextAction: string;
 };
 
 type ClientStatus = "Lead" | "Active" | "Waiting Approval" | "Support Needed" | "Payment Pending" | "Paused";
@@ -757,63 +761,93 @@ const projectAssignments: ProjectAssignment[] = [];
 const socialAutomationStudioModuleCards: SocialAutomationStudioModuleCard[] = [
   {
     title: "Overview / Command Centre",
+    countKey: "generationJobs",
     status: "Intake Ready",
     chips: ["Intake Ready", "No Live Integrations"],
-    description: "Coordinates governed Phase 1 work for the Android shell and internal website dashboard while keeping customer access separate."
+    description: "Coordinates governed Phase 1 work for the Android shell and internal website dashboard while keeping customer access separate.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Use the backend summary to monitor intake and approval flow."
   },
   {
     title: "Social Media Automation",
+    countKey: "publishingTasks",
     status: "Not Started",
     chips: ["Not Started", "No Live Integrations"],
-    description: "Will manage approval-gated social post planning, scheduling, and workflow visibility without direct platform publishing yet."
+    description: "Will manage approval-gated social post planning, scheduling, and workflow visibility without direct platform publishing yet.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Create a governed content idea or publishing task when the workflow is ready."
   },
   {
     title: "Content Creation for Wealth",
+    countKey: "contentIdeas",
     status: "Provider Ready",
     chips: ["Approval Required", "Provider Ready", "No Live Integrations"],
-    description: "Will manage governed script, prompt, caption, and compliance drafting for wealth-oriented content."
+    description: "Will manage governed script, prompt, caption, and compliance drafting for wealth-oriented content.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Start with a governed content idea intake."
   },
   {
     title: "Meta Ads Agency",
+    countKey: "metaAdsIntakes",
     status: "Not Started",
     chips: ["Not Started", "No Live Integrations"],
-    description: "Will manage ad intake, review, and governed handoff for Meta Ads work without live campaign execution."
+    description: "Will manage ad intake, review, and governed handoff for Meta Ads work without live campaign execution.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Submit a Meta Ads intake for approval."
   },
   {
     title: "Third-Party Advertisement Marketplace",
+    countKey: "brandCampaigns",
     status: "Not Started",
     chips: ["Not Started", "No Live Integrations"],
-    description: "Will manage partner advertisement intake, approvals, and marketplace coordination with no live integrations yet."
+    description: "Will manage partner advertisement intake, approvals, and marketplace coordination with no live integrations yet.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Create a partner campaign intake when a real request arrives."
   },
   {
     title: "CRM",
+    countKey: "customers",
     status: "Intake Ready",
     chips: ["Intake Ready", "No Live Integrations"],
-    description: "Will manage customer relationship records, governed follow-ups, and future internal-to-customer handoffs."
+    description: "Will manage customer relationship records, governed follow-ups, and future internal-to-customer handoffs.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Add a governed customer or lead record."
   },
   {
     title: "Finance & Credits",
+    countKey: "creditLedgerEntries",
     status: "Approval Required",
     chips: ["Approval Required", "No Live Integrations"],
-    description: "Will manage internal credit accounting, usage visibility, and finance governance without payment automation."
+    description: "Will manage internal credit accounting, usage visibility, and finance governance without payment automation.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Record a credit ledger entry only after approval."
   },
   {
     title: "Analytics & Reports",
+    countKey: "analyticsEvents",
     status: "Intake Ready",
     chips: ["Intake Ready", "No Live Integrations"],
-    description: "Will manage operational reporting, funnel visibility, and approval-gated analytics summaries."
+    description: "Will manage operational reporting, funnel visibility, and approval-gated analytics summaries.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Capture the first governed analytics event."
   },
   {
     title: "Customer Support",
+    countKey: "supportTickets",
     status: "Not Started",
     chips: ["Not Started", "No Live Integrations"],
-    description: "Will manage support intake, triage, and internal resolution tracking while customers continue using external support channels."
+    description: "Will manage support intake, triage, and internal resolution tracking while customers continue using external support channels.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Open a support ticket when a real issue is received."
   },
   {
     title: "Compliance & Approval Engine",
+    countKey: "complianceItems",
     status: "Approval Required",
     chips: ["Approval Required", "No Live Integrations"],
-    description: "Will manage human approval checkpoints, policy enforcement, and governed release review for all phase work."
+    description: "Will manage human approval checkpoints, policy enforcement, and governed release review for all phase work.",
+    emptyStateMessage: "No real records yet.",
+    nextAction: "Log a compliance item before any governed action."
   }
 ];
 
@@ -1275,6 +1309,9 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [buildMissionDeploymentApprovalMessage, setBuildMissionDeploymentApprovalMessage] = useState("");
   const [buildMissionDeploymentApprovalError, setBuildMissionDeploymentApprovalError] = useState("");
   const [buildMissionDeploymentApprovalNote, setBuildMissionDeploymentApprovalNote] = useState("");
+  const [socialAutomationSummary, setSocialAutomationSummary] = useState<SocialAutomationSummary | null>(null);
+  const [socialAutomationSummaryLoading, setSocialAutomationSummaryLoading] = useState(false);
+  const [socialAutomationSummaryError, setSocialAutomationSummaryError] = useState("");
   const [deploymentHardeningStatus, setDeploymentHardeningStatus] = useState<DeploymentHardeningStatus | null>(null);
   const [deploymentHardeningLoading, setDeploymentHardeningLoading] = useState(false);
   const [deploymentHardeningError, setDeploymentHardeningError] = useState("");
@@ -1298,6 +1335,29 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       })
       .finally(() => {
         if (!cancelled) setProjectIntakeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "social-automation-studio") return;
+    let cancelled = false;
+    setSocialAutomationSummaryLoading(true);
+    setSocialAutomationSummaryError("");
+    getSocialAutomationSummary()
+      .then(summary => {
+        if (!cancelled) setSocialAutomationSummary(summary);
+      })
+      .catch(error => {
+        if (!cancelled) {
+          setSocialAutomationSummary(null);
+          setSocialAutomationSummaryError(error instanceof Error ? error.message : "Unable to load Social Automation summary");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSocialAutomationSummaryLoading(false);
       });
     return () => {
       cancelled = true;
@@ -2633,6 +2693,21 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <strong>Internal dashboard boundary</strong>
               <p>This shell is internal only. Customers stay on the separate website, email, support, payments, and future client portal. No live integrations, publishing, payment automation, or external API calls are executed from this page.</p>
             </div>
+            {socialAutomationSummaryLoading ? <p>Loading real Social Automation summary counts...</p> : null}
+            {socialAutomationSummaryError ? (
+              <div className="business-boundary-notice">
+                <strong>Summary unavailable</strong>
+                <p>{socialAutomationSummaryError}</p>
+                <p>Real records are hidden until the backend summary responds again.</p>
+              </div>
+            ) : null}
+            {!socialAutomationSummaryLoading && !socialAutomationSummaryError && socialAutomationSummary ? (
+              <div className="recent-intake-meta">
+                <div><span>Backend summary</span><strong>Connected</strong></div>
+                <div><span>Empty states</span><strong>Real counts only</strong></div>
+                <div><span>Records loaded</span><strong>{Object.values(socialAutomationSummary.counts).reduce((total, count) => total + count, 0)}</strong></div>
+              </div>
+            ) : null}
             <div className="assignment-status-strip" aria-label="Social Automation Studio status chips">
               {["Not Started", "Intake Ready", "Approval Required", "Provider Ready", "No Live Integrations"].map(status => <span className="assignment-status-badge" key={status}>{status}</span>)}
             </div>
@@ -2640,11 +2715,12 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               {socialAutomationStudioModuleCards.map(module => (
                 <article className="business-metric-card neutral" key={module.title}>
                   <span>{module.title}</span>
-                  <strong>{module.status}</strong>
+                  <strong>{socialAutomationSummaryLoading ? "Loading..." : socialAutomationSummary ? `${socialAutomationSummary.counts[module.countKey]} records` : "0 records"}</strong>
                   <div className="assignment-status-strip" aria-label={`${module.title} status chips`}>
                     {module.chips.map(chip => <span className="assignment-status-badge" key={`${module.title}-${chip}`}>{chip}</span>)}
                   </div>
-                  <p>{module.description}</p>
+                  <p>{socialAutomationSummary && socialAutomationSummary.counts[module.countKey] > 0 ? module.description : module.emptyStateMessage}</p>
+                  <small>Next governed action: {module.nextAction}</small>
                 </article>
               ))}
             </div>
