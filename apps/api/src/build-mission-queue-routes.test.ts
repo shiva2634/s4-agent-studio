@@ -45,6 +45,27 @@ const readyPayload = {
   workflowStatus: "READY_FOR_APP_STUDIO"
 };
 
+const socialAutomationPayload = {
+  projectName: "Social Automation Studio \u2014 Phase 1 MVP Shell",
+  clientOrCompanyName: "Shrinika Technologies",
+  projectType: "Mobile App",
+  priority: "High",
+  projectSource: "Admin instruction",
+  prdStatus: "Approved",
+  shortSummary: "Create the Phase 1 MVP shell for Social Automation Studio.",
+  problemStatement: "Shrinika needs a governed social automation foundation with approvals and empty states only.",
+  targetUsers: "Android customers, internal operators, approvers, support, finance, compliance, and admins.",
+  coreModulesRequired: "Android customer app shell, internal website dashboard shell, CRM starter, finance and credits starter, content idea intake, editing and compliance queue, publishing approval queue, Meta Ads intake, third-party advertisement marketplace intake, support ticket starter, analytics starter",
+  keyFeatures: "OpenAI script and prompt workflow placeholder, AI generation job queue placeholder, real empty states only, internal and customer separation, no live platform calls, no payment automation",
+  integrationsNeeded: "OpenAI API, Meta Ads intake only, analytics backend, support backend, future billing provider, mobile app shell, future iOS roadmap",
+  designReferences: "Follow existing Business Control Centre and App Studio governed workflow patterns.",
+  deliveryDeadline: null,
+  estimatedBudgetRange: null,
+  risksAssumptions: "No unauthorized scraping, no copyrighted movie clips or music, no celebrity cloning, no live external platform API calls, no payment automation, and human approval remains required for publishing and high-cost actions.",
+  finalApprovalOwner: "Shrinika",
+  workflowStatus: "READY_FOR_APP_STUDIO"
+};
+
 function cookie(rawToken: string) {
   return `shrinika_internal_session=${encodeURIComponent(rawToken)}`;
 }
@@ -105,6 +126,25 @@ async function createQueueMission(sessionCookie: string, projectName: string) {
   });
   assert.equal(handoff.statusCode, 201);
   return (handoff.json() as { intake: { id: string }; buildMission: { id: string } });
+}
+
+async function createSocialAutomationQueueMission(sessionCookie: string) {
+  insertActiveAppStudioProject("project-social-automation-studio-phase-1-mvp-shell");
+  const created = await app.inject({
+    method: "POST",
+    url: "/api/business-control-centre/project-intakes",
+    headers: { cookie: sessionCookie },
+    payload: socialAutomationPayload
+  });
+  assert.equal(created.statusCode, 201);
+  const intakeId = (created.json() as { intake: { id: string } }).intake.id;
+  const handoff = await app.inject({
+    method: "POST",
+    url: `/api/business-control-centre/project-intakes/${intakeId}/create-build-mission`,
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(handoff.statusCode, 201);
+  return handoff.json() as { intake: { id: string; workflowStatus: string }; buildMission: { id: string; targetModule: string; approvalRequired: boolean } };
 }
 
 describe("Business Control Centre Build Mission queue API", () => {
@@ -392,6 +432,63 @@ describe("Business Control Centre Build Mission queue API", () => {
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_assignments WHERE task_id=?").get(mission.taskId) as { count: number }).count, 0);
     assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='DEVELOPMENT_START_REQUESTED'").get(handoff.buildMission.id));
     assert.ok(db.prepare("SELECT id FROM build_mission_events WHERE build_mission_id=? AND event_type='DEVELOPMENT_START_APPROVED'").get(handoff.buildMission.id));
+  });
+
+  it("moves the Social Automation Studio Phase 1 MVP Shell through approval, assignment, and development-start request", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "queue-social-automation-token");
+    const handoff = await createSocialAutomationQueueMission(sessionCookie);
+    assert.equal(handoff.buildMission.targetModule, "Social Studio");
+    assert.equal(handoff.buildMission.approvalRequired, true);
+    assert.equal(handoff.intake.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
+
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/approve`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Approve the Social Automation Studio build mission draft." }
+    });
+    assert.equal(approved.statusCode, 200);
+    const approvedItem = approved.json() as { item: { status: string; intake: { workflowStatus: string } } };
+    assert.equal(approvedItem.item.status, "APPROVED");
+    assert.equal(approvedItem.item.intake.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
+
+    const assigned = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/assign-team`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        assignmentStatus: "ASSIGNED",
+        managerUserId: "business-user-shrinika",
+        frontendDeveloperUserId: "business-user-shiva",
+        backendDeveloperUserId: "business-user-shiva",
+        qaUserId: "business-user-shiva",
+        productionReadinessUserId: "business-user-shiva",
+        notes: "Assign the governed internal team."
+      }
+    });
+    assert.equal(assigned.statusCode, 200);
+    const assignedItem = assigned.json() as { assignment: { assignmentStatus: string; managerUserId: string } };
+    assert.equal(assignedItem.assignment.assignmentStatus, "ASSIGNED");
+    assert.equal(assignedItem.assignment.managerUserId, "business-user-shrinika");
+
+    const requested = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-queue/${handoff.buildMission.id}/request-development-start`,
+      headers: { cookie: sessionCookie },
+      payload: { note: "Request development-start approval for Social Automation Studio." }
+    });
+    assert.equal(requested.statusCode, 200);
+    const requestedItem = requested.json() as { item: { developmentGate: { gateStatus: string } } };
+    assert.equal(requestedItem.item.developmentGate.gateStatus, "REQUESTED");
+
+    const noExecutionYet = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/build-mission-execution-dashboard/${handoff.buildMission.id}/create`,
+      headers: { cookie: sessionCookie },
+      payload: { ownerUserId: "business-user-shiva" }
+    });
+    assert.equal(noExecutionYet.statusCode, 400);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM change_proposals cp JOIN build_missions bm ON bm.task_id=cp.task_id WHERE bm.id=?").get(handoff.buildMission.id) as { count: number }).count, 0);
   });
 
   it("rejects invalid development-start requests and blocks requested starts with a reason", async () => {
