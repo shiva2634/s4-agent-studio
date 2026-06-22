@@ -137,6 +137,13 @@ type RoleHierarchyItem = {
   description: string;
 };
 
+type SocialAutomationStudioModuleCard = {
+  title: string;
+  status: "Not Started" | "Intake Ready" | "Approval Required" | "Provider Ready" | "No Live Integrations";
+  chips: Array<"Not Started" | "Intake Ready" | "Approval Required" | "Provider Ready" | "No Live Integrations">;
+  description: string;
+};
+
 type ClientStatus = "Lead" | "Active" | "Waiting Approval" | "Support Needed" | "Payment Pending" | "Paused";
 
 type ClientPriority = "Low" | "Medium" | "High";
@@ -460,6 +467,7 @@ const sidebarSections: SidebarSection[] = [
   { id: "role-hierarchy-editor", label: "Role Hierarchy Editor", group: "Organization" },
   { id: "access-boundary", label: "Access Boundary", group: "Company" },
   { id: "project-operations", label: "Project Operations", group: "Operations" },
+  { id: "social-automation-studio", label: "Social Automation Studio", group: "Operations" },
   { id: "create-project-prd", label: "Create Project / PRD", group: "Operations" },
   { id: "build-mission-queue", label: "Build Mission Queue", group: "Operations" },
   { id: "build-mission-execution", label: "Build Mission Execution", group: "Operations" },
@@ -745,6 +753,69 @@ const assignmentStatusBadges: AssignmentStatus[] = [
 ];
 
 const projectAssignments: ProjectAssignment[] = [];
+
+const socialAutomationStudioModuleCards: SocialAutomationStudioModuleCard[] = [
+  {
+    title: "Overview / Command Centre",
+    status: "Intake Ready",
+    chips: ["Intake Ready", "No Live Integrations"],
+    description: "Coordinates governed Phase 1 work for the Android shell and internal website dashboard while keeping customer access separate."
+  },
+  {
+    title: "Social Media Automation",
+    status: "Not Started",
+    chips: ["Not Started", "No Live Integrations"],
+    description: "Will manage approval-gated social post planning, scheduling, and workflow visibility without direct platform publishing yet."
+  },
+  {
+    title: "Content Creation for Wealth",
+    status: "Provider Ready",
+    chips: ["Approval Required", "Provider Ready", "No Live Integrations"],
+    description: "Will manage governed script, prompt, caption, and compliance drafting for wealth-oriented content."
+  },
+  {
+    title: "Meta Ads Agency",
+    status: "Not Started",
+    chips: ["Not Started", "No Live Integrations"],
+    description: "Will manage ad intake, review, and governed handoff for Meta Ads work without live campaign execution."
+  },
+  {
+    title: "Third-Party Advertisement Marketplace",
+    status: "Not Started",
+    chips: ["Not Started", "No Live Integrations"],
+    description: "Will manage partner advertisement intake, approvals, and marketplace coordination with no live integrations yet."
+  },
+  {
+    title: "CRM",
+    status: "Intake Ready",
+    chips: ["Intake Ready", "No Live Integrations"],
+    description: "Will manage customer relationship records, governed follow-ups, and future internal-to-customer handoffs."
+  },
+  {
+    title: "Finance & Credits",
+    status: "Approval Required",
+    chips: ["Approval Required", "No Live Integrations"],
+    description: "Will manage internal credit accounting, usage visibility, and finance governance without payment automation."
+  },
+  {
+    title: "Analytics & Reports",
+    status: "Intake Ready",
+    chips: ["Intake Ready", "No Live Integrations"],
+    description: "Will manage operational reporting, funnel visibility, and approval-gated analytics summaries."
+  },
+  {
+    title: "Customer Support",
+    status: "Not Started",
+    chips: ["Not Started", "No Live Integrations"],
+    description: "Will manage support intake, triage, and internal resolution tracking while customers continue using external support channels."
+  },
+  {
+    title: "Compliance & Approval Engine",
+    status: "Approval Required",
+    chips: ["Approval Required", "No Live Integrations"],
+    description: "Will manage human approval checkpoints, policy enforcement, and governed release review for all phase work."
+  }
+];
 
 const pendingManagerApprovals = projectAssignments.filter(assignment => assignment.currentStage === "Waiting Manager Approval");
 const productionReadinessCompleted = projectAssignments.filter(assignment => ["Waiting Manager Approval", "Approved for Deployment", "Deployed"].includes(assignment.currentStage));
@@ -2551,6 +2622,35 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
           ) : null}
 
           {activeSection.id === "project-operations" ? <EmptyStateSection id="project-operations" title="Project Operations" description="No real project assignment records are displayed here. Use Build Mission Queue for backend-connected assignments." /> : null}
+
+          {activeSection.id === "social-automation-studio" ? (
+          <section className="business-section social-automation-studio-section" id="social-automation-studio">
+            <div className="business-section-heading">
+              <span>Internal website dashboard shell for the approved Social Automation Studio Phase 1 MVP.</span>
+              <h2>Social Automation Studio</h2>
+            </div>
+            <div className="business-boundary-notice">
+              <strong>Internal dashboard boundary</strong>
+              <p>This shell is internal only. Customers stay on the separate website, email, support, payments, and future client portal. No live integrations, publishing, payment automation, or external API calls are executed from this page.</p>
+            </div>
+            <div className="assignment-status-strip" aria-label="Social Automation Studio status chips">
+              {["Not Started", "Intake Ready", "Approval Required", "Provider Ready", "No Live Integrations"].map(status => <span className="assignment-status-badge" key={status}>{status}</span>)}
+            </div>
+            <div className="business-card-grid" aria-label="Social Automation Studio module overview">
+              {socialAutomationStudioModuleCards.map(module => (
+                <article className="business-metric-card neutral" key={module.title}>
+                  <span>{module.title}</span>
+                  <strong>{module.status}</strong>
+                  <div className="assignment-status-strip" aria-label={`${module.title} status chips`}>
+                    {module.chips.map(chip => <span className="assignment-status-badge" key={`${module.title}-${chip}`}>{chip}</span>)}
+                  </div>
+                  <p>{module.description}</p>
+                </article>
+              ))}
+            </div>
+            <EmptyStateSection id="social-automation-studio-empty" title="Social Automation Studio" description="No real records yet. Use the backend-connected workflow sections for real records." />
+          </section>
+          ) : null}
 
           {activeSection.id === "create-project-prd" ? (
           <section className="business-section project-prd-section" id="create-project-prd">
