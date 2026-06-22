@@ -66,7 +66,7 @@ import {
   rejectBuildMissionDeploymentApproval,
   type BuildMissionDeploymentApprovalDashboardItem
 } from "./build-mission-deployment-approval";
-import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
+import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, socialAutomationStudioPhase1MvpShellIntakePayload, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import type { InternalAuthState } from "./internal-auth";
 import { getDeploymentHardeningStatus, type DeploymentHardeningStatus } from "./deployment-hardening";
 import { getInternalDeploymentSmokeStatus, type InternalDeploymentSmokeStatus } from "./internal-deployment-smoke";
@@ -1614,6 +1614,28 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setProjectIntakeSaving(false);
     }
   };
+  const handleCreateSocialAutomationStudioIntake = async () => {
+    const existingIntake = projectIntakes.find(intake => intake.projectName === socialAutomationStudioPhase1MvpShellIntakePayload.projectName);
+    if (existingIntake) {
+      setSelectedProjectIntakeId(existingIntake.id);
+      setProjectIntakeMessage(`Social Automation Studio intake already exists: ${existingIntake.projectName}`);
+      setProjectIntakeError("");
+      return;
+    }
+    setProjectIntakeSaving(true);
+    setProjectIntakeMessage("");
+    setProjectIntakeError("");
+    try {
+      const intake = await createBusinessProjectIntake(socialAutomationStudioPhase1MvpShellIntakePayload);
+      setProjectIntakes(current => [intake, ...current]);
+      setSelectedProjectIntakeId(intake.id);
+      setProjectIntakeMessage(`Social Automation Studio intake created: ${intake.projectName}`);
+    } catch (error) {
+      setProjectIntakeError(error instanceof Error ? error.message : "Unable to create Social Automation Studio intake");
+    } finally {
+      setProjectIntakeSaving(false);
+    }
+  };
   const handleProjectIntakeHandoff = async () => {
     if (!selectedProjectIntake || !selectedProjectIntakeHandoffEligible) return;
     setProjectIntakeHandoffSaving(true);
@@ -2565,6 +2587,7 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                 {projectIntakeError ? <p className="error">{projectIntakeError}</p> : null}
                 <div className="project-prd-actions">
                   <button type="submit" disabled={projectIntakeSaving}>{projectIntakeSaving ? "Saving..." : "Create project intake"}</button>
+                  <button type="button" onClick={() => void handleCreateSocialAutomationStudioIntake()} disabled={projectIntakeSaving}>{projectIntakeSaving ? "Saving..." : "Create Social Automation Studio intake"}</button>
                   <button type="button" disabled>Create Build Mission Draft from a saved approved intake</button>
                 </div>
               </form>

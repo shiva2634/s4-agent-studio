@@ -53,6 +53,27 @@ const readyForAppStudioPayload = {
   keyFeatures: "Internal approval gate, customer-safe portal shell, support visibility"
 };
 
+const socialAutomationStudioPhase1MvpShellPayload = {
+  projectName: "Social Automation Studio \u2014 Phase 1 MVP Shell",
+  clientOrCompanyName: "Shrinika Technologies",
+  projectType: "Mobile App",
+  priority: "High",
+  projectSource: "Admin instruction",
+  prdStatus: "Approved",
+  shortSummary: "Create the Phase 1 MVP shell for Social Automation Studio with an Android customer app, internal website dashboard, and governed AI workflow placeholders using real empty states only.",
+  problemStatement: "Shrinika needs a governed social automation product foundation that can intake content ideas, manage CRM, finance and credits, editing and compliance, publishing approvals, Meta Ads intake, marketplace intake, support, and analytics without live publishing or payment automation.",
+  targetUsers: "Android customers, internal operators, approvers, support, finance, compliance, and admins.",
+  coreModulesRequired: "Android customer app shell, internal website dashboard shell, CRM starter, finance and credits starter, content idea intake, AI generation job queue placeholder, editing and compliance queue, publishing approval queue, Meta Ads intake, third-party advertisement marketplace intake, support ticket starter, analytics starter",
+  keyFeatures: "Governed intake and approval flow, OpenAI script and prompt workflow placeholder, real empty states only, internal and customer separation, no live platform calls, no payment automation",
+  integrationsNeeded: "OpenAI API, Meta Ads intake only, analytics backend, support backend, future billing provider, mobile app shell, future iOS roadmap",
+  designReferences: "Follow existing Business Control Centre and App Studio governed workflow patterns. Keep customer-facing surfaces separate from the internal operator dashboard.",
+  deliveryDeadline: null,
+  estimatedBudgetRange: null,
+  risksAssumptions: "No unauthorized scraping, no copyrighted movie clips or music, no celebrity cloning, no live external platform API calls, no payment automation, and human approval remains required for publishing and high-cost actions.",
+  finalApprovalOwner: "Shrinika",
+  workflowStatus: "READY_FOR_APP_STUDIO"
+};
+
 function cookie(rawToken: string) {
   return `shrinika_internal_session=${encodeURIComponent(rawToken)}`;
 }
@@ -261,6 +282,35 @@ describe("Business Control Centre project intake API", () => {
     assert.ok((events.json() as { events: Array<{ eventType: string; metadataJson: string | null }> }).events.some((event) =>
       event.eventType === "APP_STUDIO_BUILD_MISSION_DRAFT_CREATED" && event.metadataJson?.includes(body.buildMission.id)
     ));
+  });
+
+  it("creates the governed Social Automation Studio Phase 1 MVP Shell intake and allows App Studio handoff", async () => {
+    insertActiveAppStudioProject();
+    const sessionCookie = createInternalSession("business-user-shrinika", "social-automation-intake-token");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: socialAutomationStudioPhase1MvpShellPayload
+    });
+    assert.equal(created.statusCode, 201);
+    const createdBody = created.json() as { intake: { id: string; projectName: string; prdStatus: string; workflowStatus: string } };
+    assert.equal(createdBody.intake.projectName, socialAutomationStudioPhase1MvpShellPayload.projectName);
+    assert.equal(createdBody.intake.prdStatus, "Approved");
+    assert.equal(createdBody.intake.workflowStatus, "READY_FOR_APP_STUDIO");
+    assert.ok(!created.body.includes("social-automation-intake-token"));
+
+    const handoff = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${createdBody.intake.id}/create-build-mission`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(handoff.statusCode, 201);
+    const handoffBody = handoff.json() as { intake: { appStudioBuildMissionId: string; workflowStatus: string }; buildMission: { id: string; status: string; approvalRequired: boolean } };
+    assert.equal(handoffBody.buildMission.status, "DRAFT");
+    assert.equal(handoffBody.buildMission.approvalRequired, true);
+    assert.equal(handoffBody.intake.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
+    assert.ok(!handoff.body.includes("social-automation-intake-token"));
   });
 
   it("rejects ineligible and duplicate handoffs safely", async () => {

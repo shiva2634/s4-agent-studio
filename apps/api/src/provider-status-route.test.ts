@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { app } from "./server.js";
+
+const originalNodeEnv = process.env.NODE_ENV;
+process.env.NODE_ENV = "test";
+const { app } = await import("./server.js");
 
 const originalEnv = {
   AI_PROVIDER: process.env.AI_PROVIDER,
@@ -19,6 +22,7 @@ const originalEnv = {
 };
 
 after(async () => {
+  process.env.NODE_ENV = originalNodeEnv;
   process.env.AI_PROVIDER = originalEnv.AI_PROVIDER;
   process.env.AI_API_KEY = originalEnv.AI_API_KEY;
   process.env.AI_MODEL = originalEnv.AI_MODEL;
