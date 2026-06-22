@@ -116,7 +116,8 @@ describe("protected internal Business Control Centre and App Studio routes", () 
       "/api/business-control-centre/approvals",
       "/api/business-control-centre/system-health",
       "/api/business-control-centre/deployment-hardening-status",
-      "/api/business-control-centre/internal-smoke-test-status"
+      "/api/business-control-centre/internal-smoke-test-status",
+      "/api/business-control-centre/social-automation/summary"
     ]) {
       const response = await app.inject({
         method: "GET",

@@ -138,6 +138,21 @@ export const businessBuildMissionProductionReadinessChecklistStatuses = ["DRAFT"
 export const businessBuildMissionProductionReadinessChecklistItemStatuses = ["NOT_CHECKED", "PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"] as const;
 export const businessBuildMissionProductionReadinessChecklistSeverities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const;
 export const businessBuildMissionDeploymentApprovalStatuses = ["DRAFT", "REQUESTED", "APPROVED", "REJECTED", "CANCELLED", "ARCHIVED"] as const;
+export const socialAutomationCustomerTypes = ["LEAD", "CUSTOMER"] as const;
+export const socialAutomationCustomerStatuses = ["NEW", "QUALIFIED", "ACTIVE", "PAUSED", "ARCHIVED"] as const;
+export const socialAutomationContentIdeaStatuses = ["DRAFT", "INTAKE_READY", "APPROVAL_REQUIRED", "APPROVED", "REJECTED", "ARCHIVED"] as const;
+export const socialAutomationGenerationJobStatuses = ["QUEUED", "RUNNING", "BLOCKED", "COMPLETED", "FAILED", "ARCHIVED"] as const;
+export const socialAutomationGenerationJobTypes = ["SCRIPT", "PROMPT", "CAPTION", "COMPLIANCE", "REPORT"] as const;
+export const socialAutomationComplianceItemStatuses = ["OPEN", "IN_REVIEW", "APPROVED", "REJECTED", "BLOCKED", "CLOSED"] as const;
+export const socialAutomationPublishingTaskStatuses = ["DRAFT", "REQUESTED", "APPROVED", "REJECTED", "SCHEDULED", "BLOCKED", "ARCHIVED"] as const;
+export const socialAutomationPublishingPlatformKeys = ["internal", "meta", "youtube", "whatsapp", "x", "linkedin", "third_party", "manual"] as const;
+export const socialAutomationIntakeStatuses = ["DRAFT", "INTAKE_READY", "APPROVAL_REQUIRED", "APPROVED", "REJECTED", "ARCHIVED"] as const;
+export const socialAutomationCreditLedgerEntryTypes = ["ALLOCATION", "DEBIT", "CREDIT", "ADJUSTMENT"] as const;
+export const socialAutomationCreditLedgerStatuses = ["DRAFT", "POSTED", "VOIDED"] as const;
+export const socialAutomationSupportTicketStatuses = ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "WAITING_INTERNAL", "RESOLVED", "CLOSED"] as const;
+export const socialAutomationSupportTicketPriorities = ["LOW", "MEDIUM", "HIGH", "URGENT"] as const;
+export const socialAutomationAnalyticsEventStatuses = ["EMPTY_STATE", "RECORDED", "AGGREGATED"] as const;
+export const socialAutomationSourceTypes = ["CUSTOMER", "CONTENT_IDEA", "GENERATION_JOB", "PUBLISHING_TASK", "META_ADS_INTAKE", "BRAND_CAMPAIGN_INTAKE", "SUPPORT_TICKET"] as const;
 
 type BusinessProjectType = (typeof businessProjectTypes)[number];
 type BusinessProjectPriority = (typeof businessProjectPriorities)[number];
@@ -156,6 +171,21 @@ type BusinessBuildMissionProductionReadinessChecklistStatus = (typeof businessBu
 type BusinessBuildMissionProductionReadinessChecklistItemStatus = (typeof businessBuildMissionProductionReadinessChecklistItemStatuses)[number];
 type BusinessBuildMissionProductionReadinessChecklistSeverity = (typeof businessBuildMissionProductionReadinessChecklistSeverities)[number];
 type BusinessBuildMissionDeploymentApprovalStatus = (typeof businessBuildMissionDeploymentApprovalStatuses)[number];
+type SocialAutomationCustomerType = (typeof socialAutomationCustomerTypes)[number];
+type SocialAutomationCustomerStatus = (typeof socialAutomationCustomerStatuses)[number];
+type SocialAutomationContentIdeaStatus = (typeof socialAutomationContentIdeaStatuses)[number];
+type SocialAutomationGenerationJobStatus = (typeof socialAutomationGenerationJobStatuses)[number];
+type SocialAutomationGenerationJobType = (typeof socialAutomationGenerationJobTypes)[number];
+type SocialAutomationComplianceItemStatus = (typeof socialAutomationComplianceItemStatuses)[number];
+type SocialAutomationPublishingTaskStatus = (typeof socialAutomationPublishingTaskStatuses)[number];
+type SocialAutomationPublishingPlatformKey = (typeof socialAutomationPublishingPlatformKeys)[number];
+type SocialAutomationIntakeStatus = (typeof socialAutomationIntakeStatuses)[number];
+type SocialAutomationCreditLedgerEntryType = (typeof socialAutomationCreditLedgerEntryTypes)[number];
+type SocialAutomationCreditLedgerStatus = (typeof socialAutomationCreditLedgerStatuses)[number];
+type SocialAutomationSupportTicketStatus = (typeof socialAutomationSupportTicketStatuses)[number];
+type SocialAutomationSupportTicketPriority = (typeof socialAutomationSupportTicketPriorities)[number];
+type SocialAutomationAnalyticsEventStatus = (typeof socialAutomationAnalyticsEventStatuses)[number];
+type SocialAutomationSourceType = (typeof socialAutomationSourceTypes)[number];
 
 export type BusinessProjectIntakeInput = {
   projectName: string;
@@ -315,6 +345,118 @@ export type BuildMissionDeploymentApprovalInput = {
   actorUserId: string;
   note?: string | null;
   reason?: string | null;
+  now?: string;
+};
+
+export type SocialAutomationCustomerLeadInput = {
+  recordType?: SocialAutomationCustomerType;
+  displayName: string;
+  companyName?: string | null;
+  sourceChannel: string;
+  status?: SocialAutomationCustomerStatus;
+  notes?: string | null;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationContentIdeaInput = {
+  customerId?: string | null;
+  title: string;
+  summary: string;
+  contentFormat?: string | null;
+  status?: SocialAutomationContentIdeaStatus;
+  sourceChannel?: string | null;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationGenerationJobInput = {
+  customerId?: string | null;
+  contentIdeaId?: string | null;
+  jobType: SocialAutomationGenerationJobType;
+  providerKey: "openai" | "nvidia" | "manual";
+  requestNote: string;
+  status?: SocialAutomationGenerationJobStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationComplianceItemInput = {
+  sourceType: SocialAutomationSourceType;
+  sourceId?: string | null;
+  title: string;
+  notes?: string | null;
+  riskLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  status?: SocialAutomationComplianceItemStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationPublishingTaskInput = {
+  sourceType: SocialAutomationSourceType;
+  sourceId?: string | null;
+  platformKey: SocialAutomationPublishingPlatformKey;
+  title: string;
+  notes?: string | null;
+  scheduledFor?: string | null;
+  status?: SocialAutomationPublishingTaskStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationMetaAdsIntakeInput = {
+  customerId?: string | null;
+  campaignName: string;
+  objective?: string | null;
+  notes?: string | null;
+  status?: SocialAutomationIntakeStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationBrandCampaignIntakeInput = {
+  customerId?: string | null;
+  campaignName: string;
+  objective?: string | null;
+  notes?: string | null;
+  status?: SocialAutomationIntakeStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationCreditLedgerEntryInput = {
+  customerId?: string | null;
+  entryType: SocialAutomationCreditLedgerEntryType;
+  amountCents: number;
+  currencyCode?: string;
+  note?: string | null;
+  status?: SocialAutomationCreditLedgerStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationSupportTicketInput = {
+  customerId?: string | null;
+  title: string;
+  summary: string;
+  priority?: SocialAutomationSupportTicketPriority;
+  channel: string;
+  notes?: string | null;
+  status?: SocialAutomationSupportTicketStatus;
+  actorUserId: string;
+  now?: string;
+};
+
+export type SocialAutomationAnalyticsEventInput = {
+  customerId?: string | null;
+  eventKey: string;
+  eventName: string;
+  sourceType?: SocialAutomationSourceType | null;
+  sourceId?: string | null;
+  eventValue?: string | null;
+  notes?: string | null;
+  status?: SocialAutomationAnalyticsEventStatus;
+  actorUserId: string;
   now?: string;
 };
 
@@ -1067,6 +1209,176 @@ export function initializeDatabaseOn(database: Database.Database) {
       FOREIGN KEY(requested_by_user_id) REFERENCES business_users(id),
       FOREIGN KEY(approved_by_user_id) REFERENCES business_users(id),
       FOREIGN KEY(rejected_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_customers (
+      id TEXT PRIMARY KEY,
+      record_type TEXT NOT NULL CHECK(record_type IN ('LEAD','CUSTOMER')),
+      display_name TEXT NOT NULL,
+      company_name TEXT,
+      source_channel TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('NEW','QUALIFIED','ACTIVE','PAUSED','ARCHIVED')),
+      notes TEXT,
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_content_ideas (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      content_format TEXT,
+      source_channel TEXT,
+      status TEXT NOT NULL CHECK(status IN ('DRAFT','INTAKE_READY','APPROVAL_REQUIRED','APPROVED','REJECTED','ARCHIVED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_generation_jobs (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      content_idea_id TEXT,
+      job_type TEXT NOT NULL CHECK(job_type IN ('SCRIPT','PROMPT','CAPTION','COMPLIANCE','REPORT')),
+      provider_key TEXT NOT NULL CHECK(provider_key IN ('openai','nvidia','manual')),
+      request_note TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('QUEUED','RUNNING','BLOCKED','COMPLETED','FAILED','ARCHIVED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(content_idea_id) REFERENCES social_automation_content_ideas(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_compliance_items (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL CHECK(source_type IN ('CUSTOMER','CONTENT_IDEA','GENERATION_JOB','PUBLISHING_TASK','META_ADS_INTAKE','BRAND_CAMPAIGN_INTAKE','SUPPORT_TICKET')),
+      source_id TEXT,
+      title TEXT NOT NULL,
+      notes TEXT,
+      risk_level TEXT NOT NULL CHECK(risk_level IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+      status TEXT NOT NULL CHECK(status IN ('OPEN','IN_REVIEW','APPROVED','REJECTED','BLOCKED','CLOSED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_publishing_tasks (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL CHECK(source_type IN ('CUSTOMER','CONTENT_IDEA','GENERATION_JOB','PUBLISHING_TASK','META_ADS_INTAKE','BRAND_CAMPAIGN_INTAKE','SUPPORT_TICKET')),
+      source_id TEXT,
+      platform_key TEXT NOT NULL CHECK(platform_key IN ('internal','meta','youtube','whatsapp','x','linkedin','third_party','manual')),
+      title TEXT NOT NULL,
+      notes TEXT,
+      scheduled_for TEXT,
+      status TEXT NOT NULL CHECK(status IN ('DRAFT','REQUESTED','APPROVED','REJECTED','SCHEDULED','BLOCKED','ARCHIVED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_meta_ads_intakes (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      campaign_name TEXT NOT NULL,
+      objective TEXT,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('DRAFT','INTAKE_READY','APPROVAL_REQUIRED','APPROVED','REJECTED','ARCHIVED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_brand_campaign_intakes (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      campaign_name TEXT NOT NULL,
+      objective TEXT,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('DRAFT','INTAKE_READY','APPROVAL_REQUIRED','APPROVED','REJECTED','ARCHIVED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_credit_ledger (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      entry_type TEXT NOT NULL CHECK(entry_type IN ('ALLOCATION','DEBIT','CREDIT','ADJUSTMENT')),
+      amount_cents INTEGER NOT NULL DEFAULT 0,
+      currency_code TEXT NOT NULL DEFAULT 'INR',
+      note TEXT,
+      status TEXT NOT NULL CHECK(status IN ('DRAFT','POSTED','VOIDED')),
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_support_tickets (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      priority TEXT NOT NULL CHECK(priority IN ('LOW','MEDIUM','HIGH','URGENT')),
+      status TEXT NOT NULL CHECK(status IN ('OPEN','IN_PROGRESS','WAITING_CUSTOMER','WAITING_INTERNAL','RESOLVED','CLOSED')),
+      notes TEXT,
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
+    );
+    CREATE TABLE IF NOT EXISTS social_automation_analytics_events (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      event_key TEXT NOT NULL,
+      event_name TEXT NOT NULL,
+      event_status TEXT NOT NULL CHECK(event_status IN ('EMPTY_STATE','RECORDED','AGGREGATED')),
+      source_type TEXT,
+      source_id TEXT,
+      event_value TEXT,
+      notes TEXT,
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      FOREIGN KEY(customer_id) REFERENCES social_automation_customers(id) ON DELETE SET NULL,
+      FOREIGN KEY(created_by_user_id) REFERENCES business_users(id),
+      FOREIGN KEY(updated_by_user_id) REFERENCES business_users(id)
     );
     CREATE TABLE IF NOT EXISTS change_proposals (
       id TEXT PRIMARY KEY,
@@ -3706,6 +4018,304 @@ export function getBuildMissionDeploymentApprovalDashboardItem(database: Databas
 
 export function recordBuildMissionDeploymentApprovalEvent(database: Database.Database, input: BuildMissionQueueEventInput) {
   return recordBuildMissionQueueEvent(database, input);
+}
+
+export function createSocialAutomationCustomerLead(database: Database.Database, input: SocialAutomationCustomerLeadInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-customer-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_customers
+    (id,record_type,display_name,company_name,source_channel,status,notes,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    validateEnum("recordType", input.recordType ?? "LEAD", socialAutomationCustomerTypes),
+    normalizeRequiredText("displayName", input.displayName),
+    normalizeOptionalText(input.companyName),
+    normalizeRequiredText("sourceChannel", input.sourceChannel),
+    validateEnum("status", input.status ?? "NEW", socialAutomationCustomerStatuses),
+    normalizeOptionalText(input.notes),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,record_type AS recordType,display_name AS displayName,company_name AS companyName,source_channel AS sourceChannel,
+      status,notes,created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,
+      archived_at AS archivedAt
+    FROM social_automation_customers WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationContentIdea(database: Database.Database, input: SocialAutomationContentIdeaInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-content-idea-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_content_ideas
+    (id,customer_id,title,summary,content_format,source_channel,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeRequiredText("title", input.title),
+    normalizeRequiredText("summary", input.summary),
+    normalizeOptionalText(input.contentFormat),
+    normalizeOptionalText(input.sourceChannel),
+    validateEnum("status", input.status ?? "INTAKE_READY", socialAutomationContentIdeaStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,title,summary,content_format AS contentFormat,source_channel AS sourceChannel,status,
+      created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_content_ideas WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationGenerationJob(database: Database.Database, input: SocialAutomationGenerationJobInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-generation-job-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_generation_jobs
+    (id,customer_id,content_idea_id,job_type,provider_key,request_note,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeOptionalText(input.contentIdeaId),
+    validateEnum("jobType", input.jobType, socialAutomationGenerationJobTypes),
+    validateEnum("providerKey", input.providerKey, ["openai", "nvidia", "manual"] as const),
+    normalizeRequiredText("requestNote", input.requestNote),
+    validateEnum("status", input.status ?? "QUEUED", socialAutomationGenerationJobStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,content_idea_id AS contentIdeaId,job_type AS jobType,provider_key AS providerKey,
+      request_note AS requestNote,status,created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,
+      updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_generation_jobs WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationComplianceItem(database: Database.Database, input: SocialAutomationComplianceItemInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-compliance-item-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_compliance_items
+    (id,source_type,source_id,title,notes,risk_level,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    validateEnum("sourceType", input.sourceType, socialAutomationSourceTypes),
+    normalizeOptionalText(input.sourceId),
+    normalizeRequiredText("title", input.title),
+    normalizeOptionalText(input.notes),
+    validateEnum("riskLevel", input.riskLevel ?? "MEDIUM", ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const),
+    validateEnum("status", input.status ?? "OPEN", socialAutomationComplianceItemStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,source_type AS sourceType,source_id AS sourceId,title,notes,risk_level AS riskLevel,status,
+      created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_compliance_items WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationPublishingTask(database: Database.Database, input: SocialAutomationPublishingTaskInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-publishing-task-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_publishing_tasks
+    (id,source_type,source_id,platform_key,title,notes,scheduled_for,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    validateEnum("sourceType", input.sourceType, socialAutomationSourceTypes),
+    normalizeOptionalText(input.sourceId),
+    validateEnum("platformKey", input.platformKey, socialAutomationPublishingPlatformKeys),
+    normalizeRequiredText("title", input.title),
+    normalizeOptionalText(input.notes),
+    normalizeOptionalText(input.scheduledFor),
+    validateEnum("status", input.status ?? "DRAFT", socialAutomationPublishingTaskStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,source_type AS sourceType,source_id AS sourceId,platform_key AS platformKey,title,notes,scheduled_for AS scheduledFor,status,
+      created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_publishing_tasks WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationMetaAdsIntake(database: Database.Database, input: SocialAutomationMetaAdsIntakeInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-meta-ads-intake-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_meta_ads_intakes
+    (id,customer_id,campaign_name,objective,notes,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeRequiredText("campaignName", input.campaignName),
+    normalizeOptionalText(input.objective),
+    normalizeOptionalText(input.notes),
+    validateEnum("status", input.status ?? "INTAKE_READY", socialAutomationIntakeStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,campaign_name AS campaignName,objective,notes,status,created_by_user_id AS createdByUserId,
+      updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_meta_ads_intakes WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationBrandCampaignIntake(database: Database.Database, input: SocialAutomationBrandCampaignIntakeInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-brand-campaign-intake-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_brand_campaign_intakes
+    (id,customer_id,campaign_name,objective,notes,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeRequiredText("campaignName", input.campaignName),
+    normalizeOptionalText(input.objective),
+    normalizeOptionalText(input.notes),
+    validateEnum("status", input.status ?? "INTAKE_READY", socialAutomationIntakeStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,campaign_name AS campaignName,objective,notes,status,created_by_user_id AS createdByUserId,
+      updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_brand_campaign_intakes WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationCreditLedgerEntry(database: Database.Database, input: SocialAutomationCreditLedgerEntryInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-credit-ledger-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_credit_ledger
+    (id,customer_id,entry_type,amount_cents,currency_code,note,status,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    validateEnum("entryType", input.entryType, socialAutomationCreditLedgerEntryTypes),
+    Math.trunc(input.amountCents),
+    normalizeRequiredText("currencyCode", input.currencyCode ?? "INR"),
+    normalizeOptionalText(input.note),
+    validateEnum("status", input.status ?? "DRAFT", socialAutomationCreditLedgerStatuses),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,entry_type AS entryType,amount_cents AS amountCents,currency_code AS currencyCode,note,status,
+      created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_credit_ledger WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationSupportTicket(database: Database.Database, input: SocialAutomationSupportTicketInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-support-ticket-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_support_tickets
+    (id,customer_id,title,summary,channel,priority,status,notes,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeRequiredText("title", input.title),
+    normalizeRequiredText("summary", input.summary),
+    normalizeRequiredText("channel", input.channel),
+    validateEnum("priority", input.priority ?? "MEDIUM", socialAutomationSupportTicketPriorities),
+    validateEnum("status", input.status ?? "OPEN", socialAutomationSupportTicketStatuses),
+    normalizeOptionalText(input.notes),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,title,summary,channel,priority,status,notes,created_by_user_id AS createdByUserId,
+      updated_by_user_id AS updatedByUserId,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_support_tickets WHERE id=?`).get(id);
+}
+
+export function createSocialAutomationAnalyticsEvent(database: Database.Database, input: SocialAutomationAnalyticsEventInput) {
+  const timestamp = input.now ?? new Date().toISOString();
+  assertActiveBusinessUser(database, input.actorUserId);
+  const id = `social-automation-analytics-event-${timestamp.replace(/[^0-9A-Za-z]/g, "")}-${Math.random().toString(36).slice(2, 10)}`;
+  database.prepare(`INSERT INTO social_automation_analytics_events
+    (id,customer_id,event_key,event_name,event_status,source_type,source_id,event_value,notes,created_by_user_id,updated_by_user_id,created_at,updated_at,archived_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+    id,
+    normalizeOptionalText(input.customerId),
+    normalizeRequiredText("eventKey", input.eventKey),
+    normalizeRequiredText("eventName", input.eventName),
+    validateEnum("status", input.status ?? "EMPTY_STATE", socialAutomationAnalyticsEventStatuses),
+    input.sourceType ? validateEnum("sourceType", input.sourceType, socialAutomationSourceTypes) : null,
+    normalizeOptionalText(input.sourceId),
+    normalizeOptionalText(input.eventValue),
+    normalizeOptionalText(input.notes),
+    input.actorUserId,
+    input.actorUserId,
+    timestamp,
+    timestamp
+  );
+  return database.prepare(`SELECT id,customer_id AS customerId,event_key AS eventKey,event_name AS eventName,event_status AS eventStatus,source_type AS sourceType,
+      source_id AS sourceId,event_value AS eventValue,notes,created_by_user_id AS createdByUserId,updated_by_user_id AS updatedByUserId,
+      created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt
+    FROM social_automation_analytics_events WHERE id=?`).get(id);
+}
+
+export function getSocialAutomationSummary(database: Database.Database) {
+  return {
+    counts: {
+      customers: countActive(database, "social_automation_customers"),
+      contentIdeas: countActive(database, "social_automation_content_ideas"),
+      generationJobs: countActive(database, "social_automation_generation_jobs"),
+      complianceItems: countActive(database, "social_automation_compliance_items"),
+      publishingTasks: countActive(database, "social_automation_publishing_tasks"),
+      metaAdsIntakes: countActive(database, "social_automation_meta_ads_intakes"),
+      brandCampaigns: countActive(database, "social_automation_brand_campaign_intakes"),
+      creditLedgerEntries: countActive(database, "social_automation_credit_ledger"),
+      supportTickets: countActive(database, "social_automation_support_tickets"),
+      analyticsEvents: countActive(database, "social_automation_analytics_events")
+    },
+    recent: getSocialAutomationIntakes(database)
+  };
+}
+
+export function getSocialAutomationIntakes(database: Database.Database) {
+  return {
+    customers: database.prepare(`SELECT id,record_type AS recordType,display_name AS displayName,company_name AS companyName,source_channel AS sourceChannel,status,notes,
+        created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_customers WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    contentIdeas: database.prepare(`SELECT id,customer_id AS customerId,title,summary,content_format AS contentFormat,source_channel AS sourceChannel,status,
+        created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_content_ideas WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    generationJobs: database.prepare(`SELECT id,customer_id AS customerId,content_idea_id AS contentIdeaId,job_type AS jobType,provider_key AS providerKey,request_note AS requestNote,status,
+        created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_generation_jobs WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    complianceItems: database.prepare(`SELECT id,source_type AS sourceType,source_id AS sourceId,title,notes,risk_level AS riskLevel,status,created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_compliance_items WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    publishingTasks: database.prepare(`SELECT id,source_type AS sourceType,source_id AS sourceId,platform_key AS platformKey,title,notes,scheduled_for AS scheduledFor,status,
+        created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_publishing_tasks WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    metaAdsIntakes: database.prepare(`SELECT id,customer_id AS customerId,campaign_name AS campaignName,objective,notes,status,created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_meta_ads_intakes WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    brandCampaignIntakes: database.prepare(`SELECT id,customer_id AS customerId,campaign_name AS campaignName,objective,notes,status,created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_brand_campaign_intakes WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    creditLedgerEntries: database.prepare(`SELECT id,customer_id AS customerId,entry_type AS entryType,amount_cents AS amountCents,currency_code AS currencyCode,note,status,
+        created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_credit_ledger WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    supportTickets: database.prepare(`SELECT id,customer_id AS customerId,title,summary,channel,priority,status,notes,created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_support_tickets WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all(),
+    analyticsEvents: database.prepare(`SELECT id,customer_id AS customerId,event_key AS eventKey,event_name AS eventName,event_status AS eventStatus,source_type AS sourceType,
+        source_id AS sourceId,event_value AS eventValue,notes,created_at AS createdAt,updated_at AS updatedAt
+      FROM social_automation_analytics_events WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 10`).all()
+  };
+}
+
+function countActive(database: Database.Database, table: string) {
+  return (database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE archived_at IS NULL`).get() as { count: number }).count;
 }
 
 export function listBuildMissionQaDashboardItems(database: Database.Database) {

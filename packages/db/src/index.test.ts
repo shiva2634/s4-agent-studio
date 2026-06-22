@@ -253,6 +253,102 @@ describe("database initialization", () => {
     }
   });
 
+  it("creates Social Automation Studio backend tables and stores safe starter records", async () => {
+    const db = new Database(":memory:");
+    try {
+      const {
+        createSocialAutomationContentIdea,
+        createSocialAutomationCreditLedgerEntry,
+        createSocialAutomationCustomerLead,
+        createSocialAutomationMetaAdsIntake,
+        createSocialAutomationSupportTicket,
+        getSocialAutomationSummary,
+        initializeDatabaseOn
+      } = await loadInitializer();
+      initializeDatabaseOn(db);
+
+      for (const tableName of [
+        "social_automation_customers",
+        "social_automation_content_ideas",
+        "social_automation_generation_jobs",
+        "social_automation_compliance_items",
+        "social_automation_publishing_tasks",
+        "social_automation_meta_ads_intakes",
+        "social_automation_brand_campaign_intakes",
+        "social_automation_credit_ledger",
+        "social_automation_support_tickets",
+        "social_automation_analytics_events"
+      ]) {
+        const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
+        assert.ok(table, `${tableName} should exist`);
+      }
+
+      const emptySummary = getSocialAutomationSummary(db) as { counts: Record<string, number>; recent: Record<string, unknown[]> };
+      assert.deepEqual(emptySummary.counts, {
+        customers: 0,
+        contentIdeas: 0,
+        generationJobs: 0,
+        complianceItems: 0,
+        publishingTasks: 0,
+        metaAdsIntakes: 0,
+        brandCampaigns: 0,
+        creditLedgerEntries: 0,
+        supportTickets: 0,
+        analyticsEvents: 0
+      });
+
+      const customer = createSocialAutomationCustomerLead(db, {
+        displayName: "Lead Contact",
+        companyName: "Shrinika Technologies",
+        sourceChannel: "internal",
+        actorUserId: "business-user-shrinika"
+      }) as { id: string; recordType: string; status: string };
+      assert.equal(customer.recordType, "LEAD");
+      assert.equal(customer.status, "NEW");
+
+      const contentIdea = createSocialAutomationContentIdea(db, {
+        customerId: customer.id,
+        title: "Governed content idea",
+        summary: "Placeholder content idea only.",
+        actorUserId: "business-user-shrinika"
+      }) as { status: string };
+      assert.equal(contentIdea.status, "INTAKE_READY");
+
+      const metaAds = createSocialAutomationMetaAdsIntake(db, {
+        customerId: customer.id,
+        campaignName: "Governed Meta Ads intake",
+        actorUserId: "business-user-shrinika"
+      }) as { status: string };
+      assert.equal(metaAds.status, "INTAKE_READY");
+
+      const supportTicket = createSocialAutomationSupportTicket(db, {
+        customerId: customer.id,
+        title: "Support placeholder",
+        summary: "Internal-only support record.",
+        channel: "website",
+        actorUserId: "business-user-shrinika"
+      }) as { status: string };
+      assert.equal(supportTicket.status, "OPEN");
+
+      const creditLedger = createSocialAutomationCreditLedgerEntry(db, {
+        customerId: customer.id,
+        entryType: "ALLOCATION",
+        amountCents: 0,
+        actorUserId: "business-user-shrinika"
+      }) as { status: string };
+      assert.equal(creditLedger.status, "DRAFT");
+
+      const populatedSummary = getSocialAutomationSummary(db) as { counts: Record<string, number> };
+      assert.equal(populatedSummary.counts.customers, 1);
+      assert.equal(populatedSummary.counts.contentIdeas, 1);
+      assert.equal(populatedSummary.counts.metaAdsIntakes, 1);
+      assert.equal(populatedSummary.counts.creditLedgerEntries, 1);
+      assert.equal(populatedSummary.counts.supportTickets, 1);
+    } finally {
+      db.close();
+    }
+  });
+
   it("keeps external client users separate from internal permissions", async () => {
     const db = new Database(":memory:");
     try {

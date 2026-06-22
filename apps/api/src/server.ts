@@ -38,6 +38,7 @@ import { SelfBuildReadinessError, convertApprovedBuildMission, createBuildMissio
 import { registerBusinessAuthRoutes } from "./business-auth.js";
 import { registerBusinessControlCentreRoutes } from "./business-control-centre-routes.js";
 import { registerBusinessProjectIntakeRoutes } from "./business-project-intake-routes.js";
+import { registerSocialAutomationRoutes } from "./social-automation-routes.js";
 import { registerBuildMissionQueueRoutes } from "./build-mission-queue-routes.js";
 import { registerBuildMissionExecutionRoutes } from "./build-mission-execution-routes.js";
 import { registerBuildMissionQaRoutes } from "./build-mission-qa-routes.js";
@@ -102,6 +103,7 @@ app.get("/health", async () => ({ status: "ok", service: "s4-agent-studio-api", 
 registerBusinessAuthRoutes(app);
 registerBusinessControlCentreRoutes(app);
 registerBusinessProjectIntakeRoutes(app);
+registerSocialAutomationRoutes(app);
 registerBuildMissionQueueRoutes(app);
 registerBuildMissionExecutionRoutes(app);
 registerBuildMissionQaRoutes(app);
