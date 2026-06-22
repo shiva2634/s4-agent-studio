@@ -248,6 +248,7 @@ function findActiveAppStudioProject() {
 
 function targetModuleForIntake(intake: IntakeForHandoff): BuildMissionTarget {
   const text = `${intake.projectName} ${intake.shortSummary} ${intake.coreModulesRequired ?? ""} ${intake.keyFeatures ?? ""}`.toLowerCase();
+  if (text.includes("social automation") || text.includes("social studio")) return "Social Studio";
   if (text.includes("client portal")) return "Client Portal";
   if (text.includes("business control")) return "Business Control Centre";
   if (text.includes("finance") || text.includes("billing") || text.includes("invoice")) return "Finance & Billing Studio";

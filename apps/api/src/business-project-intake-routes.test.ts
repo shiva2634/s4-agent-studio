@@ -306,9 +306,11 @@ describe("Business Control Centre project intake API", () => {
       headers: { cookie: sessionCookie }
     });
     assert.equal(handoff.statusCode, 201);
-    const handoffBody = handoff.json() as { intake: { appStudioBuildMissionId: string; workflowStatus: string }; buildMission: { id: string; status: string; approvalRequired: boolean } };
+    const handoffBody = handoff.json() as { intake: { appStudioBuildMissionId: string; workflowStatus: string }; buildMission: { id: string; status: string; approvalRequired: boolean; targetModule: string; nextAction: string } };
     assert.equal(handoffBody.buildMission.status, "DRAFT");
     assert.equal(handoffBody.buildMission.approvalRequired, true);
+    assert.equal(handoffBody.buildMission.targetModule, "Social Studio");
+    assert.equal(handoffBody.buildMission.nextAction, "REQUEST_BUILD_MISSION_APPROVAL");
     assert.equal(handoffBody.intake.workflowStatus, "TEAM_ASSIGNMENT_PENDING");
     assert.ok(!handoff.body.includes("social-automation-intake-token"));
   });
