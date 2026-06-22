@@ -14,7 +14,19 @@ export const requiredConfigNames = [
   "S4_INTERNAL_APP_ORIGIN",
   "S4_API_PUBLIC_ORIGIN",
   "S4_BACKUP_LOCATION",
-  "S4_LOG_RETENTION_DAYS"
+  "S4_LOG_RETENTION_DAYS",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_DEFAULT_MODEL",
+  "OPENAI_SCRIPT_MODEL",
+  "OPENAI_PROMPT_MODEL",
+  "NVIDIA_API_KEY",
+  "NVIDIA_BASE_URL",
+  "NVIDIA_DEFAULT_MODEL",
+  "PROVIDER_OPENAI_ENABLED",
+  "PROVIDER_NVIDIA_ENABLED",
+  "PROVIDER_DAILY_CREDIT_LIMIT",
+  "PROVIDER_REQUEST_TIMEOUT_MS"
 ];
 export const requiredBusinessAuthRoutes = [
   "/api/business-auth/login",
@@ -29,9 +41,10 @@ export const requiredBusinessControlCentreRoutes = [
 export const requiredAppStudioRoutes = [
   "/api/app-studio/internal/overview",
   "/api/app-studio/internal/build-missions",
-  "/api/app-studio/internal/security-status"
+  "/api/app-studio/internal/security-status",
+  "/api/app-studio/internal/providers/status"
 ];
-export const safeEmptySecretNames = ["AI_API_KEY", "OVI_API_KEY", "LTX_API_KEY"];
+export const safeEmptySecretNames = ["AI_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY", "OVI_API_KEY", "LTX_API_KEY"];
 
 const safePlaceholderPattern = /^(|changeme|replace-me|replace_me|placeholder|example|example-value|your-value-here)$/i;
 

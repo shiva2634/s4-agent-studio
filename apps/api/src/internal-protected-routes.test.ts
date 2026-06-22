@@ -176,12 +176,17 @@ describe("protected internal Business Control Centre and App Studio routes", () 
   });
 
   it("protects App Studio build missions and security status with app_studio permissions", async () => {
+    const missing = await app.inject({ method: "GET", url: "/api/app-studio/internal/providers/status" });
+    assert.equal(missing.statusCode, 401);
+    assert.deepEqual(missing.json(), { authenticated: false, error: "Unauthenticated" });
+
     const guardianToken = "guardian-app-studio-detail-token";
     createInternalSession("business-user-shiva", guardianToken);
 
     for (const url of [
       "/api/app-studio/internal/build-missions",
-      "/api/app-studio/internal/security-status"
+      "/api/app-studio/internal/security-status",
+      "/api/app-studio/internal/providers/status"
     ]) {
       const response = await app.inject({
         method: "GET",
@@ -191,6 +196,24 @@ describe("protected internal Business Control Centre and App Studio routes", () 
       assert.equal(response.statusCode, 200, url);
       assertNoAuthSecrets(response.body, guardianToken);
     }
+
+    const providers = await app.inject({
+      method: "GET",
+      url: "/api/app-studio/internal/providers/status",
+      headers: { cookie: cookie(guardianToken) }
+    });
+    assert.equal(providers.statusCode, 200);
+    const providerBody = providers.json() as {
+      workspace: string;
+      internalOnly: boolean;
+      providers: Array<{ providerKey: string; keyConfigured: boolean; baseUrlHostname: string; defaultModel: string; humanApprovalRequired: boolean; status: string }>;
+    };
+    assert.equal(providerBody.workspace, "App Studio");
+    assert.equal(providerBody.internalOnly, true);
+    assert.equal(providerBody.providers.length, 2);
+    assert.ok(providerBody.providers.every((provider) => typeof provider.keyConfigured === "boolean"));
+    assert.ok(providerBody.providers.every((provider) => typeof provider.baseUrlHostname === "string"));
+    assertNoAuthSecrets(providers.body, guardianToken);
   });
 
   it("returns 403 and records denied access when a valid internal user lacks permission", async () => {

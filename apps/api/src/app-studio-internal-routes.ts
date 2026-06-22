@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "@s4/db";
 import { withBusinessPermission } from "./business-auth-middleware.js";
+import { getInternalProviderStatus } from "./app-studio-provider-config.js";
 
 export function registerAppStudioInternalRoutes(app: FastifyInstance) {
   app.get("/api/app-studio/internal/overview", withBusinessPermission("app_studio.view", async (_request, _reply, context) => ({
@@ -32,6 +33,14 @@ export function registerAppStudioInternalRoutes(app: FastifyInstance) {
       deniedAccessEvents: count("denied_access_events"),
       secretRedactionEvents: count("secret_redaction_events"),
       sandboxEvents: count("sandbox_events")
+    }
+  })));
+
+  app.get("/api/app-studio/internal/providers/status", withBusinessPermission("app_studio.view", async (_request, _reply, context) => ({
+    ...getInternalProviderStatus(process.env),
+    authenticatedUser: {
+      id: context.user.id,
+      displayName: context.user.displayName
     }
   })));
 }

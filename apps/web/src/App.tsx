@@ -1,5 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { BusinessControlCentre } from "./BusinessControlCentre";
+import { getAppStudioProviderStatus, type AppStudioProviderStatus as AppStudioProviderStatusResponse } from "./app-studio-provider-status";
 import { getCurrentInternalUser, loginInternalUser, logoutInternalUser, unauthenticatedInternalState, type InternalAuthState } from "./internal-auth";
 import { getProjectManagementActions } from "./project-management.js";
 
@@ -286,6 +287,7 @@ function DeveloperWorkspace({ navigate, auth, authLoading, onLogout }: { navigat
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [diffs, setDiffs] = useState<Record<string, string>>({});
   const [providerStatus, setProviderStatus] = useState<ProviderStatus>();
+  const [appStudioProviderStatus, setAppStudioProviderStatus] = useState<AppStudioProviderStatusResponse | null>(null);
   const [execution, setExecution] = useState<ExecutionState>();
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -351,8 +353,10 @@ function DeveloperWorkspace({ navigate, auth, authLoading, onLogout }: { navigat
       fetch(`${API}/api/scaffold/templates`).then(r => r.json()),
       fetch(`${API}/api/permission-profiles`).then(r => r.json())
     ]);
+    const appStudioProviderData = await getAppStudioProviderStatus();
     setProjects(boot.projects); setManageableProjects(boot.manageableProjects ?? boot.projects); setAgents(boot.agents); setApprovals(approvalData.approvals); setTasks(taskData.tasks);
     setProviderStatus(providerData);
+    setAppStudioProviderStatus(appStudioProviderData);
     setAuditEvents(auditData.events);
     setScaffoldTemplates(scaffoldData.templates ?? []);
     setPermissionProfiles(profileData.profiles ?? []);
@@ -381,6 +385,11 @@ function DeveloperWorkspace({ navigate, auth, authLoading, onLogout }: { navigat
     }
   }
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    if (auth.authenticated) {
+      void refresh();
+    }
+  }, [auth.authenticated]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ block: "end" }); }, [messages]);
   useEffect(() => {
     if (!selectedTaskId) {
@@ -776,8 +785,31 @@ function DeveloperWorkspace({ navigate, auth, authLoading, onLogout }: { navigat
         <div className="agent-stack">{agents.map(agent => <div key={agent.id} className={`agent-row ${agent.id === "developer" ? "active" : ""}`}><span>{agent.name}</span><small>{agent.role} - {agent.status}</small></div>)}</div>
         <h3>Specialist registry</h3>
         <div className="agent-stack">{agents.filter(agent=>agent.id!=="developer").map(agent=><div className="mini agent-mini" key={`registry-${agent.id}`}><span>{agent.name}</span><small>{agent.role}</small><small>{parseJsonArray<string>(agent.capabilitiesJson ?? null).join(", ") || "No capabilities"}</small><small>Tools: {parseJsonArray<string>(agent.allowedToolsJson ?? null).join(", ") || "none"}</small></div>)}</div>
-        <h3>Provider</h3>
+        <h3>Code proposal provider</h3>
         {providerStatus&&<div className="provider-box compact-provider"><strong>{providerStatus.configured?"Configured":"Not configured"}</strong><small>{providerStatus.provider} - {providerStatus.model||"no model"}</small><span className={`risk ${providerStatus.status==="ok"?"low":providerStatus.status==="error"?"critical":"medium"}`}>{providerStatus.status}</span>{providerStatus.sanitizedError&&<p className="error">{providerStatus.sanitizedError}</p>}<button className="secondary" onClick={()=>void testProvider()}>Test connection</button></div>}
+        <h3>App Studio providers</h3>
+        {appStudioProviderStatus ? (
+          <div className="provider-stack">
+            <p className="muted">{appStudioProviderStatus.summary}</p>
+            {appStudioProviderStatus.warnings.length ? <p className="notice">{appStudioProviderStatus.warnings[0]}</p> : null}
+            {appStudioProviderStatus.providers.map(provider => (
+              <div className="provider-box compact-provider" key={provider.providerKey}>
+                <strong>{provider.displayName}</strong>
+                <small>Enabled: {provider.enabled ? "yes" : "no"} · Key configured: {provider.keyConfigured ? "yes" : "no"}</small>
+                <small>Base URL configured: {provider.baseUrlHostname ? "yes" : "no"} · {provider.baseUrlHostname || "not configured"}</small>
+                <small>Default model configured: {provider.defaultModel ? "yes" : "no"} · {provider.defaultModel || "not configured"}</small>
+                {provider.providerKey === "openai" && (
+                  <small>Script model: {provider.scriptModel || "not configured"} · Prompt model: {provider.promptModel || "not configured"}</small>
+                )}
+                <small>Use cases: {provider.plannedUses.join(", ") || provider.useCases.join(", ") || "not configured"}</small>
+                <small>Human approval: {provider.humanApprovalRequired ? "required" : "not required"}</small>
+                <small>Daily limit: {provider.dailyCreditLimit !== null ? provider.dailyCreditLimit : "not configured"}</small>
+                <span className={`risk ${provider.status==="READY"?"low":provider.status==="BLOCKED"?"critical":"medium"}`}>{provider.status}</span>
+                {provider.warnings.length ? <p className="notice">{provider.warnings.join(" ")}</p> : null}
+              </div>
+            ))}
+          </div>
+        ) : <p className="muted">App Studio provider status is unavailable until an internal session is active.</p>}
       </aside>
       <section className="main-workspace">
         {notice&&<p className="success dashboard-alert">{notice}</p>}

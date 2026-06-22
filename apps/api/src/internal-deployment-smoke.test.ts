@@ -44,7 +44,8 @@ describe("internal deployment smoke script", () => {
     await fs.writeFile(path.join(root, "apps", "api", "src", "app-studio-internal-routes.ts"), [
       'app.get("/api/app-studio/internal/overview", withBusinessPermission("app_studio.view", async () => ({})));',
       'app.get("/api/app-studio/internal/build-missions", withBusinessPermission("app_studio.create", async () => ({})));',
-      'app.get("/api/app-studio/internal/security-status", withBusinessPermission("app_studio.audit", async () => ({})));'
+      'app.get("/api/app-studio/internal/security-status", withBusinessPermission("app_studio.audit", async () => ({})));',
+      'app.get("/api/app-studio/internal/providers/status", withBusinessPermission("app_studio.view", async () => ({})));'
     ].join("\n"));
     await fs.writeFile(path.join(root, "apps", "api", "src", "business-auth.ts"), [
       'app.post("/api/business-auth/login", async () => ({}));',
@@ -69,6 +70,18 @@ describe("internal deployment smoke script", () => {
       "S4_API_PUBLIC_ORIGIN=",
       "S4_BACKUP_LOCATION=",
       "S4_LOG_RETENTION_DAYS=",
+      "OPENAI_API_KEY=",
+      "OPENAI_BASE_URL=https://api.openai.com/v1",
+      "OPENAI_DEFAULT_MODEL=",
+      "OPENAI_SCRIPT_MODEL=",
+      "OPENAI_PROMPT_MODEL=",
+      "NVIDIA_API_KEY=",
+      "NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1",
+      "NVIDIA_DEFAULT_MODEL=",
+      "PROVIDER_OPENAI_ENABLED=false",
+      "PROVIDER_NVIDIA_ENABLED=false",
+      "PROVIDER_DAILY_CREDIT_LIMIT=",
+      "PROVIDER_REQUEST_TIMEOUT_MS=30000",
       "AI_API_KEY=sk-live-very-secret",
       "OVI_API_KEY=ovi-top-secret",
       "LTX_API_KEY=ltx-top-secret"
