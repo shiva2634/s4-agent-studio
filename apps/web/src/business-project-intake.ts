@@ -76,8 +76,18 @@ type HandoffResponse = {
   error?: string;
 };
 
-function projectIntakeUrl(path: string) {
-  return `${getInternalAuthApiBase()}${path}`;
+type ArchiveResponse = {
+  intake?: BusinessProjectIntake;
+  error?: string;
+};
+
+function projectIntakeUrl(path: string, query?: Record<string, string | boolean | undefined>) {
+  const url = new URL(`${getInternalAuthApiBase()}${path}`);
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value === undefined) continue;
+    url.searchParams.set(key, String(value));
+  }
+  return url.toString();
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -90,8 +100,8 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function listBusinessProjectIntakes(): Promise<BusinessProjectIntake[]> {
-  const response = await fetch(projectIntakeUrl("/api/business-control-centre/project-intakes"), {
+export async function listBusinessProjectIntakes(options: { includeArchived?: boolean } = {}): Promise<BusinessProjectIntake[]> {
+  const response = await fetch(projectIntakeUrl("/api/business-control-centre/project-intakes", options.includeArchived ? { includeArchived: true } : undefined), {
     credentials: "include"
   });
   if (!response.ok) throw new Error("Unable to load project intakes");
@@ -108,6 +118,16 @@ export async function createBusinessProjectIntake(payload: BusinessProjectIntake
   });
   const body = await readJson(response) as IntakeResponse;
   if (!response.ok || !body.intake) throw new Error(typeof body.error === "string" ? body.error : "Unable to create project intake");
+  return body.intake;
+}
+
+export async function archiveBusinessProjectIntake(id: string): Promise<BusinessProjectIntake> {
+  const response = await fetch(projectIntakeUrl(`/api/business-control-centre/project-intakes/${encodeURIComponent(id)}/archive`), {
+    method: "POST",
+    credentials: "include"
+  });
+  const body = await readJson(response) as ArchiveResponse;
+  if (!response.ok || !body.intake) throw new Error(typeof body.error === "string" ? body.error : "Unable to archive project intake");
   return body.intake;
 }
 

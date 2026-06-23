@@ -46,6 +46,10 @@ describe("provider status route", () => {
     process.env.OPENAI_API_KEY = "openai-live-secret";
     process.env.OPENAI_DEFAULT_MODEL = "gpt-5.5";
     process.env.OPENAI_BASE_URL = "https://api.openai.com/v1";
+    delete process.env.PROVIDER_NVIDIA_ENABLED;
+    delete process.env.NVIDIA_API_KEY;
+    delete process.env.NVIDIA_BASE_URL;
+    delete process.env.NVIDIA_DEFAULT_MODEL;
     const response = await app.inject({ method: "GET", url: "/api/providers/status" });
     assert.equal(response.statusCode, 200);
     const body = response.json() as { provider: string; configured: boolean; configSource: string; blockers: string[]; keyConfigured: boolean; model: string };
@@ -63,6 +67,10 @@ describe("provider status route", () => {
     process.env.PROVIDER_OPENAI_ENABLED = "true";
     process.env.OPENAI_API_KEY = "openai-live-secret";
     delete process.env.OPENAI_DEFAULT_MODEL;
+    delete process.env.PROVIDER_NVIDIA_ENABLED;
+    delete process.env.NVIDIA_API_KEY;
+    delete process.env.NVIDIA_BASE_URL;
+    delete process.env.NVIDIA_DEFAULT_MODEL;
     const response = await app.inject({ method: "GET", url: "/api/providers/status" });
     assert.equal(response.statusCode, 200);
     const body = response.json() as { provider: string; configured: boolean; configSource: string; blockers: string[] };

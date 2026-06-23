@@ -315,6 +315,66 @@ describe("Business Control Centre project intake API", () => {
     assert.ok(!handoff.body.includes("social-automation-intake-token"));
   });
 
+  it("archives the Social Automation Studio intake safely and idempotently", async () => {
+    const sessionCookie = createInternalSession("business-user-shrinika", "social-automation-deregister-token");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie },
+      payload: socialAutomationStudioPhase1MvpShellPayload
+    });
+    assert.equal(created.statusCode, 201);
+    const intakeId = (created.json() as { intake: { id: string } }).intake.id;
+
+    const archived = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/archive`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(archived.statusCode, 200);
+    assert.equal((archived.json() as { intake: { archivedAt: string | null } }).intake.archivedAt !== null, true);
+
+    const repeated = await app.inject({
+      method: "POST",
+      url: `/api/business-control-centre/project-intakes/${intakeId}/archive`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(repeated.statusCode, 200);
+    assert.equal((repeated.json() as { intake: { id: string; archivedAt: string | null } }).intake.id, intakeId);
+    assert.equal((repeated.json() as { intake: { archivedAt: string | null } }).intake.archivedAt !== null, true);
+
+    const activeList = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/project-intakes",
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(activeList.statusCode, 200);
+    const activeIntakes = (activeList.json() as { intakes: Array<{ id: string }> }).intakes;
+    assert.equal(activeIntakes.some((intake) => intake.id === intakeId), false);
+
+    const archivedList = await app.inject({
+      method: "GET",
+      url: "/api/business-control-centre/project-intakes?includeArchived=true",
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(archivedList.statusCode, 200);
+    const archivedIntakes = (archivedList.json() as { intakes: Array<{ id: string; archivedAt: string | null }> }).intakes;
+    assert.equal(archivedIntakes.filter((intake) => intake.id === intakeId).length, 1);
+    assert.equal(archivedIntakes.find((intake) => intake.id === intakeId)?.archivedAt !== null, true);
+
+    const sourceFiles = [
+      path.resolve(process.cwd(), "..", "..", "apps/web/src/BusinessControlCentre.tsx"),
+      path.resolve(process.cwd(), "..", "..", "apps/web/src/social-automation-summary.ts"),
+      path.resolve(process.cwd(), "..", "..", "apps/api/src/social-automation-routes.ts")
+    ];
+    for (const sourceFile of sourceFiles) {
+      await fs.access(sourceFile);
+    }
+
+    const archivedEvents = db.prepare("SELECT COUNT(*) AS count FROM business_project_prd_events WHERE project_intake_id=? AND event_type='PROJECT_INTAKE_ARCHIVED'").get(intakeId) as { count: number };
+    assert.equal(archivedEvents.count, 1);
+  });
+
   it("rejects ineligible and duplicate handoffs safely", async () => {
     insertActiveAppStudioProject("project-app-studio-handoff-2");
     const sessionCookie = createInternalSession("business-user-shrinika", "project-intake-handoff-validation-token");

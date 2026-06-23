@@ -66,7 +66,7 @@ import {
   rejectBuildMissionDeploymentApproval,
   type BuildMissionDeploymentApprovalDashboardItem
 } from "./build-mission-deployment-approval";
-import { createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, socialAutomationStudioPhase1MvpShellIntakePayload, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
+import { archiveBusinessProjectIntake, createBuildMissionFromProjectIntake, createBusinessProjectIntake, listBusinessProjectIntakes, socialAutomationStudioPhase1MvpShellIntakePayload, type BusinessProjectIntake, type BusinessProjectIntakePayload } from "./business-project-intake";
 import { getSocialAutomationSummary, type SocialAutomationSummary } from "./social-automation-summary";
 import type { InternalAuthState } from "./internal-auth";
 import { getDeploymentHardeningStatus, type DeploymentHardeningStatus } from "./deployment-hardening";
@@ -1260,6 +1260,11 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
   const [projectIntakeHandoffSaving, setProjectIntakeHandoffSaving] = useState(false);
   const [projectIntakeMessage, setProjectIntakeMessage] = useState("");
   const [projectIntakeError, setProjectIntakeError] = useState("");
+  const [socialAutomationIntake, setSocialAutomationIntake] = useState<BusinessProjectIntake | null>(null);
+  const [socialAutomationIntakeLoading, setSocialAutomationIntakeLoading] = useState(false);
+  const [socialAutomationIntakeSaving, setSocialAutomationIntakeSaving] = useState(false);
+  const [socialAutomationIntakeMessage, setSocialAutomationIntakeMessage] = useState("");
+  const [socialAutomationIntakeError, setSocialAutomationIntakeError] = useState("");
   const [buildMissionQueue, setBuildMissionQueue] = useState<BuildMissionQueueItem[]>([]);
   const [selectedBuildMissionId, setSelectedBuildMissionId] = useState("");
   const [buildMissionQueueLoading, setBuildMissionQueueLoading] = useState(false);
@@ -1335,6 +1340,28 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       })
       .finally(() => {
         if (!cancelled) setProjectIntakeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection.id]);
+
+  useEffect(() => {
+    if (activeSection.id !== "create-project-prd" && activeSection.id !== "social-automation-studio") return;
+    let cancelled = false;
+    setSocialAutomationIntakeLoading(true);
+    setSocialAutomationIntakeError("");
+    listBusinessProjectIntakes({ includeArchived: true })
+      .then(intakes => {
+        if (cancelled) return;
+        const intake = intakes.find(item => item.projectName === socialAutomationStudioPhase1MvpShellIntakePayload.projectName) ?? null;
+        setSocialAutomationIntake(intake);
+      })
+      .catch(error => {
+        if (!cancelled) setSocialAutomationIntakeError(error instanceof Error ? error.message : "Unable to load Social Automation project status");
+      })
+      .finally(() => {
+        if (!cancelled) setSocialAutomationIntakeLoading(false);
       });
     return () => {
       cancelled = true;
@@ -1746,6 +1773,11 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
     }
   };
   const handleCreateSocialAutomationStudioIntake = async () => {
+    if (socialAutomationIntake?.archivedAt) {
+      setProjectIntakeMessage("Social Automation Studio is deregistered and cannot be recreated from this shortcut.");
+      setProjectIntakeError("");
+      return;
+    }
     const existingIntake = projectIntakes.find(intake => intake.projectName === socialAutomationStudioPhase1MvpShellIntakePayload.projectName);
     if (existingIntake) {
       setSelectedProjectIntakeId(existingIntake.id);
@@ -1765,6 +1797,23 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
       setProjectIntakeError(error instanceof Error ? error.message : "Unable to create Social Automation Studio intake");
     } finally {
       setProjectIntakeSaving(false);
+    }
+  };
+  const handleDeregisterSocialAutomationStudio = async () => {
+    if (!socialAutomationIntake || socialAutomationIntake.archivedAt) return;
+    setSocialAutomationIntakeSaving(true);
+    setSocialAutomationIntakeMessage("");
+    setSocialAutomationIntakeError("");
+    try {
+      const archived = await archiveBusinessProjectIntake(socialAutomationIntake.id);
+      setSocialAutomationIntake(archived);
+      setProjectIntakes(current => current.filter(intake => intake.id !== archived.id));
+      setSelectedProjectIntakeId(current => current === archived.id ? "" : current);
+      setSocialAutomationIntakeMessage(`Social Automation Studio was deregistered on ${archived.archivedAt ?? "the current session"}.`);
+    } catch (error) {
+      setSocialAutomationIntakeError(error instanceof Error ? error.message : "Unable to deregister Social Automation Studio");
+    } finally {
+      setSocialAutomationIntakeSaving(false);
     }
   };
   const handleProjectIntakeHandoff = async () => {
@@ -2693,6 +2742,35 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
               <strong>Internal dashboard boundary</strong>
               <p>This shell is internal only. Customers stay on the separate website, email, support, payments, and future client portal. No live integrations, publishing, payment automation, or external API calls are executed from this page.</p>
             </div>
+            <div className="business-boundary-notice">
+              <strong>Deregistration boundary</strong>
+              <p>This archives active project tracking only. It does not delete source files.</p>
+            </div>
+            {socialAutomationIntakeLoading ? <p>Loading Social Automation registration status...</p> : null}
+            {socialAutomationIntakeError ? (
+              <div className="business-boundary-notice">
+                <strong>Registration status unavailable</strong>
+                <p>{socialAutomationIntakeError}</p>
+              </div>
+            ) : null}
+            {socialAutomationIntake ? (
+              <div className="recent-intake-meta">
+                <div><span>Project intake</span><strong>{socialAutomationIntake.archivedAt ? "Deregistered" : "Active"}</strong></div>
+                <div><span>Archive state</span><strong>{socialAutomationIntake.archivedAt ? "Archived" : "Live"}</strong></div>
+                <div><span>Build mission</span><strong>{socialAutomationIntake.appStudioBuildMissionId ?? "Not created"}</strong></div>
+              </div>
+            ) : null}
+            <div className="project-prd-actions">
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void handleDeregisterSocialAutomationStudio()}
+                disabled={socialAutomationIntakeSaving || !socialAutomationIntake || Boolean(socialAutomationIntake.archivedAt)}
+              >
+                {socialAutomationIntakeSaving ? "Deregistering..." : socialAutomationIntake?.archivedAt ? "Deregistered" : "Deregister Social Automation Studio"}
+              </button>
+            </div>
+            {socialAutomationIntakeMessage ? <p className="success">{socialAutomationIntakeMessage}</p> : null}
             {socialAutomationSummaryLoading ? <p>Loading real Social Automation summary counts...</p> : null}
             {socialAutomationSummaryError ? (
               <div className="business-boundary-notice">
@@ -2724,7 +2802,11 @@ export function BusinessControlCentre({ navigate, auth, onLogout }: { navigate: 
                 </article>
               ))}
             </div>
-            <EmptyStateSection id="social-automation-studio-empty" title="Social Automation Studio" description="No real records yet. Use the backend-connected workflow sections for real records." />
+            <EmptyStateSection
+              id="social-automation-studio-empty"
+              title="Social Automation Studio"
+              description={socialAutomationIntake?.archivedAt ? "This project is deregistered. Use the backend-connected workflow sections for historical records only." : "No real records yet. Use the backend-connected workflow sections for real records."}
+            />
           </section>
           ) : null}
 

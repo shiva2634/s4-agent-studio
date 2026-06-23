@@ -740,6 +740,9 @@ describe("database initialization", () => {
       const archived = archiveBusinessProjectIntake(db, created.id, "business-user-shrinika", "2026-01-01T00:20:00.000Z") as { id: string; archivedAt: string | null };
       assert.equal(archived.id, created.id);
       assert.equal(archived.archivedAt, "2026-01-01T00:20:00.000Z");
+      const repeatedArchive = archiveBusinessProjectIntake(db, created.id, "business-user-shrinika", "2026-01-01T00:30:00.000Z") as { id: string; archivedAt: string | null };
+      assert.equal(repeatedArchive.id, created.id);
+      assert.equal(repeatedArchive.archivedAt, "2026-01-01T00:20:00.000Z");
       assert.equal(getBusinessProjectIntakeById(db, created.id), undefined);
       assert.equal((listBusinessProjectIntakes(db) as unknown[]).length, 0);
       assert.equal((listBusinessProjectIntakes(db, { includeArchived: true }) as unknown[]).length, 1);

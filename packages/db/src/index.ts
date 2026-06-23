@@ -2905,8 +2905,11 @@ export function updateBusinessProjectIntake(database: Database.Database, id: str
 
 export function archiveBusinessProjectIntake(database: Database.Database, id: string, actorUserId: string, now = new Date().toISOString()) {
   assertActiveBusinessUser(database, actorUserId);
-  const existing = getBusinessProjectIntakeById(database, id);
+  const existing = getBusinessProjectIntakeById(database, id, { includeArchived: true });
   if (!existing) throw new Error("Project intake not found");
+  if (existing.archivedAt) {
+    return existing;
+  }
   const transaction = database.transaction(() => {
     database.prepare("UPDATE business_project_intakes SET archived_at=?,updated_by_user_id=?,updated_at=? WHERE id=? AND archived_at IS NULL")
       .run(now, actorUserId, now, id);
