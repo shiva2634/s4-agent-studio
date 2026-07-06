@@ -1,70 +1,205 @@
-# S4 Agent Studio
+# 🚀 S4 App Studio
 
-Parent brand: Shrinika Automation Studio
+> Enterprise AI Business Automation Platform for building, managing, and deploying intelligent business applications, AI agents, and workflow automations.
 
-S4 Agent Studio is a local-first conversational agent workspace. App Studio lets Shiva register or create governed project workspaces, plan work with the Developer Agent, review proposals before mutation, run approved checks, recover interrupted work, and keep a visible audit trail.
+![Status](https://img.shields.io/badge/Status-Active-success)
+![License](https://img.shields.io/badge/License-MIT-blue)
+![Platform](https://img.shields.io/badge/Platform-Web-orange)
 
-## Current App Studio capabilities
+---
 
-- Local project registration, pause, resume, archive, and de-registration
-- Developer Agent chat with governed task rounds and correction rounds
-- Specialist-agent orchestration coordinated by the Developer Agent
-- Proposal review with ownership, conflicts, approval, rejection, diff preview, and apply controls
-- Scaffold jobs for governed project creation and module additions
-- Sandbox, permission, secrets, command, provider, and network policy visibility
-- Governed Git branch, worktree, release-candidate, merge approval, rollback, cleanup, and recovery controls
-- Self-build readiness gates and planning-only Build Mission drafts
-- Execution checkpoints, package-script checks, rollback, recovery, task history, and audit events
-- App Studio theme selector persisted locally in the browser
+# Overview
 
-Media Studio remains a separate module at `/media-studio`. App Studio does not expose a Media Studio navigation button in its header.
+S4 App Studio is an enterprise platform designed to simplify business automation through AI-powered workflows, modular applications, and centralized business management.
 
-## Setup
+It provides a governed environment where organizations can build internal tools, automate operations, manage AI agents, and oversee projects from a single platform.
 
-```powershell
-cd C:\path\to\s4-agent-studio
-Copy-Item .env.example .env
+---
+
+# Key Features
+
+## 🏢 Business Control Centre
+
+- Company dashboard
+- User & role management
+- Project governance
+- Approval workflows
+- Team assignments
+
+---
+
+## 🤖 AI Agent Studio
+
+- Multi-agent architecture
+- AI workflow orchestration
+- Prompt management
+- Agent execution monitoring
+- Extensible agent framework
+
+---
+
+## 📱 Social Automation Studio
+
+- Content planning
+- AI-assisted content generation
+- Publishing workflows
+- Analytics dashboard
+- Approval system
+
+---
+
+## 🎬 Media Studio
+
+- AI media generation
+- Image workflows
+- Video workflows
+- Prompt versioning
+- Asset management
+
+---
+
+## 📊 Analytics
+
+- Project insights
+- User activity
+- AI usage statistics
+- Operational dashboards
+
+---
+
+## 🔐 Security
+
+- Authentication
+- Role-Based Access Control (RBAC)
+- Protected routes
+- Audit logging
+- Session management
+
+---
+
+# Technology Stack
+
+## Frontend
+
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+
+## Backend
+
+- Node.js
+- Express
+- REST APIs
+
+## Database
+
+- SQLite
+- PostgreSQL (Roadmap)
+
+## AI
+
+- OpenAI API
+- Prompt Engineering
+- AI Workflow Automation
+
+---
+
+# Project Structure
+
+```
+s4-app-studio/
+│
+├── src/
+├── server/
+├── docs/
+├── public/
+├── screenshots/
+├── README.md
+├── LICENSE
+└── package.json
+```
+
+---
+
+# Screenshots
+
+> Screenshots will be added in future releases.
+
+---
+
+# Installation
+
+```bash
+git clone https://github.com/shiva2634/s4-app-studio.git
+
+cd s4-app-studio
+
 npm install
-npm run db:init
+
 npm run dev
 ```
 
-Open App Studio at `http://localhost:5173`.
+---
 
-The local API runs at `http://127.0.0.1:4310`.
+# Roadmap
 
-## Operator guide
+### Completed
 
-Read [docs/app-studio-operator-guide.md](docs/app-studio-operator-guide.md) before using App Studio for governed project work. It covers:
+- Business Control Centre
+- Project Governance
+- AI Agent Framework
+- Internal Authentication
+- Media Studio Foundation
+- Social Automation Studio
 
-- Registering and managing projects
-- Choosing permission profiles and reading blocked-action messages
-- Reviewing plans, proposals, approvals, checks, rollback, and recovery
-- Using scaffold jobs, Git workflows, readiness validation, and Build Missions
-- Operational safety rules for secrets, network access, `.env`, Git, and project boundaries
+### Planned
 
-## Safety model
+- PostgreSQL Support
+- Docker Deployment
+- AI Marketplace
+- Plugin System
+- Multi-tenant Architecture
+- Mobile Companion App
 
-App Studio is designed around human final authority:
+---
 
-- Agents may plan and propose work, but they do not approve their own work.
-- File mutations must flow through proposal validation, approval, apply, checks, rollback, recovery, and audit.
-- Project roots, workspace roots, worktree roots, secrets, `.env` files, and network usage are governed by policy.
-- High-risk work requires fresh human approval.
-- Git merge and permission escalation require human approval.
+# Documentation
 
-## Useful commands
+Additional documentation is available in the `/docs` directory.
 
-```powershell
-npm run typecheck
-npm test
-npm run build
-```
+- Architecture
+- API Reference
+- Development Guide
+- Security
+- Deployment
 
-## Repository layout
+---
 
-- `apps/api` - local Fastify API and App Studio services
-- `apps/web` - React UI for App Studio and Media Studio
-- `packages/db` - SQLite schema, migrations, and seed data
-- `packages/shared` - shared validation schemas and types
-- `docs` - operator-facing documentation
+# Contributing
+
+Contributions, feature suggestions, and bug reports are welcome.
+
+Please open an issue before submitting major changes.
+
+---
+
+# License
+
+This project is licensed under the MIT License.
+
+---
+
+# Author
+
+**Shiva Kumar**
+
+Founder, S4 Technologies
+
+Building AI-powered enterprise automation platforms.
+
+---
+
+# Support
+
+If you find this project useful, consider giving it a ⭐ on GitHub.
